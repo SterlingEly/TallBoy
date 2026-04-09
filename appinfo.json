@@ -1,0 +1,17 @@
+{
+  "uuid": "b5c2d3e4-f6a7-4890-bcde-f12345678901",
+  "shortName": "TallBoy",
+  "longName": "TallBoy",
+  "companyName": "Sterling Ely",
+  "versionLabel": "1.0",
+  "versionCode": 1,
+  "sdkVersion": "3",
+  "projectType": "native",
+  "enableMultiJS": false,
+  "watchapp": { "watchface": true },
+  "capabilities": [],
+  "targetPlatforms": [
+    "aplite", "basalt", "diorite", "emery", "flint"
+  ],
+  "appKeys": {}
+}
