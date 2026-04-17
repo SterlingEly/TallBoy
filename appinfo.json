@@ -10,7 +10,7 @@
   "enableMultiJS": false,
   "watchapp": {"watchface": true},
   "capabilities": [],
-  "targetPlatforms": ["emery", "flint"],
+  "targetPlatforms": ["emery"],
   "resources": {
     "media": [
       {"type":"png","name":"TALLBOY_01","file":"images/tallboy_0-1.png"},
