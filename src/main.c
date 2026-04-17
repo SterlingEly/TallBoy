@@ -1,93 +1,97 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v0.3
+// TallBoy — main.c  v0.4
 //
-// HH:MM watchface using Sterling Ely's custom digit font.
-// Targets: emery (200×228) and flint (144×168, vector-only).
+// HH:MM watchface — pure raster PNG digits, emery only.
+// Vector drawing removed; layout and sizing focus.
 //
-// DEMO SEQUENCE (auto, no interaction needed):
-//   5s  — show real time
-//   10s — cycle digits 0→9, 1s each, all positions in sync
-//   5s  — show real time again
-//   (then stays on real time)
+// LAYOUT (emery 200×228):
+//   Unit U = 8px. 25U = 200px exactly.
+//   Each digit slot = 5U (40px) wide, containing:
+//     4px left margin + 32px digit + 4px right margin
+//   Colon slot = 1U (8px) wide, centered
 //
-// DIGIT ASSIGNMENT (emery):
-//   H_tens (0,1) — VECTOR
-//   H_ones (0–9) — RASTER
-//   colon        — RASTER
-//   M_tens (0–5) — RASTER
-//   M_ones (0–9) — VECTOR (0,1 done; 2–9 fall back to raster)
+//   Layout (L→R):
+//     2U margin | 5U H_tens | 1U gap | 5U H_ones | 1U gap |
+//     1U colon | 1U gap | 5U M_tens | 1U gap | 5U M_ones | 2U margin
+//     = 2+5+1+5+1+1+1+5+1+5+2 = 29U ... too wide.
 //
-// FLINT: pure vector, only 0 and 1 drawn; others blank.
+//   Actual Sterling layout (confirmed from pixel files):
+//     The digit files are 40px (5U) wide and include their own
+//     4px half-margin on each side. Adjacent slots butt up together
+//     with no extra gap — the half-margins from adjacent slots create
+//     the 8px (1U) inter-digit gap naturally.
 //
-// GEOMETRY:
-//   Unit U = 8px emery, 5px flint.
-//   25U wide layout. 6 sizes: outer_h = (3+4*size)*U.
-//   Cap outer radius = 2U, inner = 1U, stroke = 1U.
+//   So layout is just: margin + 4 slots + colon slot + margin
+//   where slots are placed edge-to-edge.
+//
+//   Colon: 8px wide, positioned in the center gap between digit pairs.
+//   From pixel analysis: colon center x = 100 (screen center).
+//
+//   Slot positions (left edge of each 40px slot):
+//     H_tens: (200 - 4*40 - 8) / 2 = (200 - 168) / 2 = 16
+//     H_ones: 16 + 40 = 56
+//     [colon centered at 56+40+4 = 100, i.e. screen center]
+//     M_tens: 56 + 40 + 8 = 104   (8px colon gap)
+//     M_ones: 104 + 40 = 144
+//     Right edge: 144 + 40 = 184. Right margin = 200-184 = 16. ✓
+//
+// SIZES: 6 levels matching Sterling's asset sizes.
+//   Files are 40×228 — full screen height, digit centered vertically.
+//   The size is baked into the asset; we select the right file.
+//   For now: always use size 6 (largest, fills screen).
+//   TODO: pick size dynamically based on available vertical space.
+//
+// DEMO SEQUENCE (auto on launch):
+//   5s real time → 10s digit cycle (0-9, 1s each) → 5s real time → done
 // ============================================================
 
-#if defined(PBL_PLATFORM_EMERY)
-  #define SCREEN_W  200
-  #define SCREEN_H  228
-  #define U           8
-#else
-  #define SCREEN_W  144
-  #define SCREEN_H  168
-  #define U           5
-#endif
+#define SCREEN_W   200
+#define SCREEN_H   228
+#define SLOT_W      40   // each digit file slot width (5U)
+#define COLON_W      8   // colon gap width (1U)
 
-#define DIGIT_W      (4*U)
-#define FILE_W       (5*U)
-#define CAP_OUTER_R  (2*U)
-#define CAP_INNER_R  (1*U)
+// Horizontal slot positions (left edge of each 40px slot)
+#define SLOT_H_TENS   16
+#define SLOT_H_ONES   56
+#define SLOT_M_TENS  104
+#define SLOT_M_ONES  144
 
-#define LAYOUT_MARGIN  ((SCREEN_W - 25*U) / 2)
-#define SLOT_H_TENS    (LAYOUT_MARGIN)
-#define SLOT_H_ONES    (LAYOUT_MARGIN + FILE_W + U)
-#define SLOT_M_TENS    (LAYOUT_MARGIN + FILE_W + U + FILE_W + U + U + U)
-#define SLOT_M_ONES    (LAYOUT_MARGIN + FILE_W + U + FILE_W + U + U + U + FILE_W + U)
-#define COLON_CX       (LAYOUT_MARGIN + FILE_W + U + FILE_W + U + U/2 + (U%2))
+// Colon center x = midpoint of the 8px gap between H_ones and M_tens
+// H_ones right edge = 56+40 = 96. M_tens left edge = 104. Center = 100.
+#define COLON_CX     100
 
-#define SLOT_LEFT_X(s)  ((s) + U)
-#define SLOT_RIGHT_X(s) ((s) + 3*U)
-#define SLOT_CX(s)      ((s) + 2*U + U/2)
+// Colon slot left edge: position the 40px colon file so its internal
+// colon content (at cols 16-23 of the file = center col 19.5) lands on COLON_CX.
+// colon_slot_x = COLON_CX - 19 = 81 ... but let's think about it differently:
+// The colon file has its dots centered at x=20 within the 40px slot.
+// So slot_x = COLON_CX - 20 = 80.
+#define COLON_SLOT_X  80
 
-static int digit_outer_h(int size)    { return (3 + 4*size) * U; }
-static int digit_top_margin(int size) { return (SCREEN_H - digit_outer_h(size)) / 2; }
-
-// ============================================================
-// DEMO STATE
-// Phase 0: show real time (5s)
-// Phase 1: cycle digits 0-9 (10s = 10 × 1s)
-// Phase 2: show real time (5s), then stay
-// ============================================================
+// Demo phases
+typedef enum { PHASE_TIME_1, PHASE_CYCLE, PHASE_TIME_2, PHASE_DONE } DemoPhase;
 #define DEMO_TIME_MS   5000
 #define DEMO_DIGIT_MS  1000
-#define DEMO_DIGITS    10
-
-typedef enum { PHASE_TIME_1, PHASE_CYCLE, PHASE_TIME_2, PHASE_DONE } DemoPhase;
 
 static Window    *s_window;
 static Layer     *s_canvas_layer;
-static int        s_hour   = 0;
-static int        s_minute = 0;
-static int        s_size   = 6;
+static int        s_hour    = 0;
+static int        s_minute  = 0;
+static int        s_size    = 6;
 static GColor     s_fg, s_bg;
-static DemoPhase  s_demo_phase  = PHASE_TIME_1;
-static int        s_demo_digit  = 0;
-static AppTimer  *s_demo_timer  = NULL;
+static DemoPhase  s_demo_phase = PHASE_TIME_1;
+static int        s_demo_digit = 0;
+static AppTimer  *s_demo_timer = NULL;
 
 // ============================================================
-// RASTER (emery only)
+// BITMAPS
 // ============================================================
-#if defined(PBL_PLATFORM_EMERY)
-
 static GBitmap *s_bitmaps[10][6];
 static GBitmap *s_colon_bm[6];
 
-// digit 2: sizes 1-3 share the same design, sizes 4-5 use 2B variant.
-// Resource names: TALLBOY_<digit><size>, no separator.
+// Resource table [digit 0-9][size 1-6]
+// digit 2: sizes 1-3 are the shared style, 4-5 are 2B variant, no size 6.
 static const uint32_t s_res[10][6] = {
   { RESOURCE_ID_TALLBOY_01, RESOURCE_ID_TALLBOY_02, RESOURCE_ID_TALLBOY_03,
     RESOURCE_ID_TALLBOY_04, RESOURCE_ID_TALLBOY_05, RESOURCE_ID_TALLBOY_06 },
@@ -116,6 +120,7 @@ static const uint32_t s_colon_res[6] = {
   RESOURCE_ID_TALLBOY_COLON4, RESOURCE_ID_TALLBOY_COLON5, RESOURCE_ID_TALLBOY_COLON6,
 };
 
+// Find nearest available size, preferring exact match, then larger, then smaller
 static uint32_t find_res(int digit, int size) {
   int si = size - 1;
   if (s_res[digit][si]) return s_res[digit][si];
@@ -133,26 +138,11 @@ static GBitmap *get_bitmap(int digit, int size) {
   return s_bitmaps[digit][si];
 }
 
-static GBitmap *get_colon_bm(int size) {
+static GBitmap *get_colon(int size) {
   int si = size - 1;
   if (!s_colon_bm[si])
     s_colon_bm[si] = gbitmap_create_with_resource(s_colon_res[si]);
   return s_colon_bm[si];
-}
-
-static void draw_raster(GContext *ctx, int digit, int size, int slot_x) {
-  GBitmap *bm = get_bitmap(digit, size);
-  if (!bm) return;
-  graphics_context_set_compositing_mode(ctx, GCompOpSet);
-  graphics_draw_bitmap_in_rect(ctx, bm, GRect(slot_x, 0, FILE_W, SCREEN_H));
-}
-
-static void draw_colon_raster(GContext *ctx, int size) {
-  GBitmap *bm = get_colon_bm(size);
-  if (!bm) return;
-  int colon_slot_x = COLON_CX - (2*U + U/2);
-  graphics_context_set_compositing_mode(ctx, GCompOpSet);
-  graphics_draw_bitmap_in_rect(ctx, bm, GRect(colon_slot_x, 0, FILE_W, SCREEN_H));
 }
 
 static void free_bitmaps(void) {
@@ -163,110 +153,21 @@ static void free_bitmaps(void) {
     if (s_colon_bm[s]) { gbitmap_destroy(s_colon_bm[s]); s_colon_bm[s] = NULL; }
 }
 
-#endif // PBL_PLATFORM_EMERY
-
-// ============================================================
-// VECTOR DRAWING (all platforms)
-// ============================================================
-static void fr(GContext *ctx, int x, int y, int w, int h) {
-  if (w > 0 && h > 0) graphics_fill_rect(ctx, GRect(x, y, w, h), 0, GCornerNone);
-}
-static void fc(GContext *ctx, int cx, int cy, int r) {
-  graphics_fill_circle(ctx, GPoint(cx, cy), r);
+// Draw a digit file at (slot_x, 0). The file is 40×228 and self-contained —
+// the digit is already vertically centered within the 228px height by Sterling's
+// design, so we just blit the full file at the correct x position.
+static void draw_digit(GContext *ctx, int digit, int size, int slot_x) {
+  GBitmap *bm = get_bitmap(digit, size);
+  if (!bm) return;
+  graphics_context_set_compositing_mode(ctx, GCompOpSet);
+  graphics_draw_bitmap_in_rect(ctx, bm, GRect(slot_x, 0, SLOT_W, SCREEN_H));
 }
 
-static void draw_arc_cap(GContext *ctx, int slot_x, int cap_cy, bool is_top,
-                         GColor fg, GColor bg) {
-  int cx = SLOT_CX(slot_x);
-  graphics_context_set_fill_color(ctx, fg);
-  if (is_top) {
-    fr(ctx, SLOT_LEFT_X(slot_x), cap_cy - CAP_OUTER_R, DIGIT_W, CAP_OUTER_R);
-    fc(ctx, cx, cap_cy, CAP_OUTER_R);
-    graphics_context_set_fill_color(ctx, bg);
-    fr(ctx, SLOT_LEFT_X(slot_x) + U, cap_cy - CAP_INNER_R, DIGIT_W - 2*U, CAP_INNER_R);
-    fc(ctx, cx, cap_cy, CAP_INNER_R);
-  } else {
-    fr(ctx, SLOT_LEFT_X(slot_x), cap_cy, DIGIT_W, CAP_OUTER_R);
-    fc(ctx, cx, cap_cy, CAP_OUTER_R);
-    graphics_context_set_fill_color(ctx, bg);
-    fr(ctx, SLOT_LEFT_X(slot_x) + U, cap_cy, DIGIT_W - 2*U, CAP_INNER_R);
-    fc(ctx, cx, cap_cy, CAP_INNER_R);
-  }
-}
-
-static void draw_vector_0(GContext *ctx, int slot_x, int size, GColor fg, GColor bg) {
-  int tm   = digit_top_margin(size);
-  int oh   = digit_outer_h(size);
-  int tc_y = tm + CAP_OUTER_R;
-  int bc_y = tm + oh - CAP_OUTER_R;
-  graphics_context_set_fill_color(ctx, fg);
-  int body_h = bc_y - tc_y;
-  if (body_h > 0) {
-    fr(ctx, SLOT_LEFT_X(slot_x),  tc_y, U, body_h);
-    fr(ctx, SLOT_RIGHT_X(slot_x), tc_y, U, body_h);
-  }
-  draw_arc_cap(ctx, slot_x, tc_y, true,  fg, bg);
-  draw_arc_cap(ctx, slot_x, bc_y, false, fg, bg);
-}
-
-static void draw_vector_1(GContext *ctx, int slot_x, int size, GColor fg, GColor bg) {
-  (void)bg;
-  int tm  = digit_top_margin(size);
-  int oh  = digit_outer_h(size);
-  int top = tm;
-  int bot = tm + oh - 1;
-  int sx  = slot_x + 2*U;  // main stroke left edge (2U from slot left)
-
-  graphics_context_set_fill_color(ctx, fg);
-  fr(ctx, sx, top, U, oh);
-
-  // Diagonal serif, scaled by U.
-  // At U=8 (emery): 25 rows total, peak 12px left of stroke.
-  // At U=5 (flint): 25*5/8 = ~15 rows total, peak 12*5/8 = ~7px left.
-  int serif_left  = slot_x + U/2;            // leftmost extent of serif
-  int serif_right = sx - 1;                  // right edge = just left of stroke
-  int total_rows  = 25 * U / 8;
-  int phase1_rows = 13 * U / 8;
-
-  for (int r = 0; r < total_rows; r++) {
-    int y = top + r;
-    if (y >= SCREEN_H) break;
-    int lx, rx;
-    if (r < phase1_rows) {
-      rx = serif_right;
-      lx = serif_right - r;
-      if (lx < serif_left) lx = serif_left;
-    } else {
-      lx = serif_left;
-      rx = serif_right - (r - phase1_rows);
-      if (rx < lx) break;
-    }
-    fr(ctx, lx, y, rx - lx + 1, 1);
-  }
-
-  // Bottom foot: 4U wide, 1U tall
-  fr(ctx, SLOT_LEFT_X(slot_x), bot - U + 1, DIGIT_W, U);
-}
-
-static void draw_vector_digit(GContext *ctx, int digit, int slot_x, int size,
-                              GColor fg, GColor bg) {
-  switch (digit) {
-    case 0: draw_vector_0(ctx, slot_x, size, fg, bg); break;
-    case 1: draw_vector_1(ctx, slot_x, size, fg, bg); break;
-#if defined(PBL_PLATFORM_EMERY)
-    default: draw_raster(ctx, digit, size, slot_x); break;
-#else
-    default: break;
-#endif
-  }
-}
-
-static void draw_colon_vector(GContext *ctx, int size) {
-  int oh = digit_outer_h(size);
-  int half_spacing = (oh - U) / 4;
-  graphics_context_set_fill_color(ctx, s_fg);
-  fc(ctx, COLON_CX, SCREEN_H/2 - half_spacing, U/2);
-  fc(ctx, COLON_CX, SCREEN_H/2 + half_spacing, U/2);
+static void draw_colon(GContext *ctx, int size) {
+  GBitmap *bm = get_colon(size);
+  if (!bm) return;
+  graphics_context_set_compositing_mode(ctx, GCompOpSet);
+  graphics_draw_bitmap_in_rect(ctx, bm, GRect(COLON_SLOT_X, 0, SLOT_W, SCREEN_H));
 }
 
 // ============================================================
@@ -278,9 +179,8 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 
   int size = s_size;
-
-  // Determine what digits to show
   int h_tens, h_ones, m_tens, m_ones;
+
   if (s_demo_phase == PHASE_CYCLE) {
     h_tens = h_ones = m_tens = m_ones = s_demo_digit;
   } else {
@@ -292,23 +192,15 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     m_ones = s_minute % 10;
   }
 
-  draw_vector_digit(ctx, h_tens, SLOT_H_TENS, size, s_fg, s_bg);
-
-#if defined(PBL_PLATFORM_EMERY)
-  draw_raster(ctx, h_ones, size, SLOT_H_ONES);
-  draw_colon_raster(ctx, size);
-  draw_raster(ctx, m_tens, size, SLOT_M_TENS);
-#else
-  draw_vector_digit(ctx, h_ones, SLOT_H_ONES, size, s_fg, s_bg);
-  draw_colon_vector(ctx, size);
-  draw_vector_digit(ctx, m_tens, SLOT_M_TENS, size, s_fg, s_bg);
-#endif
-
-  draw_vector_digit(ctx, m_ones, SLOT_M_ONES, size, s_fg, s_bg);
+  draw_digit(ctx, h_tens, size, SLOT_H_TENS);
+  draw_digit(ctx, h_ones, size, SLOT_H_ONES);
+  draw_colon(ctx, size);
+  draw_digit(ctx, m_tens, size, SLOT_M_TENS);
+  draw_digit(ctx, m_ones, size, SLOT_M_ONES);
 }
 
 // ============================================================
-// DEMO TIMER SEQUENCE
+// DEMO TIMER
 // ============================================================
 static void demo_timer_cb(void *data);
 
@@ -321,7 +213,6 @@ static void demo_timer_cb(void *data) {
   s_demo_timer = NULL;
   switch (s_demo_phase) {
     case PHASE_TIME_1:
-      // Time shown for 5s — now start cycling
       s_demo_phase = PHASE_CYCLE;
       s_demo_digit = 0;
       layer_mark_dirty(s_canvas_layer);
@@ -329,11 +220,10 @@ static void demo_timer_cb(void *data) {
       break;
     case PHASE_CYCLE:
       s_demo_digit++;
-      if (s_demo_digit < DEMO_DIGITS) {
+      if (s_demo_digit < 10) {
         layer_mark_dirty(s_canvas_layer);
         schedule_demo(DEMO_DIGIT_MS);
       } else {
-        // Done cycling — show real time for 5s then stay
         s_demo_phase = PHASE_TIME_2;
         layer_mark_dirty(s_canvas_layer);
         schedule_demo(DEMO_TIME_MS);
@@ -362,25 +252,21 @@ static void window_load(Window *window) {
   s_canvas_layer = layer_create(layer_get_bounds(root));
   layer_set_update_proc(s_canvas_layer, draw_layer);
   layer_add_child(root, s_canvas_layer);
-  // Kick off demo sequence
   schedule_demo(DEMO_TIME_MS);
 }
 
 static void window_unload(Window *window) {
   if (s_demo_timer) { app_timer_cancel(s_demo_timer); s_demo_timer = NULL; }
-#if defined(PBL_PLATFORM_EMERY)
   free_bitmaps();
-#endif
   layer_destroy(s_canvas_layer);
 }
 
 static void init(void) {
   s_fg = GColorWhite;
   s_bg = GColorBlack;
-#if defined(PBL_PLATFORM_EMERY)
   memset(s_bitmaps,  0, sizeof(s_bitmaps));
   memset(s_colon_bm, 0, sizeof(s_colon_bm));
-#endif
+
   s_window = window_create();
   window_set_background_color(s_window, GColorBlack);
   window_set_window_handlers(s_window, (WindowHandlers){
@@ -388,6 +274,7 @@ static void init(void) {
     .unload = window_unload,
   });
   window_stack_push(s_window, true);
+
   time_t now = time(NULL);
   tick_handler(localtime(&now), MINUTE_UNIT);
   tick_timer_service_subscribe(MINUTE_UNIT, tick_handler);
