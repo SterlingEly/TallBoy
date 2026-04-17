@@ -1,40 +1,49 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v0.4
+// TallBoy — main.c  v0.5
 //
-// HH:MM watchface — pure raster PNG digits, emery only.
-// Vector drawing removed; layout and sizing focus.
+// Slot positions adjusted per pixel measurement:
+//   H_tens: 12  (was 16, moved 4px left)
+//   H_ones: 52  (was 56, moved 4px left)
+//   M_tens: 108 (was 104, moved 4px right)
+//   M_ones: 148 (was 144, moved 4px right)
+//   Colon:  unchanged (slot_x=80, center=100)
 //
-// LAYOUT (emery 200x228):
-//   Unit U = 8px. 25U = 200px exactly.
-//   Digit files are 40px (5U) wide, include 4px half-margin each side.
-//   Adjacent slots butt up — half-margins create the 8px inter-digit gap.
-//
-//   Slot positions (left edge of each 40px slot):
-//     H_tens: 16    H_ones: 56    [colon gap 96-104]    M_tens: 104    M_ones: 144
-//     Right edge: 184. Left/right margin: 16px each. 
-//
-// SIZES: 6 levels. Files are 40x228 — digit centered vertically by design.
-//   s_size = 6 always for now (full screen height).
-//   TODO: pick size dynamically based on available vertical space.
-//
-// DEMO: auto on launch — 5s time, 10s digit cycle (0-9), 5s time, done.
+// DEMO SEQUENCE:
+//   5s  real time (size 6)
+//   10s digit cycle 0-9, 1s each (size 6)
+//   5s  real time (size 6)
+//   2x  size cycle: sizes 6→1→6, 1s per size
+//   then stays on real time
 // ============================================================
 
 #define SCREEN_W   200
 #define SCREEN_H   228
 #define SLOT_W      40
-#define SLOT_H_TENS   16
-#define SLOT_H_ONES   56
-#define SLOT_M_TENS  104
-#define SLOT_M_ONES  144
-// Colon file positioned so its internal content (center col 20) lands at x=100
+
+#define SLOT_H_TENS   12
+#define SLOT_H_ONES   52
+#define SLOT_M_TENS  108
+#define SLOT_M_ONES  148
 #define COLON_SLOT_X  80
 
-typedef enum { PHASE_TIME_1, PHASE_CYCLE, PHASE_TIME_2, PHASE_DONE } DemoPhase;
+typedef enum {
+  PHASE_TIME_1,
+  PHASE_DIGIT_CYCLE,
+  PHASE_TIME_2,
+  PHASE_SIZE_CYCLE,
+  PHASE_DONE
+} DemoPhase;
+
 #define DEMO_TIME_MS   5000
 #define DEMO_DIGIT_MS  1000
+#define DEMO_SIZE_MS   1000
+#define DEMO_SIZE_REPS 2
+
+// Size cycle order: 6 5 4 3 2 1 2 3 4 5 6
+static const int SIZE_CYCLE[] = { 6, 5, 4, 3, 2, 1, 2, 3, 4, 5, 6 };
+#define SIZE_CYCLE_LEN 11
 
 static Window    *s_window;
 static Layer     *s_canvas_layer;
@@ -42,9 +51,11 @@ static int        s_hour    = 0;
 static int        s_minute  = 0;
 static int        s_size    = 6;
 static GColor     s_fg, s_bg;
-static DemoPhase  s_demo_phase = PHASE_TIME_1;
-static int        s_demo_digit = 0;
-static AppTimer  *s_demo_timer = NULL;
+static DemoPhase  s_demo_phase  = PHASE_TIME_1;
+static int        s_demo_digit  = 0;
+static int        s_size_step   = 0;   // index into SIZE_CYCLE
+static int        s_size_rep    = 0;   // which repetition
+static AppTimer  *s_demo_timer  = NULL;
 
 // ============================================================
 // BITMAPS
@@ -52,8 +63,6 @@ static AppTimer  *s_demo_timer = NULL;
 static GBitmap *s_bitmaps[10][6];
 static GBitmap *s_colon_bm[6];
 
-// Resource table [digit 0-9][size 1-6]
-// digit 2: sizes 1-3 shared style, 4-6 are 2B variant
 static const uint32_t s_res[10][6] = {
   { RESOURCE_ID_TALLBOY_01, RESOURCE_ID_TALLBOY_02, RESOURCE_ID_TALLBOY_03,
     RESOURCE_ID_TALLBOY_04, RESOURCE_ID_TALLBOY_05, RESOURCE_ID_TALLBOY_06 },
@@ -139,7 +148,7 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   int size = s_size;
   int h_tens, h_ones, m_tens, m_ones;
 
-  if (s_demo_phase == PHASE_CYCLE) {
+  if (s_demo_phase == PHASE_DIGIT_CYCLE) {
     h_tens = h_ones = m_tens = m_ones = s_demo_digit;
   } else {
     int h = s_hour % 12;
@@ -170,27 +179,57 @@ static void schedule_demo(uint32_t ms) {
 static void demo_timer_cb(void *data) {
   s_demo_timer = NULL;
   switch (s_demo_phase) {
+
     case PHASE_TIME_1:
-      s_demo_phase = PHASE_CYCLE;
+      s_demo_phase = PHASE_DIGIT_CYCLE;
       s_demo_digit = 0;
       layer_mark_dirty(s_canvas_layer);
       schedule_demo(DEMO_DIGIT_MS);
       break;
-    case PHASE_CYCLE:
+
+    case PHASE_DIGIT_CYCLE:
       s_demo_digit++;
       if (s_demo_digit < 10) {
         layer_mark_dirty(s_canvas_layer);
         schedule_demo(DEMO_DIGIT_MS);
       } else {
         s_demo_phase = PHASE_TIME_2;
+        s_size = 6;
         layer_mark_dirty(s_canvas_layer);
         schedule_demo(DEMO_TIME_MS);
       }
       break;
+
     case PHASE_TIME_2:
-      s_demo_phase = PHASE_DONE;
+      s_demo_phase = PHASE_SIZE_CYCLE;
+      s_size_step  = 0;
+      s_size_rep   = 0;
+      s_size = SIZE_CYCLE[0];
       layer_mark_dirty(s_canvas_layer);
+      schedule_demo(DEMO_SIZE_MS);
       break;
+
+    case PHASE_SIZE_CYCLE:
+      s_size_step++;
+      if (s_size_step < SIZE_CYCLE_LEN) {
+        s_size = SIZE_CYCLE[s_size_step];
+        layer_mark_dirty(s_canvas_layer);
+        schedule_demo(DEMO_SIZE_MS);
+      } else {
+        s_size_rep++;
+        if (s_size_rep < DEMO_SIZE_REPS) {
+          s_size_step = 0;
+          s_size = SIZE_CYCLE[0];
+          layer_mark_dirty(s_canvas_layer);
+          schedule_demo(DEMO_SIZE_MS);
+        } else {
+          s_demo_phase = PHASE_DONE;
+          s_size = 6;
+          layer_mark_dirty(s_canvas_layer);
+        }
+      }
+      break;
+
     case PHASE_DONE:
       break;
   }
