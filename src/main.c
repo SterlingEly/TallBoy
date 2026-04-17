@@ -6,70 +6,32 @@
 // HH:MM watchface — pure raster PNG digits, emery only.
 // Vector drawing removed; layout and sizing focus.
 //
-// LAYOUT (emery 200×228):
+// LAYOUT (emery 200x228):
 //   Unit U = 8px. 25U = 200px exactly.
-//   Each digit slot = 5U (40px) wide, containing:
-//     4px left margin + 32px digit + 4px right margin
-//   Colon slot = 1U (8px) wide, centered
-//
-//   Layout (L→R):
-//     2U margin | 5U H_tens | 1U gap | 5U H_ones | 1U gap |
-//     1U colon | 1U gap | 5U M_tens | 1U gap | 5U M_ones | 2U margin
-//     = 2+5+1+5+1+1+1+5+1+5+2 = 29U ... too wide.
-//
-//   Actual Sterling layout (confirmed from pixel files):
-//     The digit files are 40px (5U) wide and include their own
-//     4px half-margin on each side. Adjacent slots butt up together
-//     with no extra gap — the half-margins from adjacent slots create
-//     the 8px (1U) inter-digit gap naturally.
-//
-//   So layout is just: margin + 4 slots + colon slot + margin
-//   where slots are placed edge-to-edge.
-//
-//   Colon: 8px wide, positioned in the center gap between digit pairs.
-//   From pixel analysis: colon center x = 100 (screen center).
+//   Digit files are 40px (5U) wide, include 4px half-margin each side.
+//   Adjacent slots butt up — half-margins create the 8px inter-digit gap.
 //
 //   Slot positions (left edge of each 40px slot):
-//     H_tens: (200 - 4*40 - 8) / 2 = (200 - 168) / 2 = 16
-//     H_ones: 16 + 40 = 56
-//     [colon centered at 56+40+4 = 100, i.e. screen center]
-//     M_tens: 56 + 40 + 8 = 104   (8px colon gap)
-//     M_ones: 104 + 40 = 144
-//     Right edge: 144 + 40 = 184. Right margin = 200-184 = 16. ✓
+//     H_tens: 16    H_ones: 56    [colon gap 96-104]    M_tens: 104    M_ones: 144
+//     Right edge: 184. Left/right margin: 16px each. 
 //
-// SIZES: 6 levels matching Sterling's asset sizes.
-//   Files are 40×228 — full screen height, digit centered vertically.
-//   The size is baked into the asset; we select the right file.
-//   For now: always use size 6 (largest, fills screen).
+// SIZES: 6 levels. Files are 40x228 — digit centered vertically by design.
+//   s_size = 6 always for now (full screen height).
 //   TODO: pick size dynamically based on available vertical space.
 //
-// DEMO SEQUENCE (auto on launch):
-//   5s real time → 10s digit cycle (0-9, 1s each) → 5s real time → done
+// DEMO: auto on launch — 5s time, 10s digit cycle (0-9), 5s time, done.
 // ============================================================
 
 #define SCREEN_W   200
 #define SCREEN_H   228
-#define SLOT_W      40   // each digit file slot width (5U)
-#define COLON_W      8   // colon gap width (1U)
-
-// Horizontal slot positions (left edge of each 40px slot)
+#define SLOT_W      40
 #define SLOT_H_TENS   16
 #define SLOT_H_ONES   56
 #define SLOT_M_TENS  104
 #define SLOT_M_ONES  144
-
-// Colon center x = midpoint of the 8px gap between H_ones and M_tens
-// H_ones right edge = 56+40 = 96. M_tens left edge = 104. Center = 100.
-#define COLON_CX     100
-
-// Colon slot left edge: position the 40px colon file so its internal
-// colon content (at cols 16-23 of the file = center col 19.5) lands on COLON_CX.
-// colon_slot_x = COLON_CX - 19 = 81 ... but let's think about it differently:
-// The colon file has its dots centered at x=20 within the 40px slot.
-// So slot_x = COLON_CX - 20 = 80.
+// Colon file positioned so its internal content (center col 20) lands at x=100
 #define COLON_SLOT_X  80
 
-// Demo phases
 typedef enum { PHASE_TIME_1, PHASE_CYCLE, PHASE_TIME_2, PHASE_DONE } DemoPhase;
 #define DEMO_TIME_MS   5000
 #define DEMO_DIGIT_MS  1000
@@ -91,14 +53,14 @@ static GBitmap *s_bitmaps[10][6];
 static GBitmap *s_colon_bm[6];
 
 // Resource table [digit 0-9][size 1-6]
-// digit 2: sizes 1-3 are the shared style, 4-5 are 2B variant, no size 6.
+// digit 2: sizes 1-3 shared style, 4-6 are 2B variant
 static const uint32_t s_res[10][6] = {
   { RESOURCE_ID_TALLBOY_01, RESOURCE_ID_TALLBOY_02, RESOURCE_ID_TALLBOY_03,
     RESOURCE_ID_TALLBOY_04, RESOURCE_ID_TALLBOY_05, RESOURCE_ID_TALLBOY_06 },
   { RESOURCE_ID_TALLBOY_11, RESOURCE_ID_TALLBOY_12, RESOURCE_ID_TALLBOY_13,
     RESOURCE_ID_TALLBOY_14, RESOURCE_ID_TALLBOY_15, RESOURCE_ID_TALLBOY_16 },
   { RESOURCE_ID_TALLBOY_21, RESOURCE_ID_TALLBOY_22, RESOURCE_ID_TALLBOY_23,
-    RESOURCE_ID_TALLBOY_24, RESOURCE_ID_TALLBOY_25, 0 },
+    RESOURCE_ID_TALLBOY_24, RESOURCE_ID_TALLBOY_25, RESOURCE_ID_TALLBOY_26 },
   { RESOURCE_ID_TALLBOY_31, RESOURCE_ID_TALLBOY_32, RESOURCE_ID_TALLBOY_33,
     RESOURCE_ID_TALLBOY_34, RESOURCE_ID_TALLBOY_35, RESOURCE_ID_TALLBOY_36 },
   { RESOURCE_ID_TALLBOY_41, RESOURCE_ID_TALLBOY_42, RESOURCE_ID_TALLBOY_43,
@@ -120,7 +82,6 @@ static const uint32_t s_colon_res[6] = {
   RESOURCE_ID_TALLBOY_COLON4, RESOURCE_ID_TALLBOY_COLON5, RESOURCE_ID_TALLBOY_COLON6,
 };
 
-// Find nearest available size, preferring exact match, then larger, then smaller
 static uint32_t find_res(int digit, int size) {
   int si = size - 1;
   if (s_res[digit][si]) return s_res[digit][si];
@@ -153,9 +114,6 @@ static void free_bitmaps(void) {
     if (s_colon_bm[s]) { gbitmap_destroy(s_colon_bm[s]); s_colon_bm[s] = NULL; }
 }
 
-// Draw a digit file at (slot_x, 0). The file is 40×228 and self-contained —
-// the digit is already vertically centered within the 228px height by Sterling's
-// design, so we just blit the full file at the correct x position.
 static void draw_digit(GContext *ctx, int digit, int size, int slot_x) {
   GBitmap *bm = get_bitmap(digit, size);
   if (!bm) return;
