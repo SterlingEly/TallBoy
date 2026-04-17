@@ -1,50 +1,47 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v0.2
+// TallBoy — main.c  v0.3
 //
 // HH:MM watchface using Sterling Ely's custom digit font.
 // Targets: emery (200×228) and flint (144×168, vector-only).
 //
+// DEMO SEQUENCE (auto, no interaction needed):
+//   5s  — show real time
+//   10s — cycle digits 0→9, 1s each, all positions in sync
+//   5s  — show real time again
+//   (then stays on real time)
+//
 // DIGIT ASSIGNMENT (emery):
-//   H_tens (0,1 only) — VECTOR
-//   H_ones (0–9)      — RASTER PNG
-//   colon             — RASTER PNG
-//   M_tens (0–5)      — RASTER PNG
-//   M_ones (0–9)      — VECTOR (0,1 done; 2–9 fall back to raster)
+//   H_tens (0,1) — VECTOR
+//   H_ones (0–9) — RASTER
+//   colon        — RASTER
+//   M_tens (0–5) — RASTER
+//   M_ones (0–9) — VECTOR (0,1 done; 2–9 fall back to raster)
 //
-// FLINT: no raster (wrong size/platform) — pure vector, 0 and 1 only for now.
-//
-// DEMO MODE: shake cycles all positions 0→9 at 1-second intervals.
+// FLINT: pure vector, only 0 and 1 drawn; others blank.
 //
 // GEOMETRY:
-//   Unit U = 8px on emery, 5px on flint.
-//   25 units wide: margin(2) digit(4) gap(1) digit(4) gap(1)
-//                  colon(1) gap(1) digit(4) gap(1) digit(4) margin(2)
-//   Emery: 25×8 = 200px ✓   Flint: 25×5 = 125px, ~9px margin each side.
-//   6 size levels: outer_h = (3 + 4*size) * U
-//   Cap outer radius = 2U, inner radius = 1U, stroke = 1U.
+//   Unit U = 8px emery, 5px flint.
+//   25U wide layout. 6 sizes: outer_h = (3+4*size)*U.
+//   Cap outer radius = 2U, inner = 1U, stroke = 1U.
 // ============================================================
 
-// ---- Platform geometry ----
 #if defined(PBL_PLATFORM_EMERY)
-  #define SCREEN_W   200
-  #define SCREEN_H   228
-  #define U            8
+  #define SCREEN_W  200
+  #define SCREEN_H  228
+  #define U           8
 #else
-  // flint (and any other rect non-emery)
-  #define SCREEN_W   144
-  #define SCREEN_H   168
-  #define U            5
+  #define SCREEN_W  144
+  #define SCREEN_H  168
+  #define U           5
 #endif
 
-#define DIGIT_W      (4*U)   // digit content width
-#define FILE_W       (5*U)   // file slot (digit + half-margin each side)
+#define DIGIT_W      (4*U)
+#define FILE_W       (5*U)
 #define CAP_OUTER_R  (2*U)
 #define CAP_INNER_R  (1*U)
 
-// Horizontal layout — computed from unit size
-// Left margin = (SCREEN_W - 25*U) / 2
 #define LAYOUT_MARGIN  ((SCREEN_W - 25*U) / 2)
 #define SLOT_H_TENS    (LAYOUT_MARGIN)
 #define SLOT_H_ONES    (LAYOUT_MARGIN + FILE_W + U)
@@ -52,46 +49,52 @@
 #define SLOT_M_ONES    (LAYOUT_MARGIN + FILE_W + U + FILE_W + U + U + U + FILE_W + U)
 #define COLON_CX       (LAYOUT_MARGIN + FILE_W + U + FILE_W + U + U/2 + (U%2))
 
-// Within a slot: left stroke at +U offset, right stroke at +3U, center at +2U+U/2
 #define SLOT_LEFT_X(s)  ((s) + U)
 #define SLOT_RIGHT_X(s) ((s) + 3*U)
 #define SLOT_CX(s)      ((s) + 2*U + U/2)
 
-// Size helpers (all sizes share same formula, just different U)
 static int digit_outer_h(int size)    { return (3 + 4*size) * U; }
 static int digit_top_margin(int size) { return (SCREEN_H - digit_outer_h(size)) / 2; }
 
 // ============================================================
-// STATE
+// DEMO STATE
+// Phase 0: show real time (5s)
+// Phase 1: cycle digits 0-9 (10s = 10 × 1s)
+// Phase 2: show real time (5s), then stay
 // ============================================================
-static Window   *s_window;
-static Layer    *s_canvas_layer;
-static int       s_hour   = 0;
-static int       s_minute = 0;
-static int       s_size   = 6;
-static bool      s_demo       = false;
-static int       s_demo_digit = 0;
-static AppTimer *s_demo_timer = NULL;
-static GColor    s_fg, s_bg;
+#define DEMO_TIME_MS   5000
+#define DEMO_DIGIT_MS  1000
+#define DEMO_DIGITS    10
+
+typedef enum { PHASE_TIME_1, PHASE_CYCLE, PHASE_TIME_2, PHASE_DONE } DemoPhase;
+
+static Window    *s_window;
+static Layer     *s_canvas_layer;
+static int        s_hour   = 0;
+static int        s_minute = 0;
+static int        s_size   = 6;
+static GColor     s_fg, s_bg;
+static DemoPhase  s_demo_phase  = PHASE_TIME_1;
+static int        s_demo_digit  = 0;
+static AppTimer  *s_demo_timer  = NULL;
 
 // ============================================================
-// RASTER RESOURCES (emery only)
-// Resource names match filenames: tallboy_XY.png -> TALLBOY_XY
-// Lookup table: s_res[digit][size-1], 0 = not available.
-// Digit 2: sizes 1-3 available (tallboy_21/22/23), sizes 4-5 use 2B variant.
+// RASTER (emery only)
 // ============================================================
 #if defined(PBL_PLATFORM_EMERY)
 
 static GBitmap *s_bitmaps[10][6];
 static GBitmap *s_colon_bm[6];
 
+// digit 2: sizes 1-3 share the same design, sizes 4-5 use 2B variant.
+// Resource names: TALLBOY_<digit><size>, no separator.
 static const uint32_t s_res[10][6] = {
   { RESOURCE_ID_TALLBOY_01, RESOURCE_ID_TALLBOY_02, RESOURCE_ID_TALLBOY_03,
     RESOURCE_ID_TALLBOY_04, RESOURCE_ID_TALLBOY_05, RESOURCE_ID_TALLBOY_06 },
   { RESOURCE_ID_TALLBOY_11, RESOURCE_ID_TALLBOY_12, RESOURCE_ID_TALLBOY_13,
     RESOURCE_ID_TALLBOY_14, RESOURCE_ID_TALLBOY_15, RESOURCE_ID_TALLBOY_16 },
   { RESOURCE_ID_TALLBOY_21, RESOURCE_ID_TALLBOY_22, RESOURCE_ID_TALLBOY_23,
-    RESOURCE_ID_TALLBOY_2B4, RESOURCE_ID_TALLBOY_2B5, 0 },
+    RESOURCE_ID_TALLBOY_24, RESOURCE_ID_TALLBOY_25, 0 },
   { RESOURCE_ID_TALLBOY_31, RESOURCE_ID_TALLBOY_32, RESOURCE_ID_TALLBOY_33,
     RESOURCE_ID_TALLBOY_34, RESOURCE_ID_TALLBOY_35, RESOURCE_ID_TALLBOY_36 },
   { RESOURCE_ID_TALLBOY_41, RESOURCE_ID_TALLBOY_42, RESOURCE_ID_TALLBOY_43,
@@ -141,15 +144,12 @@ static void draw_raster(GContext *ctx, int digit, int size, int slot_x) {
   GBitmap *bm = get_bitmap(digit, size);
   if (!bm) return;
   graphics_context_set_compositing_mode(ctx, GCompOpSet);
-  // Files are 40x228 content. Blit at (slot_x, 0) covering full screen height.
   graphics_draw_bitmap_in_rect(ctx, bm, GRect(slot_x, 0, FILE_W, SCREEN_H));
 }
 
 static void draw_colon_raster(GContext *ctx, int size) {
   GBitmap *bm = get_colon_bm(size);
   if (!bm) return;
-  // Colon content is in cols 16-23 of a 40px slot (center = col 19.5).
-  // Position so that center lands on COLON_CX.
   int colon_slot_x = COLON_CX - (2*U + U/2);
   graphics_context_set_compositing_mode(ctx, GCompOpSet);
   graphics_draw_bitmap_in_rect(ctx, bm, GRect(colon_slot_x, 0, FILE_W, SCREEN_H));
@@ -166,13 +166,8 @@ static void free_bitmaps(void) {
 #endif // PBL_PLATFORM_EMERY
 
 // ============================================================
-// VECTOR DRAWING
-// Parameterised entirely on U — works on any platform.
-// draw_arc_cap, draw_vector_0, draw_vector_1.
-// The digit 1 serif is 25px at emery (U=8). At flint (U=5) it
-// scales proportionally: 25*5/8 ≈ 16 rows (rounded).
+// VECTOR DRAWING (all platforms)
 // ============================================================
-
 static void fr(GContext *ctx, int x, int y, int w, int h) {
   if (w > 0 && h > 0) graphics_fill_rect(ctx, GRect(x, y, w, h), 0, GCornerNone);
 }
@@ -220,54 +215,36 @@ static void draw_vector_1(GContext *ctx, int slot_x, int size, GColor fg, GColor
   int oh  = digit_outer_h(size);
   int top = tm;
   int bot = tm + oh - 1;
-
-  // Main stroke: centered in the slot, 1U wide.
-  // At emery (U=8): cols 16-23 of 40px slot = slot_x+16.
-  // General: slot_x + 2*U  (left edge of stroke, which is 2U from slot left).
-  int sx = slot_x + 2*U;
+  int sx  = slot_x + 2*U;  // main stroke left edge (2U from slot left)
 
   graphics_context_set_fill_color(ctx, fg);
   fr(ctx, sx, top, U, oh);
 
-  // Diagonal serif: pixel-exact at U=8 (emery); scaled proportionally at U=5 (flint).
-  // At U=8: serif spans 25 rows, reaches 12px left of stroke, foot is 32px wide 8px tall.
-  // At any U: scale all offsets by U/8, keeping serif visually proportional.
-  // We do this with integer arithmetic: pixel_offset = (emery_px * U + 4) / 8
-  // Precomputed key values at U=8:
-  //   stroke left = sx (= slot_x + 2U)
-  //   serif peak left = slot_x + U/2    (half-unit from slot edge)
-  //   serif total rows = 25 * U / 8
-  //   phase1 rows = 13 * U / 8
-  //   phase2 rows = 2  * U / 8  (hold at peak)
-  //   phase3 rows = 10 * U / 8  (taper)
-  //   peak right = sx - U/8            (just left of stroke, ~1px at U=8)
-
-  int serif_peak_left = slot_x + U/2;
-  int serif_peak_right = sx - 1;  // right edge of serif at peak = left of stroke gap
-  int total_serif_rows = 25 * U / 8;
+  // Diagonal serif, scaled by U.
+  // At U=8 (emery): 25 rows total, peak 12px left of stroke.
+  // At U=5 (flint): 25*5/8 = ~15 rows total, peak 12*5/8 = ~7px left.
+  int serif_left  = slot_x + U/2;            // leftmost extent of serif
+  int serif_right = sx - 1;                  // right edge = just left of stroke
+  int total_rows  = 25 * U / 8;
   int phase1_rows = 13 * U / 8;
-  int peak_width = serif_peak_right - serif_peak_left + 1;
 
-  for (int r = 0; r < total_serif_rows; r++) {
+  for (int r = 0; r < total_rows; r++) {
     int y = top + r;
     if (y >= SCREEN_H) break;
-    int left_x, right_x;
+    int lx, rx;
     if (r < phase1_rows) {
-      // Phase 1: left edge slides from stroke-1 toward serif_peak_left
-      right_x = serif_peak_right;
-      left_x  = serif_peak_right - r;
-      if (left_x < serif_peak_left) left_x = serif_peak_left;
+      rx = serif_right;
+      lx = serif_right - r;
+      if (lx < serif_left) lx = serif_left;
     } else {
-      // Phase 2+3: right edge tapers from serif_peak_right toward serif_peak_left
-      left_x  = serif_peak_left;
-      int taper = r - phase1_rows;
-      right_x = serif_peak_right - taper;
-      if (right_x < left_x) break;
+      lx = serif_left;
+      rx = serif_right - (r - phase1_rows);
+      if (rx < lx) break;
     }
-    fr(ctx, left_x, y, right_x - left_x + 1, 1);
+    fr(ctx, lx, y, rx - lx + 1, 1);
   }
 
-  // Bottom foot: full digit width (4U), 1U tall, bottom-aligned
+  // Bottom foot: 4U wide, 1U tall
   fr(ctx, SLOT_LEFT_X(slot_x), bot - U + 1, DIGIT_W, U);
 }
 
@@ -279,21 +256,17 @@ static void draw_vector_digit(GContext *ctx, int digit, int slot_x, int size,
 #if defined(PBL_PLATFORM_EMERY)
     default: draw_raster(ctx, digit, size, slot_x); break;
 #else
-    default: break;  // flint: unimplemented digits blank for now
+    default: break;
 #endif
   }
 }
 
-// Vector colon: two filled circles, scaled by U.
-// Centers at screen_h/2 ± (outer_h - U) / 4
 static void draw_colon_vector(GContext *ctx, int size) {
   int oh = digit_outer_h(size);
   int half_spacing = (oh - U) / 4;
-  int dot_r = U / 2;
-  int cy = SCREEN_H / 2;
   graphics_context_set_fill_color(ctx, s_fg);
-  fc(ctx, COLON_CX, cy - half_spacing, dot_r);
-  fc(ctx, COLON_CX, cy + half_spacing, dot_r);
+  fc(ctx, COLON_CX, SCREEN_H/2 - half_spacing, U/2);
+  fc(ctx, COLON_CX, SCREEN_H/2 + half_spacing, U/2);
 }
 
 // ============================================================
@@ -305,8 +278,10 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 
   int size = s_size;
+
+  // Determine what digits to show
   int h_tens, h_ones, m_tens, m_ones;
-  if (s_demo) {
+  if (s_demo_phase == PHASE_CYCLE) {
     h_tens = h_ones = m_tens = m_ones = s_demo_digit;
   } else {
     int h = s_hour % 12;
@@ -333,24 +308,44 @@ static void draw_layer(Layer *layer, GContext *ctx) {
 }
 
 // ============================================================
-// DEMO MODE
+// DEMO TIMER SEQUENCE
 // ============================================================
-static void demo_next(void *data) {
-  s_demo_digit = (s_demo_digit + 1) % 10;
-  layer_mark_dirty(s_canvas_layer);
-  s_demo_timer = app_timer_register(1000, demo_next, NULL);
+static void demo_timer_cb(void *data);
+
+static void schedule_demo(uint32_t ms) {
+  if (s_demo_timer) app_timer_cancel(s_demo_timer);
+  s_demo_timer = app_timer_register(ms, demo_timer_cb, NULL);
 }
 
-static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
-  if (!s_demo) {
-    s_demo = true;
-    s_demo_digit = 0;
-    s_demo_timer = app_timer_register(1000, demo_next, NULL);
-  } else {
-    s_demo = false;
-    if (s_demo_timer) { app_timer_cancel(s_demo_timer); s_demo_timer = NULL; }
+static void demo_timer_cb(void *data) {
+  s_demo_timer = NULL;
+  switch (s_demo_phase) {
+    case PHASE_TIME_1:
+      // Time shown for 5s — now start cycling
+      s_demo_phase = PHASE_CYCLE;
+      s_demo_digit = 0;
+      layer_mark_dirty(s_canvas_layer);
+      schedule_demo(DEMO_DIGIT_MS);
+      break;
+    case PHASE_CYCLE:
+      s_demo_digit++;
+      if (s_demo_digit < DEMO_DIGITS) {
+        layer_mark_dirty(s_canvas_layer);
+        schedule_demo(DEMO_DIGIT_MS);
+      } else {
+        // Done cycling — show real time for 5s then stay
+        s_demo_phase = PHASE_TIME_2;
+        layer_mark_dirty(s_canvas_layer);
+        schedule_demo(DEMO_TIME_MS);
+      }
+      break;
+    case PHASE_TIME_2:
+      s_demo_phase = PHASE_DONE;
+      layer_mark_dirty(s_canvas_layer);
+      break;
+    case PHASE_DONE:
+      break;
   }
-  layer_mark_dirty(s_canvas_layer);
 }
 
 // ============================================================
@@ -367,11 +362,11 @@ static void window_load(Window *window) {
   s_canvas_layer = layer_create(layer_get_bounds(root));
   layer_set_update_proc(s_canvas_layer, draw_layer);
   layer_add_child(root, s_canvas_layer);
-  accel_tap_service_subscribe(accel_tap_handler);
+  // Kick off demo sequence
+  schedule_demo(DEMO_TIME_MS);
 }
 
 static void window_unload(Window *window) {
-  accel_tap_service_unsubscribe();
   if (s_demo_timer) { app_timer_cancel(s_demo_timer); s_demo_timer = NULL; }
 #if defined(PBL_PLATFORM_EMERY)
   free_bitmaps();
