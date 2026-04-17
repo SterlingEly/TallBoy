@@ -1,21 +1,15 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v0.5
-//
-// Slot positions adjusted per pixel measurement:
-//   H_tens: 12  (was 16, moved 4px left)
-//   H_ones: 52  (was 56, moved 4px left)
-//   M_tens: 108 (was 104, moved 4px right)
-//   M_ones: 148 (was 144, moved 4px right)
-//   Colon:  unchanged (slot_x=80, center=100)
+// TallBoy — main.c  v0.6
 //
 // DEMO SEQUENCE:
-//   5s  real time (size 6)
-//   10s digit cycle 0-9, 1s each (size 6)
-//   5s  real time (size 6)
-//   2x  size cycle: sizes 6→1→6, 1s per size
-//   then stays on real time
+//   5s   real time, size 6
+//   10s  digit cycle 0-9, 1s each
+//   5s   real time, size 6
+//   2x   slow size cycle (1000ms/frame): 6→5→4→3→2→1→2→3→4→5→6
+//   2x   fast size cycle ( 100ms/frame): 6→5→4→3→2→1→2→3→4→5→6
+//   done — real time, size 6
 // ============================================================
 
 #define SCREEN_W   200
@@ -32,16 +26,18 @@ typedef enum {
   PHASE_TIME_1,
   PHASE_DIGIT_CYCLE,
   PHASE_TIME_2,
-  PHASE_SIZE_CYCLE,
+  PHASE_SIZE_SLOW,
+  PHASE_SIZE_FAST,
   PHASE_DONE
 } DemoPhase;
 
-#define DEMO_TIME_MS   5000
-#define DEMO_DIGIT_MS  1000
-#define DEMO_SIZE_MS   1000
-#define DEMO_SIZE_REPS 2
+#define DEMO_TIME_MS      5000
+#define DEMO_DIGIT_MS     1000
+#define DEMO_SIZE_SLOW_MS 1000
+#define DEMO_SIZE_FAST_MS  100
+#define DEMO_SIZE_SLOW_REPS 2
+#define DEMO_SIZE_FAST_REPS 2
 
-// Size cycle order: 6 5 4 3 2 1 2 3 4 5 6
 static const int SIZE_CYCLE[] = { 6, 5, 4, 3, 2, 1, 2, 3, 4, 5, 6 };
 #define SIZE_CYCLE_LEN 11
 
@@ -51,11 +47,11 @@ static int        s_hour    = 0;
 static int        s_minute  = 0;
 static int        s_size    = 6;
 static GColor     s_fg, s_bg;
-static DemoPhase  s_demo_phase  = PHASE_TIME_1;
-static int        s_demo_digit  = 0;
-static int        s_size_step   = 0;   // index into SIZE_CYCLE
-static int        s_size_rep    = 0;   // which repetition
-static AppTimer  *s_demo_timer  = NULL;
+static DemoPhase  s_demo_phase = PHASE_TIME_1;
+static int        s_demo_digit = 0;
+static int        s_size_step  = 0;
+static int        s_size_rep   = 0;
+static AppTimer  *s_demo_timer = NULL;
 
 // ============================================================
 // BITMAPS
@@ -167,13 +163,34 @@ static void draw_layer(Layer *layer, GContext *ctx) {
 }
 
 // ============================================================
-// DEMO TIMER
+// DEMO TIMER — shared handler for both slow and fast size cycles
 // ============================================================
 static void demo_timer_cb(void *data);
 
 static void schedule_demo(uint32_t ms) {
   if (s_demo_timer) app_timer_cancel(s_demo_timer);
   s_demo_timer = app_timer_register(ms, demo_timer_cb, NULL);
+}
+
+// Advance one step of the size cycle. Returns true if cycle is complete.
+static bool size_cycle_step(uint32_t frame_ms, int max_reps) {
+  s_size_step++;
+  if (s_size_step < SIZE_CYCLE_LEN) {
+    s_size = SIZE_CYCLE[s_size_step];
+    layer_mark_dirty(s_canvas_layer);
+    schedule_demo(frame_ms);
+    return false;
+  } else {
+    s_size_rep++;
+    if (s_size_rep < max_reps) {
+      s_size_step = 0;
+      s_size = SIZE_CYCLE[0];
+      layer_mark_dirty(s_canvas_layer);
+      schedule_demo(frame_ms);
+      return false;
+    }
+    return true;
+  }
 }
 
 static void demo_timer_cb(void *data) {
@@ -201,32 +218,31 @@ static void demo_timer_cb(void *data) {
       break;
 
     case PHASE_TIME_2:
-      s_demo_phase = PHASE_SIZE_CYCLE;
-      s_size_step  = 0;
-      s_size_rep   = 0;
+      s_demo_phase = PHASE_SIZE_SLOW;
+      s_size_step = 0;
+      s_size_rep  = 0;
       s_size = SIZE_CYCLE[0];
       layer_mark_dirty(s_canvas_layer);
-      schedule_demo(DEMO_SIZE_MS);
+      schedule_demo(DEMO_SIZE_SLOW_MS);
       break;
 
-    case PHASE_SIZE_CYCLE:
-      s_size_step++;
-      if (s_size_step < SIZE_CYCLE_LEN) {
-        s_size = SIZE_CYCLE[s_size_step];
+    case PHASE_SIZE_SLOW:
+      if (size_cycle_step(DEMO_SIZE_SLOW_MS, DEMO_SIZE_SLOW_REPS)) {
+        // Slow done — start fast
+        s_demo_phase = PHASE_SIZE_FAST;
+        s_size_step = 0;
+        s_size_rep  = 0;
+        s_size = SIZE_CYCLE[0];
         layer_mark_dirty(s_canvas_layer);
-        schedule_demo(DEMO_SIZE_MS);
-      } else {
-        s_size_rep++;
-        if (s_size_rep < DEMO_SIZE_REPS) {
-          s_size_step = 0;
-          s_size = SIZE_CYCLE[0];
-          layer_mark_dirty(s_canvas_layer);
-          schedule_demo(DEMO_SIZE_MS);
-        } else {
-          s_demo_phase = PHASE_DONE;
-          s_size = 6;
-          layer_mark_dirty(s_canvas_layer);
-        }
+        schedule_demo(DEMO_SIZE_FAST_MS);
+      }
+      break;
+
+    case PHASE_SIZE_FAST:
+      if (size_cycle_step(DEMO_SIZE_FAST_MS, DEMO_SIZE_FAST_REPS)) {
+        s_demo_phase = PHASE_DONE;
+        s_size = 6;
+        layer_mark_dirty(s_canvas_layer);
       }
       break;
 
