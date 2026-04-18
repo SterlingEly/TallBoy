@@ -1,17 +1,16 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v0.7
+// TallBoy — main.c  v0.8
 //
 // Supports all rect platforms:
-//   emery  (200x228): slot=40px, unit=8, colon_slot_x=80
-//   others (144x168): slot=30px, unit=6, colon_slot_x=60
+//   emery  (200x228): slot=40px, unit=8
+//   others (144x168): slot=30px, unit=6
 //
 // BEHAVIORS:
 //   On minute change: quick squish (size 6→1→6, 80ms/frame)
 //   On shake:         2 fast size cycles (80ms/frame)
-//   Quick View (unobstructed bounds shrink): smoothly picks
-//     the largest size that fits the available height.
+//   Quick View:       pick_size() tracks unobstructed height
 //
 // LAUNCH DEMO SEQUENCE:
 //   5s  real time, size 6
@@ -27,29 +26,24 @@
   #define SCREEN_W      200
   #define SCREEN_H      228
   #define SLOT_W         40
-  #define COLON_SLOT_X   80
-  // Slot left-edge x positions (pixel-verified)
-  #define SLOT_H_TENS    12
-  #define SLOT_H_ONES    52
-  #define SLOT_M_TENS   108
-  #define SLOT_M_ONES   148
+  #define COLON_SLOT_X   77
+  #define SLOT_H_TENS     9
+  #define SLOT_H_ONES    49
+  #define SLOT_M_TENS   105
+  #define SLOT_M_ONES   145
 #else
   // aplite, basalt, diorite, flint: 144x168
   #define SCREEN_W      144
   #define SCREEN_H      168
   #define SLOT_W         30
-  #define COLON_SLOT_X   60
-  #define SLOT_H_TENS     9
-  #define SLOT_H_ONES    39
-  #define SLOT_M_TENS    81
-  #define SLOT_M_ONES   111
+  #define COLON_SLOT_X   57
+  #define SLOT_H_TENS     6
+  #define SLOT_H_ONES    36
+  #define SLOT_M_TENS    78
+  #define SLOT_M_ONES   108
 #endif
 
 // ---- Size selection ----
-// Files are full screen height; digit is vertically centered within.
-// outer_h for emery: size1=56, size2=88, ... size6=216 (formula: 24+32*size)
-// outer_h for low-res scaled by 6/8: size1=42, ..., size6=162 (formula: 18+24*size)
-// Pick largest size where outer_h fits within available_h with min 6px margin total.
 static int pick_size(int available_h) {
 #if defined(PBL_PLATFORM_EMERY)
   for (int s = 6; s >= 1; s--) {
@@ -83,7 +77,6 @@ typedef enum {
   PHASE_SIZE_SLOW,
   PHASE_SIZE_FAST,
   PHASE_DONE,
-  // Runtime animations (after demo)
   PHASE_SQUISH,
   PHASE_SHAKE_CYCLE,
 } DemoPhase;
@@ -94,7 +87,7 @@ static Layer     *s_canvas_layer;
 static int        s_hour        = 0;
 static int        s_minute      = 0;
 static int        s_size        = 6;
-static int        s_target_size = 6;  // size after animation completes
+static int        s_target_size = 6;
 static GColor     s_fg, s_bg;
 static DemoPhase  s_phase       = PHASE_TIME_1;
 static int        s_demo_digit  = 0;
@@ -103,8 +96,6 @@ static int        s_anim_rep    = 0;
 static AppTimer  *s_timer       = NULL;
 
 // ---- Bitmaps ----
-// Two resource tables: hi-res (emery) and lo-res (others)
-// [digit 0-9][size 1-6]
 static GBitmap *s_bitmaps[10][6];
 static GBitmap *s_colon_bm[6];
 
@@ -212,7 +203,6 @@ static void draw_colon(GContext *ctx, int size) {
 
 // ---- Draw ----
 static void draw_layer(Layer *layer, GContext *ctx) {
-  GRect bounds = layer_get_unobstructed_bounds(layer);
   graphics_context_set_fill_color(ctx, s_bg);
   graphics_fill_rect(ctx, layer_get_bounds(layer), 0, GCornerNone);
 
@@ -321,18 +311,15 @@ static void timer_cb(void *data) {
       }
       break;
 
-    // Runtime: squish on minute change (6→1→target)
     case PHASE_SQUISH:
       s_anim_step++;
       if (s_anim_step < SQUISH_LEN) {
-        // Phase 1: going down
         s_size = SQUISH_DOWN[s_anim_step];
         layer_mark_dirty(s_canvas_layer);
         schedule(ANIM_FAST_MS);
       } else {
         int up_step = s_anim_step - SQUISH_LEN;
         if (up_step < SQUISH_LEN) {
-          // Phase 2: going back up (but cap at target)
           int proposed = SQUISH_UP[up_step];
           s_size = (proposed > s_target_size) ? s_target_size : proposed;
           layer_mark_dirty(s_canvas_layer);
@@ -345,7 +332,6 @@ static void timer_cb(void *data) {
       }
       break;
 
-    // Runtime: shake = 2 fast cycles
     case PHASE_SHAKE_CYCLE:
       s_anim_step++;
       if (s_anim_step < SIZE_CYCLE_LEN) {
@@ -372,12 +358,11 @@ static void timer_cb(void *data) {
   }
 }
 
-// ---- Quick View / unobstructed bounds ----
+// ---- Quick View ----
 static void unobstructed_change(AnimationProgress progress, void *ctx) {
   Layer *root = window_get_root_layer(s_window);
   GRect ub = layer_get_unobstructed_bounds(root);
   s_target_size = pick_size(ub.size.h);
-  // Only snap to new size if not mid-animation
   if (s_phase == PHASE_DONE) {
     s_size = s_target_size;
     layer_mark_dirty(s_canvas_layer);
@@ -386,7 +371,7 @@ static void unobstructed_change(AnimationProgress progress, void *ctx) {
 
 // ---- Shake ----
 static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
-  if (s_phase != PHASE_DONE) return;  // don't interrupt demo
+  if (s_phase != PHASE_DONE) return;
   s_phase = PHASE_SHAKE_CYCLE;
   s_anim_step = 0; s_anim_rep = 0;
   s_size = SIZE_CYCLE[0];
@@ -398,11 +383,10 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
 static void tick_handler(struct tm *t, TimeUnits units) {
   s_hour   = t->tm_hour;
   s_minute = t->tm_min;
-  // Squish on minute change, but only after demo is done
   if (s_phase == PHASE_DONE) {
     s_phase = PHASE_SQUISH;
     s_anim_step = 0;
-    s_size = SQUISH_DOWN[0];  // start at size 5 (one step down)
+    s_size = SQUISH_DOWN[0];
     schedule(ANIM_FAST_MS);
   }
   layer_mark_dirty(s_canvas_layer);
@@ -411,15 +395,13 @@ static void tick_handler(struct tm *t, TimeUnits units) {
 // ---- Lifecycle ----
 static void window_load(Window *window) {
   Layer *root = window_get_root_layer(window);
-  GRect bounds = layer_get_bounds(root);
-  s_canvas_layer = layer_create(bounds);
+  s_canvas_layer = layer_create(layer_get_bounds(root));
   layer_set_update_proc(s_canvas_layer, draw_layer);
   layer_add_child(root, s_canvas_layer);
 
-  // Set initial target size from unobstructed bounds
   GRect ub = layer_get_unobstructed_bounds(root);
   s_target_size = pick_size(ub.size.h);
-  s_size = 6;  // start at max for demo
+  s_size = 6;
 
   UnobstructedAreaHandlers ua_handlers = { .change = unobstructed_change };
   unobstructed_area_service_subscribe(ua_handlers, NULL);
