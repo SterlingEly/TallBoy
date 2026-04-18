@@ -26,11 +26,11 @@
   #define SCREEN_W      200
   #define SCREEN_H      228
   #define SLOT_W         40
-  #define COLON_SLOT_X   77
-  #define SLOT_H_TENS     9
-  #define SLOT_H_ONES    49
-  #define SLOT_M_TENS   105
-  #define SLOT_M_ONES   145
+  #define COLON_SLOT_X   80
+  #define SLOT_H_TENS    12
+  #define SLOT_H_ONES    52
+  #define SLOT_M_TENS   108
+  #define SLOT_M_ONES   148
 #else
   // aplite, basalt, diorite, flint: 144x168
   #define SCREEN_W      144
