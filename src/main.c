@@ -1,25 +1,74 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v0.9
+// TallBoy — main.c  v1.0
 //
-// THREE LAYOUTS:
-//   LAYOUT_WIDE  — HH:MM horizontal, full width
-//   LAYOUT_LEFT  — HH stacked over MM, left-aligned, info lines right
-//   LAYOUT_RIGHT — HH stacked over MM, right-aligned, info lines left
-//
-// Shake cycles through layouts. Demo plays on launch.
-// INFO LINES: date, battery, steps, HR, BT, weather
-// QUICK VIEW: vertically centered on unobstructed bounds
+// LAYOUTS: WIDE (HH:MM), LEFT (stacked, info right), RIGHT (stacked, info left)
+// SETTINGS: layout, leading_zero, show_colon, debug_mode, 10 info line fields
+// DEBUG MODE: enables launch countdown + shake-to-cycle-layout
 // ============================================================
 
+// ---- Settings ----
+#define SETTINGS_KEY  1
+
+// Field type options for info lines
+typedef enum {
+  FIELD_NONE = 0,
+  FIELD_DATE,           // "WED APR 18"
+  FIELD_BATTERY,        // "BAT 80%" or "BAT 80% CHG"
+  FIELD_STEPS,          // "8432 STEPS"
+  FIELD_HEART_RATE,     // "72 BPM"
+  FIELD_BLUETOOTH,      // "BT OFF" (only shown when disconnected)
+  FIELD_WEATHER_TEMP,   // "72F"
+  FIELD_WEATHER_DESC,   // "CLOUDY"
+  FIELD_WEEKDAY,        // "WEDNESDAY"
+  FIELD_TIME_SECS,      // ":42" seconds (for debug / fun)
+  FIELD_COUNT
+} FieldType;
+
+#define INFO_LINE_COUNT 10
+
+typedef struct {
+  uint8_t layout;       // 0=WIDE 1=LEFT 2=RIGHT
+  bool    leading_zero;
+  bool    show_colon;
+  bool    debug_mode;   // enables countdown + shake layout cycling
+  uint8_t fields[INFO_LINE_COUNT];  // FieldType per slot
+} TallBoySettings;
+
+static TallBoySettings s_cfg;
+
+static void prv_default_settings(void) {
+  s_cfg.layout       = 0;
+  s_cfg.leading_zero = true;
+  s_cfg.show_colon   = true;
+  s_cfg.debug_mode   = true;  // on by default during dev
+  // 6 populated, 4 blank
+  s_cfg.fields[0] = FIELD_DATE;
+  s_cfg.fields[1] = FIELD_BATTERY;
+  s_cfg.fields[2] = FIELD_STEPS;
+  s_cfg.fields[3] = FIELD_HEART_RATE;
+  s_cfg.fields[4] = FIELD_BLUETOOTH;
+  s_cfg.fields[5] = FIELD_WEATHER_TEMP;
+  s_cfg.fields[6] = FIELD_NONE;
+  s_cfg.fields[7] = FIELD_NONE;
+  s_cfg.fields[8] = FIELD_NONE;
+  s_cfg.fields[9] = FIELD_NONE;
+}
+
+static void prv_load_settings(void) {
+  prv_default_settings();
+  persist_read_data(SETTINGS_KEY, &s_cfg, sizeof(s_cfg));
+}
+
+static void prv_save_settings(void) {
+  persist_write_data(SETTINGS_KEY, &s_cfg, sizeof(s_cfg));
+}
+
+// ---- Layout constants ----
 #define LAYOUT_WIDE   0
 #define LAYOUT_LEFT   1
 #define LAYOUT_RIGHT  2
-static int s_layout = LAYOUT_WIDE;
-
-static bool s_leading_zero = true;
-static bool s_show_colon   = true;
 
 // ---- Platform geometry ----
 #if defined(PBL_PLATFORM_EMERY)
@@ -34,6 +83,7 @@ static bool s_show_colon   = true;
   #define SIDE_MARGIN    12
   #define INFO_SMALL_H   14
   #define STACK_DIGIT_H  88   // outer_h at size 2: 24+32*2
+  #define HALF_UNIT       4   // half a unit (8/2)
 #else
   #define SCREEN_W      144
   #define SCREEN_H      168
@@ -46,6 +96,7 @@ static bool s_show_colon   = true;
   #define SIDE_MARGIN     6
   #define INFO_SMALL_H   14
   #define STACK_DIGIT_H  66   // outer_h at size 2: 18+24*2
+  #define HALF_UNIT       3   // half a unit (6/2)
 #endif
 
 #define STACK_SIZE  2
@@ -53,40 +104,47 @@ static bool s_show_colon   = true;
 // ---- Size selection ----
 static int pick_size(int available_h) {
 #if defined(PBL_PLATFORM_EMERY)
-  for (int s = 6; s >= 1; s--) {
+  for (int s = 6; s >= 1; s--)
     if ((24 + 32 * s) <= available_h - 6) return s;
-  }
 #else
-  for (int s = 6; s >= 1; s--) {
+  for (int s = 6; s >= 1; s--)
     if ((18 + 24 * s) <= available_h - 6) return s;
-  }
 #endif
   return 1;
 }
 
-// ---- Animation sequences ----
+// ---- Animation ----
+// Squish (on minute change): 6→1→target
 static const int SQUISH_DOWN[] = { 5, 4, 3, 2, 1 };
 static const int SQUISH_UP[]   = { 2, 3, 4, 5, 6 };
 #define SQUISH_LEN 5
 
-static const int SIZE_CYCLE[]  = { 6, 5, 4, 3, 2, 1, 2, 3, 4, 5, 6 };
+// Size cycle (shake / fast demo)
+static const int SIZE_CYCLE[] = { 6, 5, 4, 3, 2, 1, 2, 3, 4, 5, 6 };
 #define SIZE_CYCLE_LEN 11
+
+// Countdown: each digit grows 1→6 then shrinks 6→1
+// GROW[] and SHRINK[] each have 5 steps
+static const int GROW[]   = { 1, 2, 3, 4, 5, 6 };
+static const int SHRINK[] = { 5, 4, 3, 2, 1 };
+#define GROW_LEN   6
+#define SHRINK_LEN 5
+#define COUNTDOWN_DIGIT_FRAMES (GROW_LEN + SHRINK_LEN)  // 11 frames per digit
+#define COUNTDOWN_MS  55   // ~18fps per frame
+
+// Post-countdown blink: fast squish x2
+#define BLINK_REPS 2
 
 #define ANIM_SLOW_MS  1000
 #define ANIM_FAST_MS    80
-#define DEMO_TIME_MS  5000
-#define DEMO_DIGIT_MS 1000
 
 typedef enum {
-  PHASE_TIME_1,
-  PHASE_DIGIT_CYCLE,
-  PHASE_TIME_2,
-  PHASE_SIZE_SLOW,
-  PHASE_SIZE_FAST,
+  PHASE_COUNTDOWN,      // debug: 9→0 each with grow/shrink
+  PHASE_BLINK,          // 2x fast size cycle after countdown
   PHASE_DONE,
-  PHASE_SQUISH,
-  PHASE_SHAKE_CYCLE,
-} DemoPhase;
+  PHASE_SQUISH,         // per-minute on LAYOUT_WIDE
+  PHASE_SHAKE_CYCLE,    // shake animation on LAYOUT_WIDE
+} Phase;
 
 // ---- State ----
 static Window    *s_window;
@@ -96,11 +154,16 @@ static int        s_minute      = 0;
 static int        s_size        = 6;
 static int        s_target_size = 6;
 static GColor     s_fg, s_bg;
-static DemoPhase  s_phase       = PHASE_TIME_1;
-static int        s_demo_digit  = 0;
+static Phase      s_phase       = PHASE_COUNTDOWN;
 static int        s_anim_step   = 0;
 static int        s_anim_rep    = 0;
+static int        s_countdown_digit = 9;  // current countdown digit
 static AppTimer  *s_timer       = NULL;
+
+// Demo digit override (during countdown all four positions show same digit)
+static bool  s_demo_override = false;
+static int   s_demo_digit    = 9;
+static int   s_demo_size     = 6;
 
 // ---- Data state ----
 static int   s_battery_pct      = 100;
@@ -203,7 +266,6 @@ static void free_bitmaps(void) {
     if (s_colon_bm[s]) { gbitmap_destroy(s_colon_bm[s]); s_colon_bm[s] = NULL; }
 }
 
-// ---- Draw a bitmap at a specific position ----
 static void blit(GContext *ctx, GBitmap *bm, int x, int y) {
   if (!bm) return;
   graphics_context_set_compositing_mode(ctx, GCompOpSet);
@@ -214,38 +276,67 @@ static void blit(GContext *ctx, GBitmap *bm, int x, int y) {
 // INFO LINES
 // ============================================================
 static const char *s_day_names[]   = { "SUN","MON","TUE","WED","THU","FRI","SAT" };
+static const char *s_day_full[]    = {
+  "SUNDAY","MONDAY","TUESDAY","WEDNESDAY","THURSDAY","FRIDAY","SATURDAY"
+};
 static const char *s_month_abbrs[] = {
   "JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"
 };
 
-static int build_info_lines(char lines[][32], int max_lines, struct tm *t) {
-  int n = 0;
-  if (n < max_lines && t)
-    snprintf(lines[n++], 32, "%s %s %d",
-             s_day_names[t->tm_wday], s_month_abbrs[t->tm_mon], t->tm_mday);
-  if (n < max_lines)
-    snprintf(lines[n++], 32, "BAT %d%%%s", s_battery_pct, s_charging ? " CHG" : "");
+static void build_field_string(char *buf, int len, FieldType field, struct tm *t) {
+  buf[0] = '\0';
+  switch (field) {
+    case FIELD_NONE: break;
+    case FIELD_DATE:
+      if (t) snprintf(buf, len, "%s %s %d",
+                      s_day_names[t->tm_wday], s_month_abbrs[t->tm_mon], t->tm_mday);
+      break;
+    case FIELD_WEEKDAY:
+      if (t) snprintf(buf, len, "%s", s_day_full[t->tm_wday]);
+      break;
+    case FIELD_BATTERY:
+      snprintf(buf, len, "BAT %d%%%s", s_battery_pct, s_charging ? " CHG" : "");
+      break;
+    case FIELD_STEPS:
 #if defined(PBL_HEALTH)
-  if (n < max_lines)
-    snprintf(lines[n++], 32, "%d STEPS", s_steps);
-  if (n < max_lines && s_heart_rate > 0)
-    snprintf(lines[n++], 32, "%d BPM", s_heart_rate);
+      snprintf(buf, len, "%d STEPS", s_steps);
 #endif
-  if (n < max_lines && !s_bt_connected)
-    snprintf(lines[n++], 32, "BT OFF");
-  if (n < max_lines && s_weather_temp[0])
-    snprintf(lines[n++], 32, "%s", s_weather_temp);
-  if (n < max_lines && s_weather_desc[0])
-    snprintf(lines[n++], 32, "%s", s_weather_desc);
-  return n;
+      break;
+    case FIELD_HEART_RATE:
+#if defined(PBL_HEALTH)
+      if (s_heart_rate > 0) snprintf(buf, len, "%d BPM", s_heart_rate);
+#endif
+      break;
+    case FIELD_BLUETOOTH:
+      if (!s_bt_connected) snprintf(buf, len, "BT OFF");
+      break;
+    case FIELD_WEATHER_TEMP:
+      if (s_weather_temp[0]) snprintf(buf, len, "%s", s_weather_temp);
+      break;
+    case FIELD_WEATHER_DESC:
+      if (s_weather_desc[0]) snprintf(buf, len, "%s", s_weather_desc);
+      break;
+    case FIELD_TIME_SECS:
+      if (t) snprintf(buf, len, ":%02d", t->tm_sec);
+      break;
+    default: break;
+  }
 }
 
-static void draw_info_lines(GContext *ctx, GRect area, int max_lines, struct tm *t) {
-  char lines[8][32];
-  int n = build_info_lines(lines, max_lines < 8 ? max_lines : 8, t);
+static void draw_info_lines(GContext *ctx, GRect area, struct tm *t) {
+  GFont font   = fonts_get_system_font(FONT_KEY_GOTHIC_14);
+  int line_h   = INFO_SMALL_H + 2;
+  int max_fit  = area.size.h / line_h;
+
+  // Build non-empty lines up to what fits
+  char lines[INFO_LINE_COUNT][32];
+  int n = 0;
+  for (int i = 0; i < INFO_LINE_COUNT && n < max_fit; i++) {
+    build_field_string(lines[n], 32, (FieldType)s_cfg.fields[i], t);
+    if (lines[n][0] != '\0') n++;
+  }
   if (n == 0) return;
-  GFont font = fonts_get_system_font(FONT_KEY_GOTHIC_14);
-  int line_h  = INFO_SMALL_H + 2;
+
   int total_h = n * line_h;
   int start_y = area.origin.y + (area.size.h - total_h) / 2;
   graphics_context_set_text_color(ctx, s_fg);
@@ -260,18 +351,20 @@ static void draw_info_lines(GContext *ctx, GRect area, int max_lines, struct tm 
 // DRAW LAYER
 // ============================================================
 static void draw_layer(Layer *layer, GContext *ctx) {
-  Layer *root = window_get_root_layer(s_window);
-  GRect ub    = layer_get_unobstructed_bounds(root);
-  int ub_top  = ub.origin.y;
-  int ub_h    = ub.size.h;
+  Layer *root  = window_get_root_layer(s_window);
+  GRect ub     = layer_get_unobstructed_bounds(root);
+  int ub_top   = ub.origin.y;
+  int ub_h     = ub.size.h;
   int center_y = ub_top + ub_h / 2;
 
   graphics_context_set_fill_color(ctx, s_bg);
   graphics_fill_rect(ctx, layer_get_bounds(layer), 0, GCornerNone);
 
-  int h_tens, h_ones, m_tens, m_ones;
-  if (s_phase == PHASE_DIGIT_CYCLE) {
+  // Which digits and size to render
+  int h_tens, h_ones, m_tens, m_ones, size;
+  if (s_demo_override) {
     h_tens = h_ones = m_tens = m_ones = s_demo_digit;
+    size   = s_demo_size;
   } else {
     int h  = s_hour % 12;
     if (h == 0) h = 12;
@@ -279,34 +372,31 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     h_ones = h % 10;
     m_tens = s_minute / 10;
     m_ones = s_minute % 10;
+    size   = s_size;
   }
 
-  bool draw_h_tens = s_leading_zero || (h_tens != 0);
+  bool draw_h_tens = s_cfg.leading_zero || (h_tens != 0) || s_demo_override;
 
   time_t now_t  = time(NULL);
   struct tm *tm = (s_phase == PHASE_DONE) ? localtime(&now_t) : NULL;
 
-  if (s_layout == LAYOUT_WIDE) {
-    // Files are SCREEN_H tall, digit centered at SCREEN_H/2.
-    // Shift file so digit center lands at ub center.
+  if (s_cfg.layout == LAYOUT_WIDE) {
     int y = center_y - SCREEN_H / 2;
-    int size = s_size;
     if (draw_h_tens) blit(ctx, get_bitmap(h_tens, size), SLOT_H_TENS, y);
     blit(ctx, get_bitmap(h_ones, size), SLOT_H_ONES, y);
-    if (s_show_colon) blit(ctx, get_colon(size), COLON_SLOT_X, y);
+    if (s_cfg.show_colon && !s_demo_override)
+      blit(ctx, get_colon(size), COLON_SLOT_X, y);
     blit(ctx, get_bitmap(m_tens, size), SLOT_M_TENS, y);
     blit(ctx, get_bitmap(m_ones, size), SLOT_M_ONES, y);
 
   } else {
-    // Stacked: hours top half, minutes bottom half.
-    // Top digit center  = center_y - STACK_DIGIT_H/2
-    // Bottom digit center = center_y + STACK_DIGIT_H/2
-    // File y = digit_center - SCREEN_H/2
-    int h_y = (center_y - STACK_DIGIT_H / 2) - SCREEN_H / 2;
-    int m_y = (center_y + STACK_DIGIT_H / 2) - SCREEN_H / 2;
+    // Stacked: hours centered in top half, minutes in bottom half.
+    // Shift each row by HALF_UNIT to add breathing room at the seam.
+    int h_y = (center_y - STACK_DIGIT_H / 2 - HALF_UNIT) - SCREEN_H / 2;
+    int m_y = (center_y + STACK_DIGIT_H / 2 + HALF_UNIT) - SCREEN_H / 2;
 
     int tens_x, ones_x, info_x, info_w;
-    if (s_layout == LAYOUT_LEFT) {
+    if (s_cfg.layout == LAYOUT_LEFT) {
       tens_x = SIDE_MARGIN;
       ones_x = SIDE_MARGIN + SLOT_W;
       info_x = SIDE_MARGIN + SLOT_W * 2 + SIDE_MARGIN;
@@ -323,10 +413,8 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     blit(ctx, get_bitmap(m_tens, STACK_SIZE), tens_x, m_y);
     blit(ctx, get_bitmap(m_ones, STACK_SIZE), ones_x, m_y);
 
-    if (tm && info_w > 20) {
-      int max_lines = ub_h / (INFO_SMALL_H + 2);
-      draw_info_lines(ctx, GRect(info_x, ub_top, info_w, ub_h), max_lines, tm);
-    }
+    if (tm && info_w > 20)
+      draw_info_lines(ctx, GRect(info_x, ub_top, info_w, ub_h), tm);
   }
 }
 
@@ -343,69 +431,70 @@ static void schedule(uint32_t ms) {
 static void timer_cb(void *data) {
   s_timer = NULL;
   switch (s_phase) {
-    case PHASE_TIME_1:
-      s_phase = PHASE_DIGIT_CYCLE;
-      s_demo_digit = 0;
-      layer_mark_dirty(s_canvas_layer);
-      schedule(DEMO_DIGIT_MS);
-      break;
-    case PHASE_DIGIT_CYCLE:
-      s_demo_digit++;
-      if (s_demo_digit < 10) {
-        layer_mark_dirty(s_canvas_layer);
-        schedule(DEMO_DIGIT_MS);
+
+    case PHASE_COUNTDOWN: {
+      // Each digit: GROW_LEN frames grow, SHRINK_LEN frames shrink, then next digit
+      int frame_in_digit = s_anim_step % COUNTDOWN_DIGIT_FRAMES;
+      if (frame_in_digit < GROW_LEN) {
+        s_demo_size = GROW[frame_in_digit];
       } else {
-        s_phase = PHASE_TIME_2; s_size = 6;
-        layer_mark_dirty(s_canvas_layer);
-        schedule(DEMO_TIME_MS);
+        s_demo_size = SHRINK[frame_in_digit - GROW_LEN];
       }
-      break;
-    case PHASE_TIME_2:
-      s_phase = PHASE_SIZE_SLOW;
-      s_anim_step = 0; s_anim_rep = 0;
-      s_size = SIZE_CYCLE[0];
+      s_demo_digit    = s_countdown_digit;
+      s_demo_override = true;
       layer_mark_dirty(s_canvas_layer);
-      schedule(ANIM_SLOW_MS);
-      break;
-    case PHASE_SIZE_SLOW:
+
       s_anim_step++;
-      if (s_anim_step < SIZE_CYCLE_LEN) {
-        s_size = SIZE_CYCLE[s_anim_step];
-        layer_mark_dirty(s_canvas_layer);
-        schedule(ANIM_SLOW_MS);
-      } else {
-        s_anim_rep++;
-        if (s_anim_rep < 2) {
-          s_anim_step = 0; s_size = SIZE_CYCLE[0];
-          layer_mark_dirty(s_canvas_layer);
-          schedule(ANIM_SLOW_MS);
+      if (s_anim_step >= COUNTDOWN_DIGIT_FRAMES) {
+        // Finished this digit
+        s_anim_step = 0;
+        if (s_countdown_digit > 0) {
+          s_countdown_digit--;
+          schedule(COUNTDOWN_MS);
         } else {
-          s_phase = PHASE_SIZE_FAST;
+          // Countdown done — do 2x fast blink then show real time
+          s_demo_override = false;
+          s_size = 6;
+          s_phase = PHASE_BLINK;
           s_anim_step = 0; s_anim_rep = 0;
-          s_size = SIZE_CYCLE[0];
           layer_mark_dirty(s_canvas_layer);
           schedule(ANIM_FAST_MS);
         }
+      } else {
+        schedule(COUNTDOWN_MS);
       }
       break;
-    case PHASE_SIZE_FAST:
+    }
+
+    case PHASE_BLINK:
+      // 2x squish: 6→1→6, fast
       s_anim_step++;
-      if (s_anim_step < SIZE_CYCLE_LEN) {
-        s_size = SIZE_CYCLE[s_anim_step];
+      if (s_anim_step < SQUISH_LEN) {
+        s_size = SQUISH_DOWN[s_anim_step];
         layer_mark_dirty(s_canvas_layer);
         schedule(ANIM_FAST_MS);
       } else {
-        s_anim_rep++;
-        if (s_anim_rep < 2) {
-          s_anim_step = 0; s_size = SIZE_CYCLE[0];
+        int up = s_anim_step - SQUISH_LEN;
+        if (up < SQUISH_LEN) {
+          s_size = SQUISH_UP[up];
           layer_mark_dirty(s_canvas_layer);
           schedule(ANIM_FAST_MS);
         } else {
-          s_phase = PHASE_DONE; s_size = s_target_size;
-          layer_mark_dirty(s_canvas_layer);
+          s_anim_rep++;
+          if (s_anim_rep < BLINK_REPS) {
+            s_anim_step = 0;
+            s_size = SQUISH_DOWN[0];
+            layer_mark_dirty(s_canvas_layer);
+            schedule(ANIM_FAST_MS);
+          } else {
+            s_phase = PHASE_DONE;
+            s_size  = s_target_size;
+            layer_mark_dirty(s_canvas_layer);
+          }
         }
       }
       break;
+
     case PHASE_SQUISH:
       s_anim_step++;
       if (s_anim_step < SQUISH_LEN) {
@@ -425,6 +514,7 @@ static void timer_cb(void *data) {
         }
       }
       break;
+
     case PHASE_SHAKE_CYCLE:
       s_anim_step++;
       if (s_anim_step < SIZE_CYCLE_LEN) {
@@ -443,6 +533,7 @@ static void timer_cb(void *data) {
         }
       }
       break;
+
     case PHASE_DONE:
       break;
   }
@@ -462,9 +553,11 @@ static void unobstructed_change(AnimationProgress progress, void *ctx) {
 }
 
 static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
-  if (s_phase != PHASE_DONE) return;
-  s_layout = (s_layout + 1) % 3;
-  if (s_layout == LAYOUT_WIDE) {
+  if (!s_cfg.debug_mode || s_phase != PHASE_DONE) return;
+  // Cycle layout; animate on WIDE
+  s_cfg.layout = (s_cfg.layout + 1) % 3;
+  prv_save_settings();
+  if (s_cfg.layout == LAYOUT_WIDE) {
     s_phase = PHASE_SHAKE_CYCLE;
     s_anim_step = 0; s_anim_rep = 0;
     s_size = SIZE_CYCLE[0];
@@ -476,7 +569,7 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
 static void tick_handler(struct tm *t, TimeUnits units) {
   s_hour   = t->tm_hour;
   s_minute = t->tm_min;
-  if (s_phase == PHASE_DONE && s_layout == LAYOUT_WIDE) {
+  if (s_phase == PHASE_DONE && s_cfg.layout == LAYOUT_WIDE) {
     s_phase = PHASE_SQUISH;
     s_anim_step = 0;
     s_size = SQUISH_DOWN[0];
@@ -552,7 +645,20 @@ static void window_load(Window *window) {
   UnobstructedAreaHandlers ua = { .change = unobstructed_change };
   unobstructed_area_service_subscribe(ua, NULL);
   accel_tap_service_subscribe(accel_tap_handler);
-  schedule(DEMO_TIME_MS);
+  // Start countdown if debug mode, else go straight to done
+  if (s_cfg.debug_mode) {
+    s_phase = PHASE_COUNTDOWN;
+    s_countdown_digit = 9;
+    s_anim_step = 0;
+    s_demo_override = true;
+    s_demo_digit = 9;
+    s_demo_size  = GROW[0];
+    layer_mark_dirty(s_canvas_layer);
+    schedule(COUNTDOWN_MS);
+  } else {
+    s_phase = PHASE_DONE;
+    s_size  = s_target_size;
+  }
 }
 
 static void window_unload(Window *window) {
@@ -564,6 +670,7 @@ static void window_unload(Window *window) {
 }
 
 static void init(void) {
+  prv_load_settings();
   s_fg = GColorWhite;
   s_bg = GColorBlack;
   memset(s_bitmaps,  0, sizeof(s_bitmaps));
