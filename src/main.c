@@ -1,26 +1,80 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v0.6
+// TallBoy — main.c  v0.7
 //
-// DEMO SEQUENCE:
-//   5s   real time, size 6
-//   10s  digit cycle 0-9, 1s each
-//   5s   real time, size 6
-//   2x   slow size cycle (1000ms/frame): 6→5→4→3→2→1→2→3→4→5→6
-//   2x   fast size cycle ( 100ms/frame): 6→5→4→3→2→1→2→3→4→5→6
-//   done — real time, size 6
+// Supports all rect platforms:
+//   emery  (200x228): slot=40px, unit=8, colon_slot_x=80
+//   others (144x168): slot=30px, unit=6, colon_slot_x=60
+//
+// BEHAVIORS:
+//   On minute change: quick squish (size 6→1→6, 80ms/frame)
+//   On shake:         2 fast size cycles (80ms/frame)
+//   Quick View (unobstructed bounds shrink): smoothly picks
+//     the largest size that fits the available height.
+//
+// LAUNCH DEMO SEQUENCE:
+//   5s  real time, size 6
+//   10s digit cycle 0-9, 1s each
+//   5s  real time, size 6
+//   2x  slow size cycle (1000ms/frame)
+//   2x  fast size cycle (80ms/frame)
+//   done — real time, responsive sizing
 // ============================================================
 
-#define SCREEN_W   200
-#define SCREEN_H   228
-#define SLOT_W      40
+// ---- Platform geometry ----
+#if defined(PBL_PLATFORM_EMERY)
+  #define SCREEN_W      200
+  #define SCREEN_H      228
+  #define SLOT_W         40
+  #define COLON_SLOT_X   80
+  // Slot left-edge x positions (pixel-verified)
+  #define SLOT_H_TENS    12
+  #define SLOT_H_ONES    52
+  #define SLOT_M_TENS   108
+  #define SLOT_M_ONES   148
+#else
+  // aplite, basalt, diorite, flint: 144x168
+  #define SCREEN_W      144
+  #define SCREEN_H      168
+  #define SLOT_W         30
+  #define COLON_SLOT_X   60
+  #define SLOT_H_TENS     9
+  #define SLOT_H_ONES    39
+  #define SLOT_M_TENS    81
+  #define SLOT_M_ONES   111
+#endif
 
-#define SLOT_H_TENS   12
-#define SLOT_H_ONES   52
-#define SLOT_M_TENS  108
-#define SLOT_M_ONES  148
-#define COLON_SLOT_X  80
+// ---- Size selection ----
+// Files are full screen height; digit is vertically centered within.
+// outer_h for emery: size1=56, size2=88, ... size6=216 (formula: 24+32*size)
+// outer_h for low-res scaled by 6/8: size1=42, ..., size6=162 (formula: 18+24*size)
+// Pick largest size where outer_h fits within available_h with min 6px margin total.
+static int pick_size(int available_h) {
+#if defined(PBL_PLATFORM_EMERY)
+  for (int s = 6; s >= 1; s--) {
+    if ((24 + 32 * s) <= available_h - 6) return s;
+  }
+#else
+  for (int s = 6; s >= 1; s--) {
+    if ((18 + 24 * s) <= available_h - 6) return s;
+  }
+#endif
+  return 1;
+}
+
+// ---- Animation sequences ----
+static const int SQUISH_DOWN[] = { 5, 4, 3, 2, 1 };
+static const int SQUISH_UP[]   = { 2, 3, 4, 5, 6 };
+#define SQUISH_LEN 5
+
+static const int SIZE_CYCLE[]  = { 6, 5, 4, 3, 2, 1, 2, 3, 4, 5, 6 };
+#define SIZE_CYCLE_LEN 11
+
+#define ANIM_SLOW_MS  1000
+#define ANIM_FAST_MS    80
+#define DEMO_TIME_MS  5000
+#define DEMO_DIGIT_MS 1000
 
 typedef enum {
   PHASE_TIME_1,
@@ -28,37 +82,33 @@ typedef enum {
   PHASE_TIME_2,
   PHASE_SIZE_SLOW,
   PHASE_SIZE_FAST,
-  PHASE_DONE
+  PHASE_DONE,
+  // Runtime animations (after demo)
+  PHASE_SQUISH,
+  PHASE_SHAKE_CYCLE,
 } DemoPhase;
 
-#define DEMO_TIME_MS      5000
-#define DEMO_DIGIT_MS     1000
-#define DEMO_SIZE_SLOW_MS 1000
-#define DEMO_SIZE_FAST_MS  100
-#define DEMO_SIZE_SLOW_REPS 2
-#define DEMO_SIZE_FAST_REPS 2
-
-static const int SIZE_CYCLE[] = { 6, 5, 4, 3, 2, 1, 2, 3, 4, 5, 6 };
-#define SIZE_CYCLE_LEN 11
-
+// ---- State ----
 static Window    *s_window;
 static Layer     *s_canvas_layer;
-static int        s_hour    = 0;
-static int        s_minute  = 0;
-static int        s_size    = 6;
+static int        s_hour        = 0;
+static int        s_minute      = 0;
+static int        s_size        = 6;
+static int        s_target_size = 6;  // size after animation completes
 static GColor     s_fg, s_bg;
-static DemoPhase  s_demo_phase = PHASE_TIME_1;
-static int        s_demo_digit = 0;
-static int        s_size_step  = 0;
-static int        s_size_rep   = 0;
-static AppTimer  *s_demo_timer = NULL;
+static DemoPhase  s_phase       = PHASE_TIME_1;
+static int        s_demo_digit  = 0;
+static int        s_anim_step   = 0;
+static int        s_anim_rep    = 0;
+static AppTimer  *s_timer       = NULL;
 
-// ============================================================
-// BITMAPS
-// ============================================================
+// ---- Bitmaps ----
+// Two resource tables: hi-res (emery) and lo-res (others)
+// [digit 0-9][size 1-6]
 static GBitmap *s_bitmaps[10][6];
 static GBitmap *s_colon_bm[6];
 
+#if defined(PBL_PLATFORM_EMERY)
 static const uint32_t s_res[10][6] = {
   { RESOURCE_ID_TALLBOY_01, RESOURCE_ID_TALLBOY_02, RESOURCE_ID_TALLBOY_03,
     RESOURCE_ID_TALLBOY_04, RESOURCE_ID_TALLBOY_05, RESOURCE_ID_TALLBOY_06 },
@@ -81,11 +131,38 @@ static const uint32_t s_res[10][6] = {
   { RESOURCE_ID_TALLBOY_91, RESOURCE_ID_TALLBOY_92, RESOURCE_ID_TALLBOY_93,
     RESOURCE_ID_TALLBOY_94, RESOURCE_ID_TALLBOY_95, RESOURCE_ID_TALLBOY_96 },
 };
-
 static const uint32_t s_colon_res[6] = {
   RESOURCE_ID_TALLBOY_COLON1, RESOURCE_ID_TALLBOY_COLON2, RESOURCE_ID_TALLBOY_COLON3,
   RESOURCE_ID_TALLBOY_COLON4, RESOURCE_ID_TALLBOY_COLON5, RESOURCE_ID_TALLBOY_COLON6,
 };
+#else
+static const uint32_t s_res[10][6] = {
+  { RESOURCE_ID_TALLBOY_L01, RESOURCE_ID_TALLBOY_L02, RESOURCE_ID_TALLBOY_L03,
+    RESOURCE_ID_TALLBOY_L04, RESOURCE_ID_TALLBOY_L05, RESOURCE_ID_TALLBOY_L06 },
+  { RESOURCE_ID_TALLBOY_L11, RESOURCE_ID_TALLBOY_L12, RESOURCE_ID_TALLBOY_L13,
+    RESOURCE_ID_TALLBOY_L14, RESOURCE_ID_TALLBOY_L15, RESOURCE_ID_TALLBOY_L16 },
+  { RESOURCE_ID_TALLBOY_L21, RESOURCE_ID_TALLBOY_L22, RESOURCE_ID_TALLBOY_L23,
+    RESOURCE_ID_TALLBOY_L24, RESOURCE_ID_TALLBOY_L25, RESOURCE_ID_TALLBOY_L26 },
+  { RESOURCE_ID_TALLBOY_L31, RESOURCE_ID_TALLBOY_L32, RESOURCE_ID_TALLBOY_L33,
+    RESOURCE_ID_TALLBOY_L34, RESOURCE_ID_TALLBOY_L35, RESOURCE_ID_TALLBOY_L36 },
+  { RESOURCE_ID_TALLBOY_L41, RESOURCE_ID_TALLBOY_L42, RESOURCE_ID_TALLBOY_L43,
+    RESOURCE_ID_TALLBOY_L44, RESOURCE_ID_TALLBOY_L45, RESOURCE_ID_TALLBOY_L46 },
+  { RESOURCE_ID_TALLBOY_L51, RESOURCE_ID_TALLBOY_L52, RESOURCE_ID_TALLBOY_L53,
+    RESOURCE_ID_TALLBOY_L54, RESOURCE_ID_TALLBOY_L55, RESOURCE_ID_TALLBOY_L56 },
+  { RESOURCE_ID_TALLBOY_L61, RESOURCE_ID_TALLBOY_L62, RESOURCE_ID_TALLBOY_L63,
+    RESOURCE_ID_TALLBOY_L64, RESOURCE_ID_TALLBOY_L65, RESOURCE_ID_TALLBOY_L66 },
+  { RESOURCE_ID_TALLBOY_L71, RESOURCE_ID_TALLBOY_L72, RESOURCE_ID_TALLBOY_L73,
+    RESOURCE_ID_TALLBOY_L74, RESOURCE_ID_TALLBOY_L75, RESOURCE_ID_TALLBOY_L76 },
+  { RESOURCE_ID_TALLBOY_L81, RESOURCE_ID_TALLBOY_L82, RESOURCE_ID_TALLBOY_L83,
+    RESOURCE_ID_TALLBOY_L84, RESOURCE_ID_TALLBOY_L85, RESOURCE_ID_TALLBOY_L86 },
+  { RESOURCE_ID_TALLBOY_L91, RESOURCE_ID_TALLBOY_L92, RESOURCE_ID_TALLBOY_L93,
+    RESOURCE_ID_TALLBOY_L94, RESOURCE_ID_TALLBOY_L95, RESOURCE_ID_TALLBOY_L96 },
+};
+static const uint32_t s_colon_res[6] = {
+  RESOURCE_ID_TALLBOY_LCOLON1, RESOURCE_ID_TALLBOY_LCOLON2, RESOURCE_ID_TALLBOY_LCOLON3,
+  RESOURCE_ID_TALLBOY_LCOLON4, RESOURCE_ID_TALLBOY_LCOLON5, RESOURCE_ID_TALLBOY_LCOLON6,
+};
+#endif
 
 static uint32_t find_res(int digit, int size) {
   int si = size - 1;
@@ -133,18 +210,16 @@ static void draw_colon(GContext *ctx, int size) {
   graphics_draw_bitmap_in_rect(ctx, bm, GRect(COLON_SLOT_X, 0, SLOT_W, SCREEN_H));
 }
 
-// ============================================================
-// DRAW LAYER
-// ============================================================
+// ---- Draw ----
 static void draw_layer(Layer *layer, GContext *ctx) {
-  GRect bounds = layer_get_bounds(layer);
+  GRect bounds = layer_get_unobstructed_bounds(layer);
   graphics_context_set_fill_color(ctx, s_bg);
-  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+  graphics_fill_rect(ctx, layer_get_bounds(layer), 0, GCornerNone);
 
   int size = s_size;
   int h_tens, h_ones, m_tens, m_ones;
 
-  if (s_demo_phase == PHASE_DIGIT_CYCLE) {
+  if (s_phase == PHASE_DIGIT_CYCLE) {
     h_tens = h_ones = m_tens = m_ones = s_demo_digit;
   } else {
     int h = s_hour % 12;
@@ -162,87 +237,133 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   draw_digit(ctx, m_ones, size, SLOT_M_ONES);
 }
 
-// ============================================================
-// DEMO TIMER — shared handler for both slow and fast size cycles
-// ============================================================
-static void demo_timer_cb(void *data);
+// ---- Timer ----
+static void timer_cb(void *data);
 
-static void schedule_demo(uint32_t ms) {
-  if (s_demo_timer) app_timer_cancel(s_demo_timer);
-  s_demo_timer = app_timer_register(ms, demo_timer_cb, NULL);
+static void schedule(uint32_t ms) {
+  if (s_timer) app_timer_cancel(s_timer);
+  s_timer = app_timer_register(ms, timer_cb, NULL);
 }
 
-// Advance one step of the size cycle. Returns true if cycle is complete.
-static bool size_cycle_step(uint32_t frame_ms, int max_reps) {
-  s_size_step++;
-  if (s_size_step < SIZE_CYCLE_LEN) {
-    s_size = SIZE_CYCLE[s_size_step];
-    layer_mark_dirty(s_canvas_layer);
-    schedule_demo(frame_ms);
-    return false;
-  } else {
-    s_size_rep++;
-    if (s_size_rep < max_reps) {
-      s_size_step = 0;
-      s_size = SIZE_CYCLE[0];
-      layer_mark_dirty(s_canvas_layer);
-      schedule_demo(frame_ms);
-      return false;
-    }
-    return true;
-  }
-}
-
-static void demo_timer_cb(void *data) {
-  s_demo_timer = NULL;
-  switch (s_demo_phase) {
+static void timer_cb(void *data) {
+  s_timer = NULL;
+  switch (s_phase) {
 
     case PHASE_TIME_1:
-      s_demo_phase = PHASE_DIGIT_CYCLE;
+      s_phase = PHASE_DIGIT_CYCLE;
       s_demo_digit = 0;
       layer_mark_dirty(s_canvas_layer);
-      schedule_demo(DEMO_DIGIT_MS);
+      schedule(DEMO_DIGIT_MS);
       break;
 
     case PHASE_DIGIT_CYCLE:
       s_demo_digit++;
       if (s_demo_digit < 10) {
         layer_mark_dirty(s_canvas_layer);
-        schedule_demo(DEMO_DIGIT_MS);
+        schedule(DEMO_DIGIT_MS);
       } else {
-        s_demo_phase = PHASE_TIME_2;
+        s_phase = PHASE_TIME_2;
         s_size = 6;
         layer_mark_dirty(s_canvas_layer);
-        schedule_demo(DEMO_TIME_MS);
+        schedule(DEMO_TIME_MS);
       }
       break;
 
     case PHASE_TIME_2:
-      s_demo_phase = PHASE_SIZE_SLOW;
-      s_size_step = 0;
-      s_size_rep  = 0;
+      s_phase = PHASE_SIZE_SLOW;
+      s_anim_step = 0; s_anim_rep = 0;
       s_size = SIZE_CYCLE[0];
       layer_mark_dirty(s_canvas_layer);
-      schedule_demo(DEMO_SIZE_SLOW_MS);
+      schedule(ANIM_SLOW_MS);
       break;
 
     case PHASE_SIZE_SLOW:
-      if (size_cycle_step(DEMO_SIZE_SLOW_MS, DEMO_SIZE_SLOW_REPS)) {
-        // Slow done — start fast
-        s_demo_phase = PHASE_SIZE_FAST;
-        s_size_step = 0;
-        s_size_rep  = 0;
-        s_size = SIZE_CYCLE[0];
+      s_anim_step++;
+      if (s_anim_step < SIZE_CYCLE_LEN) {
+        s_size = SIZE_CYCLE[s_anim_step];
         layer_mark_dirty(s_canvas_layer);
-        schedule_demo(DEMO_SIZE_FAST_MS);
+        schedule(ANIM_SLOW_MS);
+      } else {
+        s_anim_rep++;
+        if (s_anim_rep < 2) {
+          s_anim_step = 0;
+          s_size = SIZE_CYCLE[0];
+          layer_mark_dirty(s_canvas_layer);
+          schedule(ANIM_SLOW_MS);
+        } else {
+          s_phase = PHASE_SIZE_FAST;
+          s_anim_step = 0; s_anim_rep = 0;
+          s_size = SIZE_CYCLE[0];
+          layer_mark_dirty(s_canvas_layer);
+          schedule(ANIM_FAST_MS);
+        }
       }
       break;
 
     case PHASE_SIZE_FAST:
-      if (size_cycle_step(DEMO_SIZE_FAST_MS, DEMO_SIZE_FAST_REPS)) {
-        s_demo_phase = PHASE_DONE;
-        s_size = 6;
+      s_anim_step++;
+      if (s_anim_step < SIZE_CYCLE_LEN) {
+        s_size = SIZE_CYCLE[s_anim_step];
         layer_mark_dirty(s_canvas_layer);
+        schedule(ANIM_FAST_MS);
+      } else {
+        s_anim_rep++;
+        if (s_anim_rep < 2) {
+          s_anim_step = 0;
+          s_size = SIZE_CYCLE[0];
+          layer_mark_dirty(s_canvas_layer);
+          schedule(ANIM_FAST_MS);
+        } else {
+          s_phase = PHASE_DONE;
+          s_size = s_target_size;
+          layer_mark_dirty(s_canvas_layer);
+        }
+      }
+      break;
+
+    // Runtime: squish on minute change (6→1→target)
+    case PHASE_SQUISH:
+      s_anim_step++;
+      if (s_anim_step < SQUISH_LEN) {
+        // Phase 1: going down
+        s_size = SQUISH_DOWN[s_anim_step];
+        layer_mark_dirty(s_canvas_layer);
+        schedule(ANIM_FAST_MS);
+      } else {
+        int up_step = s_anim_step - SQUISH_LEN;
+        if (up_step < SQUISH_LEN) {
+          // Phase 2: going back up (but cap at target)
+          int proposed = SQUISH_UP[up_step];
+          s_size = (proposed > s_target_size) ? s_target_size : proposed;
+          layer_mark_dirty(s_canvas_layer);
+          schedule(ANIM_FAST_MS);
+        } else {
+          s_phase = PHASE_DONE;
+          s_size = s_target_size;
+          layer_mark_dirty(s_canvas_layer);
+        }
+      }
+      break;
+
+    // Runtime: shake = 2 fast cycles
+    case PHASE_SHAKE_CYCLE:
+      s_anim_step++;
+      if (s_anim_step < SIZE_CYCLE_LEN) {
+        s_size = SIZE_CYCLE[s_anim_step];
+        layer_mark_dirty(s_canvas_layer);
+        schedule(ANIM_FAST_MS);
+      } else {
+        s_anim_rep++;
+        if (s_anim_rep < 2) {
+          s_anim_step = 0;
+          s_size = SIZE_CYCLE[0];
+          layer_mark_dirty(s_canvas_layer);
+          schedule(ANIM_FAST_MS);
+        } else {
+          s_phase = PHASE_DONE;
+          s_size = s_target_size;
+          layer_mark_dirty(s_canvas_layer);
+        }
       }
       break;
 
@@ -251,25 +372,66 @@ static void demo_timer_cb(void *data) {
   }
 }
 
-// ============================================================
-// TICK / LIFECYCLE
-// ============================================================
+// ---- Quick View / unobstructed bounds ----
+static void unobstructed_change(AnimationProgress progress, void *ctx) {
+  Layer *root = window_get_root_layer(s_window);
+  GRect ub = layer_get_unobstructed_bounds(root);
+  s_target_size = pick_size(ub.size.h);
+  // Only snap to new size if not mid-animation
+  if (s_phase == PHASE_DONE) {
+    s_size = s_target_size;
+    layer_mark_dirty(s_canvas_layer);
+  }
+}
+
+// ---- Shake ----
+static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
+  if (s_phase != PHASE_DONE) return;  // don't interrupt demo
+  s_phase = PHASE_SHAKE_CYCLE;
+  s_anim_step = 0; s_anim_rep = 0;
+  s_size = SIZE_CYCLE[0];
+  layer_mark_dirty(s_canvas_layer);
+  schedule(ANIM_FAST_MS);
+}
+
+// ---- Tick ----
 static void tick_handler(struct tm *t, TimeUnits units) {
   s_hour   = t->tm_hour;
   s_minute = t->tm_min;
+  // Squish on minute change, but only after demo is done
+  if (s_phase == PHASE_DONE) {
+    s_phase = PHASE_SQUISH;
+    s_anim_step = 0;
+    s_size = SQUISH_DOWN[0];  // start at size 5 (one step down)
+    schedule(ANIM_FAST_MS);
+  }
   layer_mark_dirty(s_canvas_layer);
 }
 
+// ---- Lifecycle ----
 static void window_load(Window *window) {
   Layer *root = window_get_root_layer(window);
-  s_canvas_layer = layer_create(layer_get_bounds(root));
+  GRect bounds = layer_get_bounds(root);
+  s_canvas_layer = layer_create(bounds);
   layer_set_update_proc(s_canvas_layer, draw_layer);
   layer_add_child(root, s_canvas_layer);
-  schedule_demo(DEMO_TIME_MS);
+
+  // Set initial target size from unobstructed bounds
+  GRect ub = layer_get_unobstructed_bounds(root);
+  s_target_size = pick_size(ub.size.h);
+  s_size = 6;  // start at max for demo
+
+  UnobstructedAreaHandlers ua_handlers = { .change = unobstructed_change };
+  unobstructed_area_service_subscribe(ua_handlers, NULL);
+  accel_tap_service_subscribe(accel_tap_handler);
+
+  schedule(DEMO_TIME_MS);
 }
 
 static void window_unload(Window *window) {
-  if (s_demo_timer) { app_timer_cancel(s_demo_timer); s_demo_timer = NULL; }
+  unobstructed_area_service_unsubscribe();
+  accel_tap_service_unsubscribe();
+  if (s_timer) { app_timer_cancel(s_timer); s_timer = NULL; }
   free_bitmaps();
   layer_destroy(s_canvas_layer);
 }
@@ -289,7 +451,9 @@ static void init(void) {
   window_stack_push(s_window, true);
 
   time_t now = time(NULL);
-  tick_handler(localtime(&now), MINUTE_UNIT);
+  struct tm *t = localtime(&now);
+  s_hour   = t->tm_hour;
+  s_minute = t->tm_min;
   tick_timer_service_subscribe(MINUTE_UNIT, tick_handler);
 }
 
