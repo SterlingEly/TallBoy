@@ -9,7 +9,7 @@
   "projectType": "native",
   "enableMultiJS": false,
   "watchapp": {"watchface": true},
-  "capabilities": [],
+  "capabilities": ["health"],
   "targetPlatforms": ["aplite","basalt","diorite","emery","flint"],
   "resources": {
     "media": [
@@ -147,5 +147,9 @@
       {"type":"png","name":"TALLBOY_LCOLON6","file":"images/tallboy_colon-6-l.png"}
     ]
   },
-  "appKeys": {}
+  "appKeys": {
+    "WeatherTempF": 0,
+    "WeatherTempC": 1,
+    "WeatherCode": 2
+  }
 }
