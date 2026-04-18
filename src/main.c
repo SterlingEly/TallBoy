@@ -1,10 +1,10 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v1.2
+// TallBoy — main.c  v1.3
 //
-// Stacked layouts: s_stack_size (normally 2) drops to 1
-// when Quick View bar is up, using pick_stack_size().
+// Fix: BLINK and SQUISH used s_size==0 to detect direction,
+// causing oscillation. Now uses explicit s_going_down flag.
 // ============================================================
 
 #define SETTINGS_KEY  1
@@ -77,10 +77,8 @@ static void prv_save_settings(void) {
   #define SIDE_MARGIN    12
   #define INFO_SMALL_H   14
   #define HALF_UNIT       4
-  // Stack digit heights per size (outer_h = 24 + 32*s)
-  #define STACK_H_SZ1    56   // 24+32*1
-  #define STACK_H_SZ2    88   // 24+32*2
-  // Minimum ub_h to fit two size-2 rows + margins (2*88 + 2*4 margin + some padding)
+  #define STACK_H_SZ1    56
+  #define STACK_H_SZ2    88
   #define STACK_SZ2_MIN 190
 #else
   #define SCREEN_W      144
@@ -94,31 +92,21 @@ static void prv_save_settings(void) {
   #define SIDE_MARGIN     6
   #define INFO_SMALL_H   14
   #define HALF_UNIT       3
-  // Stack digit heights per size (outer_h = 18 + 24*s)
-  #define STACK_H_SZ1    42   // 18+24*1
-  #define STACK_H_SZ2    66   // 18+24*2
-  // Minimum ub_h to fit two size-2 rows + margins (2*66 + 2*3 + padding)
+  #define STACK_H_SZ1    42
+  #define STACK_H_SZ2    66
   #define STACK_SZ2_MIN 146
 #endif
 
-// Runtime stack size — normally 2, drops to 1 under Quick View
 static int s_stack_size = 2;
 
-// Returns the correct stack size for the current unobstructed height
 static int pick_stack_size(int ub_h) {
-  // Need room for 2 rows + half-unit offsets + a little breathing
-  int needed = (s_stack_size == 2 ? STACK_H_SZ2 : STACK_H_SZ1) * 2
-               + HALF_UNIT * 2 + 8;
-  (void)needed;
   return (ub_h >= STACK_SZ2_MIN) ? 2 : 1;
 }
 
-// Stack digit height for a given stack size
 static int stack_digit_h(int sz) {
   return (sz == 2) ? STACK_H_SZ2 : STACK_H_SZ1;
 }
 
-// ---- Wide layout size selection ----
 static int pick_size(int available_h) {
 #if defined(PBL_PLATFORM_EMERY)
   for (int s = 6; s >= 1; s--)
@@ -162,6 +150,7 @@ static GColor     s_fg, s_bg;
 static Phase      s_phase       = PHASE_COUNTDOWN;
 static int        s_anim_step   = 0;
 static int        s_anim_rep    = 0;
+static bool       s_going_down  = true;  // explicit direction flag for BLINK/SQUISH
 static int        s_countdown_digit = 9;
 static AppTimer  *s_timer       = NULL;
 static bool       s_demo_override = false;
@@ -396,11 +385,9 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     blit(ctx, get_bitmap(m_ones, size), SLOT_M_ONES, y);
 
   } else {
-    // Stacked: size governed by s_stack_size (2 normally, 1 under Quick View)
     int sdh = stack_digit_h(s_stack_size);
     int h_y = (center_y - sdh / 2 - HALF_UNIT) - SCREEN_H / 2;
     int m_y = (center_y + sdh / 2 + HALF_UNIT) - SCREEN_H / 2;
-
     int tens_x, ones_x, info_x, info_w;
     if (s_cfg.layout == LAYOUT_LEFT) {
       tens_x = SIDE_MARGIN;
@@ -449,10 +436,12 @@ static void timer_cb(void *data) {
           s_countdown_digit--;
           schedule(COUNTDOWN_MS);
         } else {
+          // Countdown done — transition to blink with real time
           s_demo_override = false;
-          s_size = 6;
-          s_phase = PHASE_BLINK;
-          s_anim_step = 0; s_anim_rep = 0;
+          s_size      = 6;
+          s_going_down = true;
+          s_anim_rep  = 0;
+          s_phase     = PHASE_BLINK;
           layer_mark_dirty(s_canvas_layer);
           schedule(ANIM_FAST_MS);
         }
@@ -463,53 +452,64 @@ static void timer_cb(void *data) {
     }
 
     case PHASE_BLINK:
-      s_anim_step++;
-      if (s_size > 0) {
+      // going_down: decrement size each frame until 0
+      // going_up:   increment size each frame until target, then rep or done
+      if (s_going_down) {
         s_size--;
         layer_mark_dirty(s_canvas_layer);
+        if (s_size <= 0) {
+          s_size = 0;
+          s_going_down = false;  // hit bottom, switch direction
+        }
         schedule(ANIM_FAST_MS);
       } else {
-        if (s_size < s_target_size) {
-          s_size++;
-          layer_mark_dirty(s_canvas_layer);
-          schedule(ANIM_FAST_MS);
-        } else {
+        s_size++;
+        layer_mark_dirty(s_canvas_layer);
+        if (s_size >= s_target_size) {
+          s_size = s_target_size;
           s_anim_rep++;
           if (s_anim_rep < BLINK_REPS) {
-            s_size = 6; s_anim_step = 0;
-            layer_mark_dirty(s_canvas_layer);
+            // Do another blink cycle
+            s_size       = 6;
+            s_going_down = true;
             schedule(ANIM_FAST_MS);
           } else {
-            s_phase = PHASE_DONE; s_size = s_target_size;
+            // All blinks done
+            s_phase = PHASE_DONE;
             layer_mark_dirty(s_canvas_layer);
           }
+        } else {
+          schedule(ANIM_FAST_MS);
         }
       }
       break;
 
     case PHASE_SQUISH:
-      if (s_size > 0) {
+      // going_down: shrink to 0, apply pending digits at bottom
+      // going_up:   grow back to target
+      if (s_going_down) {
         s_size--;
         layer_mark_dirty(s_canvas_layer);
+        if (s_size <= 0) {
+          s_size = 0;
+          // Apply pending digit values at the full-squish frame
+          if (s_digit_pending) {
+            s_hour   = s_pending_hour;
+            s_minute = s_pending_minute;
+            s_digit_pending = false;
+          }
+          s_going_down = false;
+        }
         schedule(ANIM_FAST_MS);
       } else {
-        if (s_digit_pending) {
-          s_hour = s_pending_hour; s_minute = s_pending_minute;
-          s_digit_pending = false;
-        }
-        if (s_anim_step == 0) {
-          s_anim_step = 1;
+        s_size++;
+        layer_mark_dirty(s_canvas_layer);
+        if (s_size >= s_target_size) {
+          s_size  = s_target_size;
+          s_phase = PHASE_DONE;
           layer_mark_dirty(s_canvas_layer);
-          schedule(ANIM_FAST_MS);
         } else {
-          s_size++;
-          layer_mark_dirty(s_canvas_layer);
-          if (s_size < s_target_size) {
-            schedule(ANIM_FAST_MS);
-          } else {
-            s_size = s_target_size; s_phase = PHASE_DONE;
-            layer_mark_dirty(s_canvas_layer);
-          }
+          schedule(ANIM_FAST_MS);
         }
       }
       break;
@@ -557,9 +557,9 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   s_cfg.layout = (s_cfg.layout + 1) % 3;
   prv_save_settings();
   if (s_cfg.layout == LAYOUT_WIDE) {
-    s_phase = PHASE_SHAKE_CYCLE;
+    s_phase     = PHASE_SHAKE_CYCLE;
     s_anim_step = 0; s_anim_rep = 0;
-    s_size = SIZE_CYCLE[0];
+    s_size      = SIZE_CYCLE[0];
     schedule(ANIM_FAST_MS);
   }
   layer_mark_dirty(s_canvas_layer);
@@ -567,15 +567,20 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
 
 static void tick_handler(struct tm *t, TimeUnits units) {
   if (s_phase == PHASE_DONE && s_cfg.layout == LAYOUT_WIDE) {
-    s_pending_hour = t->tm_hour; s_pending_minute = t->tm_min;
-    s_digit_pending = true;
-    s_phase = PHASE_SQUISH; s_anim_step = 0;
+    s_pending_hour   = t->tm_hour;
+    s_pending_minute = t->tm_min;
+    s_digit_pending  = true;
+    s_phase      = PHASE_SQUISH;
+    s_going_down = true;
     schedule(ANIM_FAST_MS);
   } else if (s_phase == PHASE_SQUISH) {
-    s_pending_hour = t->tm_hour; s_pending_minute = t->tm_min;
-    s_digit_pending = true;
+    // Queue for the size-0 flip
+    s_pending_hour   = t->tm_hour;
+    s_pending_minute = t->tm_min;
+    s_digit_pending  = true;
   } else {
-    s_hour = t->tm_hour; s_minute = t->tm_min;
+    s_hour   = t->tm_hour;
+    s_minute = t->tm_min;
     layer_mark_dirty(s_canvas_layer);
   }
 }
