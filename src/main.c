@@ -5,9 +5,10 @@
 //
 // Fix: BLINK and SQUISH used s_size==0 to detect direction,
 // causing oscillation. Now uses explicit s_going_down flag.
+// SETTINGS_KEY bumped to 2 to clear stale persisted settings.
 // ============================================================
 
-#define SETTINGS_KEY  1
+#define SETTINGS_KEY  2
 
 typedef enum {
   FIELD_NONE = 0,
@@ -150,7 +151,7 @@ static GColor     s_fg, s_bg;
 static Phase      s_phase       = PHASE_COUNTDOWN;
 static int        s_anim_step   = 0;
 static int        s_anim_rep    = 0;
-static bool       s_going_down  = true;  // explicit direction flag for BLINK/SQUISH
+static bool       s_going_down  = true;
 static int        s_countdown_digit = 9;
 static AppTimer  *s_timer       = NULL;
 static bool       s_demo_override = false;
@@ -436,12 +437,11 @@ static void timer_cb(void *data) {
           s_countdown_digit--;
           schedule(COUNTDOWN_MS);
         } else {
-          // Countdown done — transition to blink with real time
           s_demo_override = false;
-          s_size      = 6;
+          s_size       = 6;
           s_going_down = true;
-          s_anim_rep  = 0;
-          s_phase     = PHASE_BLINK;
+          s_anim_rep   = 0;
+          s_phase      = PHASE_BLINK;
           layer_mark_dirty(s_canvas_layer);
           schedule(ANIM_FAST_MS);
         }
@@ -452,15 +452,10 @@ static void timer_cb(void *data) {
     }
 
     case PHASE_BLINK:
-      // going_down: decrement size each frame until 0
-      // going_up:   increment size each frame until target, then rep or done
       if (s_going_down) {
         s_size--;
         layer_mark_dirty(s_canvas_layer);
-        if (s_size <= 0) {
-          s_size = 0;
-          s_going_down = false;  // hit bottom, switch direction
-        }
+        if (s_size <= 0) { s_size = 0; s_going_down = false; }
         schedule(ANIM_FAST_MS);
       } else {
         s_size++;
@@ -469,12 +464,9 @@ static void timer_cb(void *data) {
           s_size = s_target_size;
           s_anim_rep++;
           if (s_anim_rep < BLINK_REPS) {
-            // Do another blink cycle
-            s_size       = 6;
-            s_going_down = true;
+            s_size = 6; s_going_down = true;
             schedule(ANIM_FAST_MS);
           } else {
-            // All blinks done
             s_phase = PHASE_DONE;
             layer_mark_dirty(s_canvas_layer);
           }
@@ -485,17 +477,13 @@ static void timer_cb(void *data) {
       break;
 
     case PHASE_SQUISH:
-      // going_down: shrink to 0, apply pending digits at bottom
-      // going_up:   grow back to target
       if (s_going_down) {
         s_size--;
         layer_mark_dirty(s_canvas_layer);
         if (s_size <= 0) {
           s_size = 0;
-          // Apply pending digit values at the full-squish frame
           if (s_digit_pending) {
-            s_hour   = s_pending_hour;
-            s_minute = s_pending_minute;
+            s_hour = s_pending_hour; s_minute = s_pending_minute;
             s_digit_pending = false;
           }
           s_going_down = false;
@@ -505,8 +493,7 @@ static void timer_cb(void *data) {
         s_size++;
         layer_mark_dirty(s_canvas_layer);
         if (s_size >= s_target_size) {
-          s_size  = s_target_size;
-          s_phase = PHASE_DONE;
+          s_size = s_target_size; s_phase = PHASE_DONE;
           layer_mark_dirty(s_canvas_layer);
         } else {
           schedule(ANIM_FAST_MS);
@@ -574,7 +561,6 @@ static void tick_handler(struct tm *t, TimeUnits units) {
     s_going_down = true;
     schedule(ANIM_FAST_MS);
   } else if (s_phase == PHASE_SQUISH) {
-    // Queue for the size-0 flip
     s_pending_hour   = t->tm_hour;
     s_pending_minute = t->tm_min;
     s_digit_pending  = true;
