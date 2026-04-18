@@ -1,11 +1,10 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v1.1
+// TallBoy — main.c  v1.2
 //
-// Size 0 = full squish: shared digit-agnostic line asset.
-// Squish sequence lands on size 0, digit flips, then rises.
-// This eliminates the "blink" at the animation midpoint.
+// Stacked layouts: s_stack_size (normally 2) drops to 1
+// when Quick View bar is up, using pick_stack_size().
 // ============================================================
 
 #define SETTINGS_KEY  1
@@ -77,8 +76,12 @@ static void prv_save_settings(void) {
   #define SLOT_M_ONES   148
   #define SIDE_MARGIN    12
   #define INFO_SMALL_H   14
-  #define STACK_DIGIT_H  88
   #define HALF_UNIT       4
+  // Stack digit heights per size (outer_h = 24 + 32*s)
+  #define STACK_H_SZ1    56   // 24+32*1
+  #define STACK_H_SZ2    88   // 24+32*2
+  // Minimum ub_h to fit two size-2 rows + margins (2*88 + 2*4 margin + some padding)
+  #define STACK_SZ2_MIN 190
 #else
   #define SCREEN_W      144
   #define SCREEN_H      168
@@ -90,12 +93,32 @@ static void prv_save_settings(void) {
   #define SLOT_M_ONES   108
   #define SIDE_MARGIN     6
   #define INFO_SMALL_H   14
-  #define STACK_DIGIT_H  66
   #define HALF_UNIT       3
+  // Stack digit heights per size (outer_h = 18 + 24*s)
+  #define STACK_H_SZ1    42   // 18+24*1
+  #define STACK_H_SZ2    66   // 18+24*2
+  // Minimum ub_h to fit two size-2 rows + margins (2*66 + 2*3 + padding)
+  #define STACK_SZ2_MIN 146
 #endif
 
-#define STACK_SIZE  2
+// Runtime stack size — normally 2, drops to 1 under Quick View
+static int s_stack_size = 2;
 
+// Returns the correct stack size for the current unobstructed height
+static int pick_stack_size(int ub_h) {
+  // Need room for 2 rows + half-unit offsets + a little breathing
+  int needed = (s_stack_size == 2 ? STACK_H_SZ2 : STACK_H_SZ1) * 2
+               + HALF_UNIT * 2 + 8;
+  (void)needed;
+  return (ub_h >= STACK_SZ2_MIN) ? 2 : 1;
+}
+
+// Stack digit height for a given stack size
+static int stack_digit_h(int sz) {
+  return (sz == 2) ? STACK_H_SZ2 : STACK_H_SZ1;
+}
+
+// ---- Wide layout size selection ----
 static int pick_size(int available_h) {
 #if defined(PBL_PLATFORM_EMERY)
   for (int s = 6; s >= 1; s--)
@@ -107,26 +130,18 @@ static int pick_size(int available_h) {
   return 1;
 }
 
-// ---- Animation sequences ----
-// Squish DOWN: target → 0. Landing on 0 is the clean digit-flip frame.
-// Squish UP: 0 already shown (new digit) → target.
-// Sequences here go 6→0 but the timer only plays from s_size down;
-// we just use a simple step-by-step approach in the timer.
-//
-// For SQUISH phase:
-//   DOWN frames: current size - 1 → 0  (each step -1)
-//   At size 0: flip digit, then UP
-//   UP frames: 1 → target_size  (each step +1)
-
+// ---- Animation ----
 static const int GROW[]   = { 1, 2, 3, 4, 5, 6 };
 static const int SHRINK[] = { 5, 4, 3, 2, 1, 0 };
 #define GROW_LEN   6
 #define SHRINK_LEN 6
 #define COUNTDOWN_DIGIT_FRAMES (GROW_LEN + SHRINK_LEN)
 #define COUNTDOWN_MS  55
+#define BLINK_REPS    2
+#define ANIM_FAST_MS  80
 
-#define BLINK_REPS   2
-#define ANIM_FAST_MS 80
+static const int SIZE_CYCLE[] = { 6, 5, 4, 3, 2, 1, 2, 3, 4, 5, 6 };
+#define SIZE_CYCLE_LEN 11
 
 typedef enum {
   PHASE_COUNTDOWN,
@@ -135,10 +150,6 @@ typedef enum {
   PHASE_SQUISH,
   PHASE_SHAKE_CYCLE,
 } Phase;
-
-// SIZE_CYCLE used for shake animation
-static const int SIZE_CYCLE[] = { 6, 5, 4, 3, 2, 1, 2, 3, 4, 5, 6 };
-#define SIZE_CYCLE_LEN 11
 
 // ---- State ----
 static Window    *s_window;
@@ -153,16 +164,12 @@ static int        s_anim_step   = 0;
 static int        s_anim_rep    = 0;
 static int        s_countdown_digit = 9;
 static AppTimer  *s_timer       = NULL;
-
-// Demo override for countdown
-static bool  s_demo_override = false;
-static int   s_demo_digit    = 9;
-static int   s_demo_size     = 1;
-
-// Squish: pending new digits (set when tick fires mid-squish)
-static bool s_digit_pending  = false;
-static int  s_pending_hour   = 0;
-static int  s_pending_minute = 0;
+static bool       s_demo_override = false;
+static int        s_demo_digit    = 9;
+static int        s_demo_size     = 1;
+static bool       s_digit_pending  = false;
+static int        s_pending_hour   = 0;
+static int        s_pending_minute = 0;
 
 // ---- Data ----
 static int   s_battery_pct      = 100;
@@ -174,12 +181,10 @@ static char  s_weather_temp[8]  = "";
 static char  s_weather_desc[32] = "";
 
 // ---- Bitmaps ----
-// s_bitmaps[digit][size-1] for sizes 1–6.
-// Size 0 is special: one shared squish line, not per-digit.
 static GBitmap *s_bitmaps[10][6];
 static GBitmap *s_colon_bm[6];
-static GBitmap *s_squish_bm   = NULL;  // shared size-0 digit line
-static GBitmap *s_squish_colon = NULL; // shared size-0 colon line
+static GBitmap *s_squish_bm    = NULL;
+static GBitmap *s_squish_colon = NULL;
 
 #if defined(PBL_PLATFORM_EMERY)
 static const uint32_t s_res[10][6] = {
@@ -242,17 +247,12 @@ static const uint32_t s_colon_res[6] = {
 #endif
 
 static GBitmap *get_bitmap(int digit, int size) {
-  if (size == 0) return s_squish_bm;  // shared squish line for all digits
+  if (size == 0) return s_squish_bm;
   int si = size - 1;
   if (!s_bitmaps[digit][si]) {
     uint32_t res = s_res[digit][si];
-    // Fallback: search outward if somehow missing
-    if (!res) {
-      for (int i = si + 1; i < 6; i++) if (s_res[digit][i]) { res = s_res[digit][i]; break; }
-    }
-    if (!res) {
-      for (int i = si - 1; i >= 0; i--) if (s_res[digit][i]) { res = s_res[digit][i]; break; }
-    }
+    if (!res) for (int i = si+1; i < 6; i++) if (s_res[digit][i]) { res = s_res[digit][i]; break; }
+    if (!res) for (int i = si-1; i >= 0; i--) if (s_res[digit][i]) { res = s_res[digit][i]; break; }
     if (res) s_bitmaps[digit][si] = gbitmap_create_with_resource(res);
   }
   return s_bitmaps[digit][si];
@@ -396,8 +396,11 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     blit(ctx, get_bitmap(m_ones, size), SLOT_M_ONES, y);
 
   } else {
-    int h_y = (center_y - STACK_DIGIT_H / 2 - HALF_UNIT) - SCREEN_H / 2;
-    int m_y = (center_y + STACK_DIGIT_H / 2 + HALF_UNIT) - SCREEN_H / 2;
+    // Stacked: size governed by s_stack_size (2 normally, 1 under Quick View)
+    int sdh = stack_digit_h(s_stack_size);
+    int h_y = (center_y - sdh / 2 - HALF_UNIT) - SCREEN_H / 2;
+    int m_y = (center_y + sdh / 2 + HALF_UNIT) - SCREEN_H / 2;
+
     int tens_x, ones_x, info_x, info_w;
     if (s_cfg.layout == LAYOUT_LEFT) {
       tens_x = SIDE_MARGIN;
@@ -410,10 +413,10 @@ static void draw_layer(Layer *layer, GContext *ctx) {
       info_x = SIDE_MARGIN;
       info_w = tens_x - SIDE_MARGIN * 2;
     }
-    if (draw_h_tens) blit(ctx, get_bitmap(h_tens, STACK_SIZE), tens_x, h_y);
-    blit(ctx, get_bitmap(h_ones, STACK_SIZE), ones_x, h_y);
-    blit(ctx, get_bitmap(m_tens, STACK_SIZE), tens_x, m_y);
-    blit(ctx, get_bitmap(m_ones, STACK_SIZE), ones_x, m_y);
+    if (draw_h_tens) blit(ctx, get_bitmap(h_tens, s_stack_size), tens_x, h_y);
+    blit(ctx, get_bitmap(h_ones, s_stack_size), ones_x, h_y);
+    blit(ctx, get_bitmap(m_tens, s_stack_size), tens_x, m_y);
+    blit(ctx, get_bitmap(m_ones, s_stack_size), ones_x, m_y);
     if (tm && info_w > 20)
       draw_info_lines(ctx, GRect(info_x, ub_top, info_w, ub_h), tm);
   }
@@ -434,9 +437,8 @@ static void timer_cb(void *data) {
   switch (s_phase) {
 
     case PHASE_COUNTDOWN: {
-      // Each digit: grow 1→6 then shrink 6→0, then next digit
       int frame = s_anim_step % COUNTDOWN_DIGIT_FRAMES;
-      s_demo_size  = (frame < GROW_LEN) ? GROW[frame] : SHRINK[frame - GROW_LEN];
+      s_demo_size     = (frame < GROW_LEN) ? GROW[frame] : SHRINK[frame - GROW_LEN];
       s_demo_digit    = s_countdown_digit;
       s_demo_override = true;
       layer_mark_dirty(s_canvas_layer);
@@ -447,7 +449,6 @@ static void timer_cb(void *data) {
           s_countdown_digit--;
           schedule(COUNTDOWN_MS);
         } else {
-          // Done — blink into real time
           s_demo_override = false;
           s_size = 6;
           s_phase = PHASE_BLINK;
@@ -462,14 +463,12 @@ static void timer_cb(void *data) {
     }
 
     case PHASE_BLINK:
-      // 2x fast squish of real time digits
       s_anim_step++;
       if (s_size > 0) {
         s_size--;
         layer_mark_dirty(s_canvas_layer);
         schedule(ANIM_FAST_MS);
       } else {
-        // at 0: pop up
         if (s_size < s_target_size) {
           s_size++;
           layer_mark_dirty(s_canvas_layer);
@@ -477,53 +476,43 @@ static void timer_cb(void *data) {
         } else {
           s_anim_rep++;
           if (s_anim_rep < BLINK_REPS) {
-            s_size = 6;
-            s_anim_step = 0;
+            s_size = 6; s_anim_step = 0;
             layer_mark_dirty(s_canvas_layer);
             schedule(ANIM_FAST_MS);
           } else {
-            s_phase = PHASE_DONE;
-            s_size  = s_target_size;
+            s_phase = PHASE_DONE; s_size = s_target_size;
             layer_mark_dirty(s_canvas_layer);
           }
         }
       }
       break;
 
-    case PHASE_SQUISH: {
-      // Phase 1: step down to 0 one step at a time
-      // Phase 2: at 0, apply pending digits, then step up to target
+    case PHASE_SQUISH:
       if (s_size > 0) {
         s_size--;
         layer_mark_dirty(s_canvas_layer);
         schedule(ANIM_FAST_MS);
       } else {
-        // Size 0: apply any pending digit update now
         if (s_digit_pending) {
-          s_hour   = s_pending_hour;
-          s_minute = s_pending_minute;
+          s_hour = s_pending_hour; s_minute = s_pending_minute;
           s_digit_pending = false;
         }
-        // One frame at size 0 so it's visible, then rise
         if (s_anim_step == 0) {
           s_anim_step = 1;
           layer_mark_dirty(s_canvas_layer);
           schedule(ANIM_FAST_MS);
         } else {
-          // Rise back up
           s_size++;
           layer_mark_dirty(s_canvas_layer);
           if (s_size < s_target_size) {
             schedule(ANIM_FAST_MS);
           } else {
-            s_size  = s_target_size;
-            s_phase = PHASE_DONE;
+            s_size = s_target_size; s_phase = PHASE_DONE;
             layer_mark_dirty(s_canvas_layer);
           }
         }
       }
       break;
-    }
 
     case PHASE_SHAKE_CYCLE:
       s_anim_step++;
@@ -556,6 +545,7 @@ static void unobstructed_change(AnimationProgress progress, void *ctx) {
   Layer *root = window_get_root_layer(s_window);
   GRect ub = layer_get_unobstructed_bounds(root);
   s_target_size = pick_size(ub.size.h);
+  s_stack_size  = pick_stack_size(ub.size.h);
   if (s_phase == PHASE_DONE) {
     s_size = s_target_size;
     layer_mark_dirty(s_canvas_layer);
@@ -577,30 +567,21 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
 
 static void tick_handler(struct tm *t, TimeUnits units) {
   if (s_phase == PHASE_DONE && s_cfg.layout == LAYOUT_WIDE) {
-    // Start squish; actual digit values applied at size-0 midpoint
-    s_pending_hour   = t->tm_hour;
-    s_pending_minute = t->tm_min;
-    s_digit_pending  = true;
-    s_phase     = PHASE_SQUISH;
-    s_anim_step = 0;
-    // Start from current size, step down each frame
+    s_pending_hour = t->tm_hour; s_pending_minute = t->tm_min;
+    s_digit_pending = true;
+    s_phase = PHASE_SQUISH; s_anim_step = 0;
     schedule(ANIM_FAST_MS);
   } else if (s_phase == PHASE_SQUISH) {
-    // Already squishing — queue the new values for the size-0 flip
-    s_pending_hour   = t->tm_hour;
-    s_pending_minute = t->tm_min;
-    s_digit_pending  = true;
+    s_pending_hour = t->tm_hour; s_pending_minute = t->tm_min;
+    s_digit_pending = true;
   } else {
-    // Not animating (stacked layouts or mid-demo) — update immediately
-    s_hour   = t->tm_hour;
-    s_minute = t->tm_min;
+    s_hour = t->tm_hour; s_minute = t->tm_min;
     layer_mark_dirty(s_canvas_layer);
   }
 }
 
 static void battery_handler(BatteryChargeState state) {
-  s_battery_pct = state.charge_percent;
-  s_charging    = state.is_charging;
+  s_battery_pct = state.charge_percent; s_charging = state.is_charging;
   layer_mark_dirty(s_canvas_layer);
 }
 
@@ -661,22 +642,19 @@ static void window_load(Window *window) {
   layer_add_child(root, s_canvas_layer);
   GRect ub = layer_get_unobstructed_bounds(root);
   s_target_size = pick_size(ub.size.h);
+  s_stack_size  = pick_stack_size(ub.size.h);
   s_size = 6;
   UnobstructedAreaHandlers ua = { .change = unobstructed_change };
   unobstructed_area_service_subscribe(ua, NULL);
   accel_tap_service_subscribe(accel_tap_handler);
   if (s_cfg.debug_mode) {
     s_phase = PHASE_COUNTDOWN;
-    s_countdown_digit = 9;
-    s_anim_step = 0;
-    s_demo_override = true;
-    s_demo_digit = 9;
-    s_demo_size  = GROW[0];
+    s_countdown_digit = 9; s_anim_step = 0;
+    s_demo_override = true; s_demo_digit = 9; s_demo_size = GROW[0];
     layer_mark_dirty(s_canvas_layer);
     schedule(COUNTDOWN_MS);
   } else {
-    s_phase = PHASE_DONE;
-    s_size  = s_target_size;
+    s_phase = PHASE_DONE; s_size = s_target_size;
   }
 }
 
@@ -690,11 +668,9 @@ static void window_unload(Window *window) {
 
 static void init(void) {
   prv_load_settings();
-  s_fg = GColorWhite;
-  s_bg = GColorBlack;
+  s_fg = GColorWhite; s_bg = GColorBlack;
   memset(s_bitmaps,  0, sizeof(s_bitmaps));
   memset(s_colon_bm, 0, sizeof(s_colon_bm));
-  // Load size-0 squish bitmaps eagerly — needed from first frame
   s_squish_bm    = gbitmap_create_with_resource(RES_SQUISH);
   s_squish_colon = gbitmap_create_with_resource(RES_SQUISH_COLON);
   s_window = window_create();
@@ -705,8 +681,7 @@ static void init(void) {
   window_stack_push(s_window, true);
   time_t now = time(NULL);
   struct tm *t = localtime(&now);
-  s_hour   = t->tm_hour;
-  s_minute = t->tm_min;
+  s_hour = t->tm_hour; s_minute = t->tm_min;
   tick_timer_service_subscribe(MINUTE_UNIT, tick_handler);
   battery_state_service_subscribe(battery_handler);
   battery_handler(battery_state_service_peek());
