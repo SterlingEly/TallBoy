@@ -2,10 +2,6 @@
 
 // ============================================================
 // TallBoy — main.c  v1.3
-//
-// Fix: BLINK and SQUISH used s_size==0 to detect direction,
-// causing oscillation. Now uses explicit s_going_down flag.
-// SETTINGS_KEY bumped to 2 to clear stale persisted settings.
 // ============================================================
 
 #define SETTINGS_KEY  2
@@ -28,9 +24,9 @@ typedef enum {
 
 typedef struct {
   uint8_t layout;
-  bool    leading_zero;
-  bool    show_colon;
-  bool    debug_mode;
+  uint8_t leading_zero;  // 1=on, 0=off  (uint8 avoids bool padding surprises)
+  uint8_t show_colon;
+  uint8_t debug_mode;
   uint8_t fields[INFO_LINE_COUNT];
 } TallBoySettings;
 
@@ -38,9 +34,9 @@ static TallBoySettings s_cfg;
 
 static void prv_default_settings(void) {
   s_cfg.layout       = 0;
-  s_cfg.leading_zero = true;
-  s_cfg.show_colon   = true;
-  s_cfg.debug_mode   = true;
+  s_cfg.leading_zero = 1;
+  s_cfg.show_colon   = 1;
+  s_cfg.debug_mode   = 1;
   s_cfg.fields[0] = FIELD_DATE;
   s_cfg.fields[1] = FIELD_BATTERY;
   s_cfg.fields[2] = FIELD_STEPS;
@@ -55,7 +51,11 @@ static void prv_default_settings(void) {
 
 static void prv_load_settings(void) {
   prv_default_settings();
-  persist_read_data(SETTINGS_KEY, &s_cfg, sizeof(s_cfg));
+  // Only restore layout — skip bool fields to avoid stale-flash corruption
+  uint8_t saved_layout = 0;
+  if (persist_read_data(SETTINGS_KEY, &saved_layout, 1) > 0) {
+    if (saved_layout < 3) s_cfg.layout = saved_layout;
+  }
 }
 
 static void prv_save_settings(void) {
