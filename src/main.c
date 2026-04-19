@@ -1,10 +1,10 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v1.3
-// 128-resource budget: squish bitmaps removed, digits 0+1
-// sizes 4-6 fall back to size 3 via existing fallback logic.
-// Squish transition shows blank frame instead of squish bitmap.
+// TallBoy — main.c  v1.4
+// Bisect build: full 134-resource appinfo (matching v0.9 that worked).
+// Squish bottoms at size 1 (not blank).
+// No squish bitmap resources needed.
 // ============================================================
 
 #define SETTINGS_KEY  2
@@ -172,12 +172,12 @@ static char  s_weather_desc[32] = "";
 static GBitmap *s_bitmaps[10][6];
 static GBitmap *s_colon_bm[6];
 
-// Digits 0 and 1: only sizes 1-3 registered; 4-6 fall back to 3 via get_bitmap
-// All other digits: sizes 1-6 registered
 #if defined(PBL_PLATFORM_EMERY)
 static const uint32_t s_res[10][6] = {
-  { RESOURCE_ID_TALLBOY_01, RESOURCE_ID_TALLBOY_02, RESOURCE_ID_TALLBOY_03, 0, 0, 0 },
-  { RESOURCE_ID_TALLBOY_11, RESOURCE_ID_TALLBOY_12, RESOURCE_ID_TALLBOY_13, 0, 0, 0 },
+  { RESOURCE_ID_TALLBOY_01, RESOURCE_ID_TALLBOY_02, RESOURCE_ID_TALLBOY_03,
+    RESOURCE_ID_TALLBOY_04, RESOURCE_ID_TALLBOY_05, RESOURCE_ID_TALLBOY_06 },
+  { RESOURCE_ID_TALLBOY_11, RESOURCE_ID_TALLBOY_12, RESOURCE_ID_TALLBOY_13,
+    RESOURCE_ID_TALLBOY_14, RESOURCE_ID_TALLBOY_15, RESOURCE_ID_TALLBOY_16 },
   { RESOURCE_ID_TALLBOY_21, RESOURCE_ID_TALLBOY_22, RESOURCE_ID_TALLBOY_23,
     RESOURCE_ID_TALLBOY_24, RESOURCE_ID_TALLBOY_25, RESOURCE_ID_TALLBOY_26 },
   { RESOURCE_ID_TALLBOY_31, RESOURCE_ID_TALLBOY_32, RESOURCE_ID_TALLBOY_33,
@@ -201,8 +201,10 @@ static const uint32_t s_colon_res[6] = {
 };
 #else
 static const uint32_t s_res[10][6] = {
-  { RESOURCE_ID_TALLBOY_L01, RESOURCE_ID_TALLBOY_L02, RESOURCE_ID_TALLBOY_L03, 0, 0, 0 },
-  { RESOURCE_ID_TALLBOY_L11, RESOURCE_ID_TALLBOY_L12, RESOURCE_ID_TALLBOY_L13, 0, 0, 0 },
+  { RESOURCE_ID_TALLBOY_L01, RESOURCE_ID_TALLBOY_L02, RESOURCE_ID_TALLBOY_L03,
+    RESOURCE_ID_TALLBOY_L04, RESOURCE_ID_TALLBOY_L05, RESOURCE_ID_TALLBOY_L06 },
+  { RESOURCE_ID_TALLBOY_L11, RESOURCE_ID_TALLBOY_L12, RESOURCE_ID_TALLBOY_L13,
+    RESOURCE_ID_TALLBOY_L14, RESOURCE_ID_TALLBOY_L15, RESOURCE_ID_TALLBOY_L16 },
   { RESOURCE_ID_TALLBOY_L21, RESOURCE_ID_TALLBOY_L22, RESOURCE_ID_TALLBOY_L23,
     RESOURCE_ID_TALLBOY_L24, RESOURCE_ID_TALLBOY_L25, RESOURCE_ID_TALLBOY_L26 },
   { RESOURCE_ID_TALLBOY_L31, RESOURCE_ID_TALLBOY_L32, RESOURCE_ID_TALLBOY_L33,
@@ -227,7 +229,7 @@ static const uint32_t s_colon_res[6] = {
 #endif
 
 static GBitmap *get_bitmap(int digit, int size) {
-  if (size == 0) return NULL;  // squish frame: blank, blit() handles NULL safely
+  if (size < 1) size = 1;  // clamp — no blank frame, no size-0 resources needed
   int si = size - 1;
   if (!s_bitmaps[digit][si]) {
     uint32_t res = s_res[digit][si];
@@ -239,7 +241,7 @@ static GBitmap *get_bitmap(int digit, int size) {
 }
 
 static GBitmap *get_colon(int size) {
-  if (size == 0) return NULL;  // squish frame: blank
+  if (size < 1) size = 1;  // clamp
   int si = size - 1;
   if (!s_colon_bm[si])
     s_colon_bm[si] = gbitmap_create_with_resource(s_colon_res[si]);
@@ -443,7 +445,7 @@ static void timer_cb(void *data) {
       if (s_going_down) {
         s_size--;
         layer_mark_dirty(s_canvas_layer);
-        if (s_size <= 0) { s_size = 0; s_going_down = false; }
+        if (s_size <= 1) { s_size = 1; s_going_down = false; }
         schedule(ANIM_FAST_MS);
       } else {
         s_size++;
@@ -468,8 +470,9 @@ static void timer_cb(void *data) {
       if (s_going_down) {
         s_size--;
         layer_mark_dirty(s_canvas_layer);
-        if (s_size <= 0) {
-          s_size = 0;
+        if (s_size <= 1) {
+          s_size = 1;
+          // Apply pending digit values at minimum size (clean flip point)
           if (s_digit_pending) {
             s_hour = s_pending_hour; s_minute = s_pending_minute;
             s_digit_pending = false;
