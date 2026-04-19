@@ -2,6 +2,9 @@
 
 // ============================================================
 // TallBoy — main.c  v1.3
+// 128-resource budget: squish bitmaps removed, digits 0+1
+// sizes 4-6 fall back to size 3 via existing fallback logic.
+// Squish transition shows blank frame instead of squish bitmap.
 // ============================================================
 
 #define SETTINGS_KEY  2
@@ -51,7 +54,6 @@ static void prv_default_settings(void) {
 
 static void prv_load_settings(void) {
   prv_default_settings();
-  // Only restore layout byte — booleans always come from defaults
   uint8_t saved_layout = 0;
   if (persist_read_data(SETTINGS_KEY, &saved_layout, 1) > 0) {
     if (saved_layout < 3) s_cfg.layout = saved_layout;
@@ -169,15 +171,13 @@ static char  s_weather_desc[32] = "";
 
 static GBitmap *s_bitmaps[10][6];
 static GBitmap *s_colon_bm[6];
-static GBitmap *s_squish_bm    = NULL;
-static GBitmap *s_squish_colon = NULL;
 
+// Digits 0 and 1: only sizes 1-3 registered; 4-6 fall back to 3 via get_bitmap
+// All other digits: sizes 1-6 registered
 #if defined(PBL_PLATFORM_EMERY)
 static const uint32_t s_res[10][6] = {
-  { RESOURCE_ID_TALLBOY_01, RESOURCE_ID_TALLBOY_02, RESOURCE_ID_TALLBOY_03,
-    RESOURCE_ID_TALLBOY_04, RESOURCE_ID_TALLBOY_05, RESOURCE_ID_TALLBOY_06 },
-  { RESOURCE_ID_TALLBOY_11, RESOURCE_ID_TALLBOY_12, RESOURCE_ID_TALLBOY_13,
-    RESOURCE_ID_TALLBOY_14, RESOURCE_ID_TALLBOY_15, RESOURCE_ID_TALLBOY_16 },
+  { RESOURCE_ID_TALLBOY_01, RESOURCE_ID_TALLBOY_02, RESOURCE_ID_TALLBOY_03, 0, 0, 0 },
+  { RESOURCE_ID_TALLBOY_11, RESOURCE_ID_TALLBOY_12, RESOURCE_ID_TALLBOY_13, 0, 0, 0 },
   { RESOURCE_ID_TALLBOY_21, RESOURCE_ID_TALLBOY_22, RESOURCE_ID_TALLBOY_23,
     RESOURCE_ID_TALLBOY_24, RESOURCE_ID_TALLBOY_25, RESOURCE_ID_TALLBOY_26 },
   { RESOURCE_ID_TALLBOY_31, RESOURCE_ID_TALLBOY_32, RESOURCE_ID_TALLBOY_33,
@@ -199,14 +199,10 @@ static const uint32_t s_colon_res[6] = {
   RESOURCE_ID_TALLBOY_COLON1, RESOURCE_ID_TALLBOY_COLON2, RESOURCE_ID_TALLBOY_COLON3,
   RESOURCE_ID_TALLBOY_COLON4, RESOURCE_ID_TALLBOY_COLON5, RESOURCE_ID_TALLBOY_COLON6,
 };
-#define RES_SQUISH       RESOURCE_ID_TALLBOY_S0
-#define RES_SQUISH_COLON RESOURCE_ID_TALLBOY_COLON0
 #else
 static const uint32_t s_res[10][6] = {
-  { RESOURCE_ID_TALLBOY_L01, RESOURCE_ID_TALLBOY_L02, RESOURCE_ID_TALLBOY_L03,
-    RESOURCE_ID_TALLBOY_L04, RESOURCE_ID_TALLBOY_L05, RESOURCE_ID_TALLBOY_L06 },
-  { RESOURCE_ID_TALLBOY_L11, RESOURCE_ID_TALLBOY_L12, RESOURCE_ID_TALLBOY_L13,
-    RESOURCE_ID_TALLBOY_L14, RESOURCE_ID_TALLBOY_L15, RESOURCE_ID_TALLBOY_L16 },
+  { RESOURCE_ID_TALLBOY_L01, RESOURCE_ID_TALLBOY_L02, RESOURCE_ID_TALLBOY_L03, 0, 0, 0 },
+  { RESOURCE_ID_TALLBOY_L11, RESOURCE_ID_TALLBOY_L12, RESOURCE_ID_TALLBOY_L13, 0, 0, 0 },
   { RESOURCE_ID_TALLBOY_L21, RESOURCE_ID_TALLBOY_L22, RESOURCE_ID_TALLBOY_L23,
     RESOURCE_ID_TALLBOY_L24, RESOURCE_ID_TALLBOY_L25, RESOURCE_ID_TALLBOY_L26 },
   { RESOURCE_ID_TALLBOY_L31, RESOURCE_ID_TALLBOY_L32, RESOURCE_ID_TALLBOY_L33,
@@ -228,24 +224,22 @@ static const uint32_t s_colon_res[6] = {
   RESOURCE_ID_TALLBOY_LCOLON1, RESOURCE_ID_TALLBOY_LCOLON2, RESOURCE_ID_TALLBOY_LCOLON3,
   RESOURCE_ID_TALLBOY_LCOLON4, RESOURCE_ID_TALLBOY_LCOLON5, RESOURCE_ID_TALLBOY_LCOLON6,
 };
-#define RES_SQUISH       RESOURCE_ID_TALLBOY_LS0
-#define RES_SQUISH_COLON RESOURCE_ID_TALLBOY_LCOLON0
 #endif
 
 static GBitmap *get_bitmap(int digit, int size) {
-  if (size == 0) return s_squish_bm;
+  if (size == 0) return NULL;  // squish frame: blank, blit() handles NULL safely
   int si = size - 1;
   if (!s_bitmaps[digit][si]) {
     uint32_t res = s_res[digit][si];
-    if (!res) for (int i = si+1; i < 6; i++) if (s_res[digit][i]) { res = s_res[digit][i]; break; }
     if (!res) for (int i = si-1; i >= 0; i--) if (s_res[digit][i]) { res = s_res[digit][i]; break; }
+    if (!res) for (int i = si+1; i < 6;  i++) if (s_res[digit][i]) { res = s_res[digit][i]; break; }
     if (res) s_bitmaps[digit][si] = gbitmap_create_with_resource(res);
   }
   return s_bitmaps[digit][si];
 }
 
 static GBitmap *get_colon(int size) {
-  if (size == 0) return s_squish_colon;
+  if (size == 0) return NULL;  // squish frame: blank
   int si = size - 1;
   if (!s_colon_bm[si])
     s_colon_bm[si] = gbitmap_create_with_resource(s_colon_res[si]);
@@ -258,8 +252,6 @@ static void free_bitmaps(void) {
       if (s_bitmaps[d][s]) { gbitmap_destroy(s_bitmaps[d][s]); s_bitmaps[d][s] = NULL; }
   for (int s = 0; s < 6; s++)
     if (s_colon_bm[s]) { gbitmap_destroy(s_colon_bm[s]); s_colon_bm[s] = NULL; }
-  if (s_squish_bm)    { gbitmap_destroy(s_squish_bm);    s_squish_bm    = NULL; }
-  if (s_squish_colon) { gbitmap_destroy(s_squish_colon); s_squish_colon = NULL; }
 }
 
 static void blit(GContext *ctx, GBitmap *bm, int x, int y) {
@@ -627,11 +619,6 @@ static void window_load(Window *window) {
   s_canvas_layer = layer_create(layer_get_bounds(root));
   layer_set_update_proc(s_canvas_layer, draw_layer);
   layer_add_child(root, s_canvas_layer);
-
-  // Load squish bitmaps here, inside window context, not in init()
-  s_squish_bm    = gbitmap_create_with_resource(RES_SQUISH);
-  s_squish_colon = gbitmap_create_with_resource(RES_SQUISH_COLON);
-
   GRect ub = layer_get_unobstructed_bounds(root);
   s_target_size = pick_size(ub.size.h);
   s_stack_size  = pick_stack_size(ub.size.h);
