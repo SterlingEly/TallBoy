@@ -1,73 +1,27 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v1.4
-// Bisect build: full 134-resource appinfo (matching v0.9 that worked).
-// Squish bottoms at size 1 (not blank).
-// No squish bitmap resources needed.
+// TallBoy — main.c  v0.9 RESTORED
+//
+// THREE LAYOUTS:
+//   LAYOUT_WIDE  — HH:MM horizontal, full width
+//   LAYOUT_LEFT  — HH stacked over MM, left-aligned, info lines right
+//   LAYOUT_RIGHT — HH stacked over MM, right-aligned, info lines left
+//
+// Shake cycles through layouts. Demo plays on launch.
+// INFO LINES: date, battery, steps, HR, BT, weather
+// QUICK VIEW: vertically centered on unobstructed bounds
 // ============================================================
-
-#define SETTINGS_KEY  2
-
-typedef enum {
-  FIELD_NONE = 0,
-  FIELD_DATE,
-  FIELD_BATTERY,
-  FIELD_STEPS,
-  FIELD_HEART_RATE,
-  FIELD_BLUETOOTH,
-  FIELD_WEATHER_TEMP,
-  FIELD_WEATHER_DESC,
-  FIELD_WEEKDAY,
-  FIELD_TIME_SECS,
-  FIELD_COUNT
-} FieldType;
-
-#define INFO_LINE_COUNT 10
-
-typedef struct {
-  uint8_t layout;
-  uint8_t leading_zero;
-  uint8_t show_colon;
-  uint8_t debug_mode;
-  uint8_t fields[INFO_LINE_COUNT];
-} TallBoySettings;
-
-static TallBoySettings s_cfg;
-
-static void prv_default_settings(void) {
-  s_cfg.layout       = 0;
-  s_cfg.leading_zero = 1;
-  s_cfg.show_colon   = 1;
-  s_cfg.debug_mode   = 1;
-  s_cfg.fields[0] = FIELD_DATE;
-  s_cfg.fields[1] = FIELD_BATTERY;
-  s_cfg.fields[2] = FIELD_STEPS;
-  s_cfg.fields[3] = FIELD_HEART_RATE;
-  s_cfg.fields[4] = FIELD_BLUETOOTH;
-  s_cfg.fields[5] = FIELD_WEATHER_TEMP;
-  s_cfg.fields[6] = FIELD_NONE;
-  s_cfg.fields[7] = FIELD_NONE;
-  s_cfg.fields[8] = FIELD_NONE;
-  s_cfg.fields[9] = FIELD_NONE;
-}
-
-static void prv_load_settings(void) {
-  prv_default_settings();
-  uint8_t saved_layout = 0;
-  if (persist_read_data(SETTINGS_KEY, &saved_layout, 1) > 0) {
-    if (saved_layout < 3) s_cfg.layout = saved_layout;
-  }
-}
-
-static void prv_save_settings(void) {
-  persist_write_data(SETTINGS_KEY, &s_cfg, sizeof(s_cfg));
-}
 
 #define LAYOUT_WIDE   0
 #define LAYOUT_LEFT   1
 #define LAYOUT_RIGHT  2
+static int s_layout = LAYOUT_WIDE;
 
+static bool s_leading_zero = true;
+static bool s_show_colon   = true;
+
+// ---- Platform geometry ----
 #if defined(PBL_PLATFORM_EMERY)
   #define SCREEN_W      200
   #define SCREEN_H      228
@@ -79,10 +33,8 @@ static void prv_save_settings(void) {
   #define SLOT_M_ONES   148
   #define SIDE_MARGIN    12
   #define INFO_SMALL_H   14
+  #define STACK_DIGIT_H  88   // outer_h at size 2: 24+32*2
   #define HALF_UNIT       4
-  #define STACK_H_SZ1    56
-  #define STACK_H_SZ2    88
-  #define STACK_SZ2_MIN 190
 #else
   #define SCREEN_W      144
   #define SCREEN_H      168
@@ -94,53 +46,51 @@ static void prv_save_settings(void) {
   #define SLOT_M_ONES   108
   #define SIDE_MARGIN     6
   #define INFO_SMALL_H   14
+  #define STACK_DIGIT_H  66   // outer_h at size 2: 18+24*2
   #define HALF_UNIT       3
-  #define STACK_H_SZ1    42
-  #define STACK_H_SZ2    66
-  #define STACK_SZ2_MIN 146
 #endif
 
-static int s_stack_size = 2;
+#define STACK_SIZE  2
 
-static int pick_stack_size(int ub_h) {
-  return (ub_h >= STACK_SZ2_MIN) ? 2 : 1;
-}
-
-static int stack_digit_h(int sz) {
-  return (sz == 2) ? STACK_H_SZ2 : STACK_H_SZ1;
-}
-
+// ---- Size selection ----
 static int pick_size(int available_h) {
 #if defined(PBL_PLATFORM_EMERY)
-  for (int s = 6; s >= 1; s--)
+  for (int s = 6; s >= 1; s--) {
     if ((24 + 32 * s) <= available_h - 6) return s;
+  }
 #else
-  for (int s = 6; s >= 1; s--)
+  for (int s = 6; s >= 1; s--) {
     if ((18 + 24 * s) <= available_h - 6) return s;
+  }
 #endif
   return 1;
 }
 
-static const int GROW[]   = { 1, 2, 3, 4, 5, 6 };
-static const int SHRINK[] = { 5, 4, 3, 2, 1, 0 };
-#define GROW_LEN   6
-#define SHRINK_LEN 6
-#define COUNTDOWN_DIGIT_FRAMES (GROW_LEN + SHRINK_LEN)
-#define COUNTDOWN_MS  55
-#define BLINK_REPS    2
-#define ANIM_FAST_MS  80
+// ---- Animation sequences ----
+static const int SQUISH_DOWN[] = { 5, 4, 3, 2, 1 };
+static const int SQUISH_UP[]   = { 2, 3, 4, 5, 6 };
+#define SQUISH_LEN 5
 
-static const int SIZE_CYCLE[] = { 6, 5, 4, 3, 2, 1, 2, 3, 4, 5, 6 };
+static const int SIZE_CYCLE[]  = { 6, 5, 4, 3, 2, 1, 2, 3, 4, 5, 6 };
 #define SIZE_CYCLE_LEN 11
 
+#define ANIM_SLOW_MS  1000
+#define ANIM_FAST_MS    80
+#define DEMO_TIME_MS  5000
+#define DEMO_DIGIT_MS 1000
+
 typedef enum {
-  PHASE_COUNTDOWN,
-  PHASE_BLINK,
+  PHASE_TIME_1,
+  PHASE_DIGIT_CYCLE,
+  PHASE_TIME_2,
+  PHASE_SIZE_SLOW,
+  PHASE_SIZE_FAST,
   PHASE_DONE,
   PHASE_SQUISH,
   PHASE_SHAKE_CYCLE,
-} Phase;
+} DemoPhase;
 
+// ---- State ----
 static Window    *s_window;
 static Layer     *s_canvas_layer;
 static int        s_hour        = 0;
@@ -148,27 +98,22 @@ static int        s_minute      = 0;
 static int        s_size        = 6;
 static int        s_target_size = 6;
 static GColor     s_fg, s_bg;
-static Phase      s_phase       = PHASE_COUNTDOWN;
+static DemoPhase  s_phase       = PHASE_TIME_1;
+static int        s_demo_digit  = 0;
 static int        s_anim_step   = 0;
 static int        s_anim_rep    = 0;
-static bool       s_going_down  = true;
-static int        s_countdown_digit = 9;
 static AppTimer  *s_timer       = NULL;
-static bool       s_demo_override = false;
-static int        s_demo_digit    = 9;
-static int        s_demo_size     = 1;
-static bool       s_digit_pending  = false;
-static int        s_pending_hour   = 0;
-static int        s_pending_minute = 0;
 
-static int   s_battery_pct      = 100;
-static bool  s_charging         = false;
-static bool  s_bt_connected     = true;
-static int   s_steps            = 0;
-static int   s_heart_rate       = 0;
+// ---- Data state ----
+static int   s_battery_pct  = 100;
+static bool  s_charging      = false;
+static bool  s_bt_connected  = true;
+static int   s_steps         = 0;
+static int   s_heart_rate    = 0;
 static char  s_weather_temp[8]  = "";
 static char  s_weather_desc[32] = "";
 
+// ---- Bitmaps ----
 static GBitmap *s_bitmaps[10][6];
 static GBitmap *s_colon_bm[6];
 
@@ -228,20 +173,24 @@ static const uint32_t s_colon_res[6] = {
 };
 #endif
 
+static uint32_t find_res(int digit, int size) {
+  int si = size - 1;
+  if (s_res[digit][si]) return s_res[digit][si];
+  for (int i = si + 1; i < 6; i++) if (s_res[digit][i]) return s_res[digit][i];
+  for (int i = si - 1; i >= 0; i--) if (s_res[digit][i]) return s_res[digit][i];
+  return 0;
+}
+
 static GBitmap *get_bitmap(int digit, int size) {
-  if (size < 1) size = 1;  // clamp — no blank frame, no size-0 resources needed
   int si = size - 1;
   if (!s_bitmaps[digit][si]) {
-    uint32_t res = s_res[digit][si];
-    if (!res) for (int i = si-1; i >= 0; i--) if (s_res[digit][i]) { res = s_res[digit][i]; break; }
-    if (!res) for (int i = si+1; i < 6;  i++) if (s_res[digit][i]) { res = s_res[digit][i]; break; }
+    uint32_t res = find_res(digit, size);
     if (res) s_bitmaps[digit][si] = gbitmap_create_with_resource(res);
   }
   return s_bitmaps[digit][si];
 }
 
 static GBitmap *get_colon(int size) {
-  if (size < 1) size = 1;  // clamp
   int si = size - 1;
   if (!s_colon_bm[si])
     s_colon_bm[si] = gbitmap_create_with_resource(s_colon_res[si]);
@@ -256,6 +205,7 @@ static void free_bitmaps(void) {
     if (s_colon_bm[s]) { gbitmap_destroy(s_colon_bm[s]); s_colon_bm[s] = NULL; }
 }
 
+// ---- Draw a bitmap at a specific position ----
 static void blit(GContext *ctx, GBitmap *bm, int x, int y) {
   if (!bm) return;
   graphics_context_set_compositing_mode(ctx, GCompOpSet);
@@ -266,64 +216,38 @@ static void blit(GContext *ctx, GBitmap *bm, int x, int y) {
 // INFO LINES
 // ============================================================
 static const char *s_day_names[]   = { "SUN","MON","TUE","WED","THU","FRI","SAT" };
-static const char *s_day_full[]    = {
-  "SUNDAY","MONDAY","TUESDAY","WEDNESDAY","THURSDAY","FRIDAY","SATURDAY"
-};
 static const char *s_month_abbrs[] = {
   "JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"
 };
 
-static void build_field_string(char *buf, int len, FieldType field, struct tm *t) {
-  buf[0] = '\0';
-  switch (field) {
-    case FIELD_NONE: break;
-    case FIELD_DATE:
-      if (t) snprintf(buf, len, "%s %s %d",
-                      s_day_names[t->tm_wday], s_month_abbrs[t->tm_mon], t->tm_mday);
-      break;
-    case FIELD_WEEKDAY:
-      if (t) snprintf(buf, len, "%s", s_day_full[t->tm_wday]);
-      break;
-    case FIELD_BATTERY:
-      snprintf(buf, len, "BAT %d%%%s", s_battery_pct, s_charging ? " CHG" : "");
-      break;
-    case FIELD_STEPS:
+static int build_info_lines(char lines[][32], int max_lines, struct tm *t) {
+  int n = 0;
+  if (n < max_lines && t)
+    snprintf(lines[n++], 32, "%s %s %d",
+             s_day_names[t->tm_wday], s_month_abbrs[t->tm_mon], t->tm_mday);
+  if (n < max_lines)
+    snprintf(lines[n++], 32, "BAT %d%%%s", s_battery_pct, s_charging ? " CHG" : "");
 #if defined(PBL_HEALTH)
-      snprintf(buf, len, "%d STEPS", s_steps);
+  if (n < max_lines)
+    snprintf(lines[n++], 32, "%d STEPS", s_steps);
+  if (n < max_lines && s_heart_rate > 0)
+    snprintf(lines[n++], 32, "%d BPM", s_heart_rate);
 #endif
-      break;
-    case FIELD_HEART_RATE:
-#if defined(PBL_HEALTH)
-      if (s_heart_rate > 0) snprintf(buf, len, "%d BPM", s_heart_rate);
-#endif
-      break;
-    case FIELD_BLUETOOTH:
-      if (!s_bt_connected) snprintf(buf, len, "BT OFF");
-      break;
-    case FIELD_WEATHER_TEMP:
-      if (s_weather_temp[0]) snprintf(buf, len, "%s", s_weather_temp);
-      break;
-    case FIELD_WEATHER_DESC:
-      if (s_weather_desc[0]) snprintf(buf, len, "%s", s_weather_desc);
-      break;
-    case FIELD_TIME_SECS:
-      if (t) snprintf(buf, len, ":%02d", t->tm_sec);
-      break;
-    default: break;
-  }
+  if (n < max_lines && !s_bt_connected)
+    snprintf(lines[n++], 32, "BT OFF");
+  if (n < max_lines && s_weather_temp[0])
+    snprintf(lines[n++], 32, "%s", s_weather_temp);
+  if (n < max_lines && s_weather_desc[0])
+    snprintf(lines[n++], 32, "%s", s_weather_desc);
+  return n;
 }
 
-static void draw_info_lines(GContext *ctx, GRect area, struct tm *t) {
-  GFont font  = fonts_get_system_font(FONT_KEY_GOTHIC_14);
-  int line_h  = INFO_SMALL_H + 2;
-  int max_fit = area.size.h / line_h;
-  char lines[INFO_LINE_COUNT][32];
-  int n = 0;
-  for (int i = 0; i < INFO_LINE_COUNT && n < max_fit; i++) {
-    build_field_string(lines[n], 32, (FieldType)s_cfg.fields[i], t);
-    if (lines[n][0] != '\0') n++;
-  }
+static void draw_info_lines(GContext *ctx, GRect area, int max_lines, struct tm *t) {
+  char lines[8][32];
+  int n = build_info_lines(lines, max_lines < 8 ? max_lines : 8, t);
   if (n == 0) return;
+  GFont font = fonts_get_system_font(FONT_KEY_GOTHIC_14);
+  int line_h  = INFO_SMALL_H + 2;
   int total_h = n * line_h;
   int start_y = area.origin.y + (area.size.h - total_h) / 2;
   graphics_context_set_text_color(ctx, s_fg);
@@ -338,49 +262,51 @@ static void draw_info_lines(GContext *ctx, GRect area, struct tm *t) {
 // DRAW LAYER
 // ============================================================
 static void draw_layer(Layer *layer, GContext *ctx) {
-  Layer *root  = window_get_root_layer(s_window);
-  GRect ub     = layer_get_unobstructed_bounds(root);
-  int ub_top   = ub.origin.y;
-  int ub_h     = ub.size.h;
+  Layer *root = window_get_root_layer(s_window);
+  GRect ub    = layer_get_unobstructed_bounds(root);
+  int ub_top  = ub.origin.y;
+  int ub_h    = ub.size.h;
   int center_y = ub_top + ub_h / 2;
 
   graphics_context_set_fill_color(ctx, s_bg);
   graphics_fill_rect(ctx, layer_get_bounds(layer), 0, GCornerNone);
 
-  int h_tens, h_ones, m_tens, m_ones, size;
-  if (s_demo_override) {
+  int h_tens, h_ones, m_tens, m_ones;
+  if (s_phase == PHASE_DIGIT_CYCLE) {
     h_tens = h_ones = m_tens = m_ones = s_demo_digit;
-    size = s_demo_size;
   } else {
-    int h = s_hour % 12;
+    int h  = s_hour % 12;
     if (h == 0) h = 12;
     h_tens = h / 10;
     h_ones = h % 10;
     m_tens = s_minute / 10;
     m_ones = s_minute % 10;
-    size   = s_size;
   }
 
-  bool draw_h_tens = s_cfg.leading_zero || (h_tens != 0) || s_demo_override;
+  bool draw_h_tens = s_leading_zero || (h_tens != 0);
 
   time_t now_t  = time(NULL);
   struct tm *tm = (s_phase == PHASE_DONE) ? localtime(&now_t) : NULL;
 
-  if (s_cfg.layout == LAYOUT_WIDE) {
+  if (s_layout == LAYOUT_WIDE) {
+    // Files are SCREEN_H tall, digit centered at SCREEN_H/2.
+    // Shift file so digit center lands at ub center.
     int y = center_y - SCREEN_H / 2;
+    int size = s_size;
     if (draw_h_tens) blit(ctx, get_bitmap(h_tens, size), SLOT_H_TENS, y);
     blit(ctx, get_bitmap(h_ones, size), SLOT_H_ONES, y);
-    if (s_cfg.show_colon && !s_demo_override)
-      blit(ctx, get_colon(size), COLON_SLOT_X, y);
+    if (s_show_colon) blit(ctx, get_colon(size), COLON_SLOT_X, y);
     blit(ctx, get_bitmap(m_tens, size), SLOT_M_TENS, y);
     blit(ctx, get_bitmap(m_ones, size), SLOT_M_ONES, y);
 
   } else {
-    int sdh = stack_digit_h(s_stack_size);
-    int h_y = (center_y - sdh / 2 - HALF_UNIT) - SCREEN_H / 2;
-    int m_y = (center_y + sdh / 2 + HALF_UNIT) - SCREEN_H / 2;
+    // Stacked: hours centered in top half, minutes in bottom half.
+    // Shift each row by HALF_UNIT to add breathing room at the seam.
+    int h_y = (center_y - STACK_DIGIT_H / 2 - HALF_UNIT) - SCREEN_H / 2;
+    int m_y = (center_y + STACK_DIGIT_H / 2 + HALF_UNIT) - SCREEN_H / 2;
+
     int tens_x, ones_x, info_x, info_w;
-    if (s_cfg.layout == LAYOUT_LEFT) {
+    if (s_layout == LAYOUT_LEFT) {
       tens_x = SIDE_MARGIN;
       ones_x = SIDE_MARGIN + SLOT_W;
       info_x = SIDE_MARGIN + SLOT_W * 2 + SIDE_MARGIN;
@@ -391,12 +317,16 @@ static void draw_layer(Layer *layer, GContext *ctx) {
       info_x = SIDE_MARGIN;
       info_w = tens_x - SIDE_MARGIN * 2;
     }
-    if (draw_h_tens) blit(ctx, get_bitmap(h_tens, s_stack_size), tens_x, h_y);
-    blit(ctx, get_bitmap(h_ones, s_stack_size), ones_x, h_y);
-    blit(ctx, get_bitmap(m_tens, s_stack_size), tens_x, m_y);
-    blit(ctx, get_bitmap(m_ones, s_stack_size), ones_x, m_y);
-    if (tm && info_w > 20)
-      draw_info_lines(ctx, GRect(info_x, ub_top, info_w, ub_h), tm);
+
+    if (draw_h_tens) blit(ctx, get_bitmap(h_tens, STACK_SIZE), tens_x, h_y);
+    blit(ctx, get_bitmap(h_ones, STACK_SIZE), ones_x, h_y);
+    blit(ctx, get_bitmap(m_tens, STACK_SIZE), tens_x, m_y);
+    blit(ctx, get_bitmap(m_ones, STACK_SIZE), ones_x, m_y);
+
+    if (tm && info_w > 20) {
+      int max_lines = ub_h / (INFO_SMALL_H + 2);
+      draw_info_lines(ctx, GRect(info_x, ub_top, info_w, ub_h), max_lines, tm);
+    }
   }
 }
 
@@ -413,85 +343,88 @@ static void schedule(uint32_t ms) {
 static void timer_cb(void *data) {
   s_timer = NULL;
   switch (s_phase) {
-
-    case PHASE_COUNTDOWN: {
-      int frame = s_anim_step % COUNTDOWN_DIGIT_FRAMES;
-      s_demo_size     = (frame < GROW_LEN) ? GROW[frame] : SHRINK[frame - GROW_LEN];
-      s_demo_digit    = s_countdown_digit;
-      s_demo_override = true;
+    case PHASE_TIME_1:
+      s_phase = PHASE_DIGIT_CYCLE;
+      s_demo_digit = 0;
       layer_mark_dirty(s_canvas_layer);
+      schedule(DEMO_DIGIT_MS);
+      break;
+    case PHASE_DIGIT_CYCLE:
+      s_demo_digit++;
+      if (s_demo_digit < 10) {
+        layer_mark_dirty(s_canvas_layer);
+        schedule(DEMO_DIGIT_MS);
+      } else {
+        s_phase = PHASE_TIME_2; s_size = 6;
+        layer_mark_dirty(s_canvas_layer);
+        schedule(DEMO_TIME_MS);
+      }
+      break;
+    case PHASE_TIME_2:
+      s_phase = PHASE_SIZE_SLOW;
+      s_anim_step = 0; s_anim_rep = 0;
+      s_size = SIZE_CYCLE[0];
+      layer_mark_dirty(s_canvas_layer);
+      schedule(ANIM_SLOW_MS);
+      break;
+    case PHASE_SIZE_SLOW:
       s_anim_step++;
-      if (s_anim_step >= COUNTDOWN_DIGIT_FRAMES) {
-        s_anim_step = 0;
-        if (s_countdown_digit > 0) {
-          s_countdown_digit--;
-          schedule(COUNTDOWN_MS);
+      if (s_anim_step < SIZE_CYCLE_LEN) {
+        s_size = SIZE_CYCLE[s_anim_step];
+        layer_mark_dirty(s_canvas_layer);
+        schedule(ANIM_SLOW_MS);
+      } else {
+        s_anim_rep++;
+        if (s_anim_rep < 2) {
+          s_anim_step = 0; s_size = SIZE_CYCLE[0];
+          layer_mark_dirty(s_canvas_layer);
+          schedule(ANIM_SLOW_MS);
         } else {
-          s_demo_override = false;
-          s_size       = 6;
-          s_going_down = true;
-          s_anim_rep   = 0;
-          s_phase      = PHASE_BLINK;
+          s_phase = PHASE_SIZE_FAST;
+          s_anim_step = 0; s_anim_rep = 0;
+          s_size = SIZE_CYCLE[0];
           layer_mark_dirty(s_canvas_layer);
           schedule(ANIM_FAST_MS);
         }
-      } else {
-        schedule(COUNTDOWN_MS);
       }
       break;
-    }
-
-    case PHASE_BLINK:
-      if (s_going_down) {
-        s_size--;
+    case PHASE_SIZE_FAST:
+      s_anim_step++;
+      if (s_anim_step < SIZE_CYCLE_LEN) {
+        s_size = SIZE_CYCLE[s_anim_step];
         layer_mark_dirty(s_canvas_layer);
-        if (s_size <= 1) { s_size = 1; s_going_down = false; }
         schedule(ANIM_FAST_MS);
       } else {
-        s_size++;
-        layer_mark_dirty(s_canvas_layer);
-        if (s_size >= s_target_size) {
-          s_size = s_target_size;
-          s_anim_rep++;
-          if (s_anim_rep < BLINK_REPS) {
-            s_size = 6; s_going_down = true;
-            schedule(ANIM_FAST_MS);
-          } else {
-            s_phase = PHASE_DONE;
-            layer_mark_dirty(s_canvas_layer);
-          }
-        } else {
+        s_anim_rep++;
+        if (s_anim_rep < 2) {
+          s_anim_step = 0; s_size = SIZE_CYCLE[0];
+          layer_mark_dirty(s_canvas_layer);
           schedule(ANIM_FAST_MS);
+        } else {
+          s_phase = PHASE_DONE; s_size = s_target_size;
+          layer_mark_dirty(s_canvas_layer);
         }
       }
       break;
-
     case PHASE_SQUISH:
-      if (s_going_down) {
-        s_size--;
+      s_anim_step++;
+      if (s_anim_step < SQUISH_LEN) {
+        s_size = SQUISH_DOWN[s_anim_step];
         layer_mark_dirty(s_canvas_layer);
-        if (s_size <= 1) {
-          s_size = 1;
-          // Apply pending digit values at minimum size (clean flip point)
-          if (s_digit_pending) {
-            s_hour = s_pending_hour; s_minute = s_pending_minute;
-            s_digit_pending = false;
-          }
-          s_going_down = false;
-        }
         schedule(ANIM_FAST_MS);
       } else {
-        s_size++;
-        layer_mark_dirty(s_canvas_layer);
-        if (s_size >= s_target_size) {
-          s_size = s_target_size; s_phase = PHASE_DONE;
+        int up = s_anim_step - SQUISH_LEN;
+        if (up < SQUISH_LEN) {
+          int proposed = SQUISH_UP[up];
+          s_size = (proposed > s_target_size) ? s_target_size : proposed;
           layer_mark_dirty(s_canvas_layer);
-        } else {
           schedule(ANIM_FAST_MS);
+        } else {
+          s_phase = PHASE_DONE; s_size = s_target_size;
+          layer_mark_dirty(s_canvas_layer);
         }
       }
       break;
-
     case PHASE_SHAKE_CYCLE:
       s_anim_step++;
       if (s_anim_step < SIZE_CYCLE_LEN) {
@@ -510,7 +443,6 @@ static void timer_cb(void *data) {
         }
       }
       break;
-
     case PHASE_DONE:
       break;
   }
@@ -523,7 +455,6 @@ static void unobstructed_change(AnimationProgress progress, void *ctx) {
   Layer *root = window_get_root_layer(s_window);
   GRect ub = layer_get_unobstructed_bounds(root);
   s_target_size = pick_size(ub.size.h);
-  s_stack_size  = pick_stack_size(ub.size.h);
   if (s_phase == PHASE_DONE) {
     s_size = s_target_size;
     layer_mark_dirty(s_canvas_layer);
@@ -531,39 +462,32 @@ static void unobstructed_change(AnimationProgress progress, void *ctx) {
 }
 
 static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
-  if (!s_cfg.debug_mode || s_phase != PHASE_DONE) return;
-  s_cfg.layout = (s_cfg.layout + 1) % 3;
-  prv_save_settings();
-  if (s_cfg.layout == LAYOUT_WIDE) {
-    s_phase     = PHASE_SHAKE_CYCLE;
+  if (s_phase != PHASE_DONE) return;
+  s_layout = (s_layout + 1) % 3;
+  if (s_layout == LAYOUT_WIDE) {
+    s_phase = PHASE_SHAKE_CYCLE;
     s_anim_step = 0; s_anim_rep = 0;
-    s_size      = SIZE_CYCLE[0];
+    s_size = SIZE_CYCLE[0];
     schedule(ANIM_FAST_MS);
   }
   layer_mark_dirty(s_canvas_layer);
 }
 
 static void tick_handler(struct tm *t, TimeUnits units) {
-  if (s_phase == PHASE_DONE && s_cfg.layout == LAYOUT_WIDE) {
-    s_pending_hour   = t->tm_hour;
-    s_pending_minute = t->tm_min;
-    s_digit_pending  = true;
-    s_phase      = PHASE_SQUISH;
-    s_going_down = true;
+  s_hour   = t->tm_hour;
+  s_minute = t->tm_min;
+  if (s_phase == PHASE_DONE && s_layout == LAYOUT_WIDE) {
+    s_phase = PHASE_SQUISH;
+    s_anim_step = 0;
+    s_size = SQUISH_DOWN[0];
     schedule(ANIM_FAST_MS);
-  } else if (s_phase == PHASE_SQUISH) {
-    s_pending_hour   = t->tm_hour;
-    s_pending_minute = t->tm_min;
-    s_digit_pending  = true;
-  } else {
-    s_hour   = t->tm_hour;
-    s_minute = t->tm_min;
-    layer_mark_dirty(s_canvas_layer);
   }
+  layer_mark_dirty(s_canvas_layer);
 }
 
 static void battery_handler(BatteryChargeState state) {
-  s_battery_pct = state.charge_percent; s_charging = state.is_charging;
+  s_battery_pct = state.charge_percent;
+  s_charging    = state.is_charging;
   layer_mark_dirty(s_canvas_layer);
 }
 
@@ -624,20 +548,11 @@ static void window_load(Window *window) {
   layer_add_child(root, s_canvas_layer);
   GRect ub = layer_get_unobstructed_bounds(root);
   s_target_size = pick_size(ub.size.h);
-  s_stack_size  = pick_stack_size(ub.size.h);
   s_size = 6;
   UnobstructedAreaHandlers ua = { .change = unobstructed_change };
   unobstructed_area_service_subscribe(ua, NULL);
   accel_tap_service_subscribe(accel_tap_handler);
-  if (s_cfg.debug_mode) {
-    s_phase = PHASE_COUNTDOWN;
-    s_countdown_digit = 9; s_anim_step = 0;
-    s_demo_override = true; s_demo_digit = 9; s_demo_size = GROW[0];
-    layer_mark_dirty(s_canvas_layer);
-    schedule(COUNTDOWN_MS);
-  } else {
-    s_phase = PHASE_DONE; s_size = s_target_size;
-  }
+  schedule(DEMO_TIME_MS);
 }
 
 static void window_unload(Window *window) {
@@ -649,8 +564,8 @@ static void window_unload(Window *window) {
 }
 
 static void init(void) {
-  prv_load_settings();
-  s_fg = GColorWhite; s_bg = GColorBlack;
+  s_fg = GColorWhite;
+  s_bg = GColorBlack;
   memset(s_bitmaps,  0, sizeof(s_bitmaps));
   memset(s_colon_bm, 0, sizeof(s_colon_bm));
   s_window = window_create();
@@ -661,7 +576,8 @@ static void init(void) {
   window_stack_push(s_window, true);
   time_t now = time(NULL);
   struct tm *t = localtime(&now);
-  s_hour = t->tm_hour; s_minute = t->tm_min;
+  s_hour   = t->tm_hour;
+  s_minute = t->tm_min;
   tick_timer_service_subscribe(MINUTE_UNIT, tick_handler);
   battery_state_service_subscribe(battery_handler);
   battery_handler(battery_state_service_peek());
