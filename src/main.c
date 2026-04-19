@@ -24,7 +24,7 @@ typedef enum {
 
 typedef struct {
   uint8_t layout;
-  uint8_t leading_zero;  // 1=on, 0=off  (uint8 avoids bool padding surprises)
+  uint8_t leading_zero;
   uint8_t show_colon;
   uint8_t debug_mode;
   uint8_t fields[INFO_LINE_COUNT];
@@ -51,7 +51,7 @@ static void prv_default_settings(void) {
 
 static void prv_load_settings(void) {
   prv_default_settings();
-  // Only restore layout — skip bool fields to avoid stale-flash corruption
+  // Only restore layout byte — booleans always come from defaults
   uint8_t saved_layout = 0;
   if (persist_read_data(SETTINGS_KEY, &saved_layout, 1) > 0) {
     if (saved_layout < 3) s_cfg.layout = saved_layout;
@@ -119,7 +119,6 @@ static int pick_size(int available_h) {
   return 1;
 }
 
-// ---- Animation ----
 static const int GROW[]   = { 1, 2, 3, 4, 5, 6 };
 static const int SHRINK[] = { 5, 4, 3, 2, 1, 0 };
 #define GROW_LEN   6
@@ -140,7 +139,6 @@ typedef enum {
   PHASE_SHAKE_CYCLE,
 } Phase;
 
-// ---- State ----
 static Window    *s_window;
 static Layer     *s_canvas_layer;
 static int        s_hour        = 0;
@@ -161,7 +159,6 @@ static bool       s_digit_pending  = false;
 static int        s_pending_hour   = 0;
 static int        s_pending_minute = 0;
 
-// ---- Data ----
 static int   s_battery_pct      = 100;
 static bool  s_charging         = false;
 static bool  s_bt_connected     = true;
@@ -170,7 +167,6 @@ static int   s_heart_rate       = 0;
 static char  s_weather_temp[8]  = "";
 static char  s_weather_desc[32] = "";
 
-// ---- Bitmaps ----
 static GBitmap *s_bitmaps[10][6];
 static GBitmap *s_colon_bm[6];
 static GBitmap *s_squish_bm    = NULL;
@@ -631,6 +627,11 @@ static void window_load(Window *window) {
   s_canvas_layer = layer_create(layer_get_bounds(root));
   layer_set_update_proc(s_canvas_layer, draw_layer);
   layer_add_child(root, s_canvas_layer);
+
+  // Load squish bitmaps here, inside window context, not in init()
+  s_squish_bm    = gbitmap_create_with_resource(RES_SQUISH);
+  s_squish_colon = gbitmap_create_with_resource(RES_SQUISH_COLON);
+
   GRect ub = layer_get_unobstructed_bounds(root);
   s_target_size = pick_size(ub.size.h);
   s_stack_size  = pick_stack_size(ub.size.h);
@@ -662,8 +663,6 @@ static void init(void) {
   s_fg = GColorWhite; s_bg = GColorBlack;
   memset(s_bitmaps,  0, sizeof(s_bitmaps));
   memset(s_colon_bm, 0, sizeof(s_colon_bm));
-  s_squish_bm    = gbitmap_create_with_resource(RES_SQUISH);
-  s_squish_colon = gbitmap_create_with_resource(RES_SQUISH_COLON);
   s_window = window_create();
   window_set_background_color(s_window, GColorBlack);
   window_set_window_handlers(s_window, (WindowHandlers){
