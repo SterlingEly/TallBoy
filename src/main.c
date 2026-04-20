@@ -1,25 +1,22 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v1.1
+// TallBoy — main.c  v1.2
 //
-// Changes from v1.0:
-//   - Fix: colon suppressed only during PHASE_COUNTDOWN (not all demo states)
-//   - New layout: LAYOUT_WIDE_COMPS — wide time at size 2 + 3 info lines above/below
-//   - Shake cycles: WIDE → WIDE_COMPS → LEFT → RIGHT → WIDE
-//   - Info lines: GOTHIC_18_BOLD, centered; more fields (weather, distance)
-//   - Distance field added to data state
+// Fixes from v1.1:
+//   - Leading zero + colon: always drawn (no toggle), colon fallback
+//     searches adjacent sizes so a missing resource never blanks it
+//   - Boot: s_target_size protected from underflow; blink always ends at 6
+//   - Left stack: info column rect corrected (was painting full-screen)
+//   - Info font: GOTHIC_18_BOLD on all platforms for stacked column too
 // ============================================================
 
 #define LAYOUT_WIDE        0
-#define LAYOUT_WIDE_COMPS  1   // wide time + complications
+#define LAYOUT_WIDE_COMPS  1
 #define LAYOUT_LEFT        2
 #define LAYOUT_RIGHT       3
 #define LAYOUT_COUNT       4
 static int s_layout = LAYOUT_WIDE;
-
-static bool s_leading_zero = true;
-static bool s_show_colon   = true;
 
 // ---- Platform geometry ----
 #if defined(PBL_PLATFORM_EMERY)
@@ -36,7 +33,6 @@ static bool s_show_colon   = true;
   #define STACK_H_SZ1    56
   #define STACK_H_SZ2    88
   #define STACK_SZ2_MIN 190
-  // GOTHIC_18_BOLD metrics
   #define INFO_FONT_H    18
   #define INFO_LINE_H    20
 #else
@@ -53,17 +49,13 @@ static bool s_show_colon   = true;
   #define STACK_H_SZ1    42
   #define STACK_H_SZ2    66
   #define STACK_SZ2_MIN 146
-  #define INFO_FONT_H    14
-  #define INFO_LINE_H    16
+  #define INFO_FONT_H    18
+  #define INFO_LINE_H    20
 #endif
 
-// How many info lines to show above/below in LAYOUT_WIDE_COMPS
 #define WIDE_COMP_LINES 3
-
-// Fixed size used for digits in LAYOUT_WIDE_COMPS
 #define WIDE_COMP_SIZE  2
 
-// Runtime stack size — 2 normally, 1 under Quick View bar
 static int s_stack_size = 2;
 
 static int pick_stack_size(int ub_h) {
@@ -85,7 +77,6 @@ static int pick_size(int available_h) {
   return 1;
 }
 
-// Outer height of a digit at a given size
 static int digit_outer_h(int sz) {
 #if defined(PBL_PLATFORM_EMERY)
   return 24 + 32 * sz;
@@ -101,9 +92,9 @@ static const int SHRINK[] = { 5, 4, 3, 2, 1 };
 #define SHRINK_LEN  5
 #define COUNTDOWN_FRAMES (GROW_LEN + SHRINK_LEN)
 #define COUNTDOWN_MS  55
-
-#define BLINK_REPS   2
-#define ANIM_FAST_MS 80
+#define BLINK_REPS    2
+#define ANIM_FAST_MS  80
+#define WIDE_FULL_SIZE 6  // size LAYOUT_WIDE settles at after animations
 
 static const int SIZE_CYCLE[] = { 6, 5, 4, 3, 2, 1, 2, 3, 4, 5, 6 };
 #define SIZE_CYCLE_LEN 11
@@ -144,7 +135,7 @@ static int   s_battery_pct      = 100;
 static bool  s_charging         = false;
 static bool  s_bt_connected     = true;
 static int   s_steps            = 0;
-static int   s_distance_m       = 0;   // walked distance in meters
+static int   s_distance_m       = 0;
 static int   s_heart_rate       = 0;
 static char  s_weather_temp[8]  = "";
 static char  s_weather_desc[32] = "";
@@ -226,10 +217,24 @@ static GBitmap *get_bitmap(int digit, int size) {
   return s_bitmaps[digit][si];
 }
 
+// get_colon: tries requested size, then falls back to adjacent sizes so a
+// single missing resource never blanks the colon entirely.
 static GBitmap *get_colon(int size) {
   int si = size - 1;
-  if (!s_colon_bm[si])
-    s_colon_bm[si] = gbitmap_create_with_resource(s_colon_res[si]);
+  if (!s_colon_bm[si]) {
+    // Try requested size first
+    if (s_colon_res[si])
+      s_colon_bm[si] = gbitmap_create_with_resource(s_colon_res[si]);
+    // If still null, search for any loaded/loadable colon
+    if (!s_colon_bm[si]) {
+      for (int i = 0; i < 6; i++) {
+        if (i == si) continue;
+        if (!s_colon_bm[i] && s_colon_res[i])
+          s_colon_bm[i] = gbitmap_create_with_resource(s_colon_res[i]);
+        if (s_colon_bm[i]) { return s_colon_bm[i]; }
+      }
+    }
+  }
   return s_colon_bm[si];
 }
 
@@ -249,8 +254,6 @@ static void blit(GContext *ctx, GBitmap *bm, int x, int y) {
 
 // ============================================================
 // INFO LINES
-// Builds an array of strings from live data. Used by both
-// stacked layouts (side column) and WIDE_COMPS (above/below).
 // ============================================================
 static const char *s_day_names[]   = { "SUN","MON","TUE","WED","THU","FRI","SAT" };
 static const char *s_month_abbrs[] = {
@@ -292,25 +295,27 @@ static int build_info_lines(char lines[][32], int max_lines, struct tm *t) {
   return n;
 }
 
-// Draw up to max_lines centered lines using GOTHIC_18_BOLD (emery) or GOTHIC_14 (low-res)
-// starting from start_y, spaced by INFO_LINE_H.
-static void draw_info_block(GContext *ctx, int start_y, int width, int cx,
+// GOTHIC_18_BOLD on both platforms (looks better in stacked column too)
+static GFont prv_info_font(void) {
+  return fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
+}
+
+// Draw n lines from a lines array, centered horizontally in [x, x+width],
+// starting at start_y, spaced by INFO_LINE_H.
+static void draw_info_block(GContext *ctx,
+                            int x, int start_y, int width,
                             char lines[][32], int n) {
   if (n == 0) return;
-#if defined(PBL_PLATFORM_EMERY)
-  GFont font = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
-#else
-  GFont font = fonts_get_system_font(FONT_KEY_GOTHIC_14);
-#endif
+  GFont font = prv_info_font();
   graphics_context_set_text_color(ctx, s_fg);
   for (int i = 0; i < n; i++) {
-    GRect r = GRect(0, start_y + i * INFO_LINE_H, width, INFO_FONT_H + 4);
+    GRect r = GRect(x, start_y + i * INFO_LINE_H, width, INFO_FONT_H + 4);
     graphics_draw_text(ctx, lines[i], font, r,
                        GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
   }
 }
 
-// Draw info lines into a side column, vertically centered
+// Draw info lines into a side column, vertically centered within area.
 static void draw_info_column(GContext *ctx, GRect area, struct tm *t) {
   char lines[8][32];
   int max_fit = area.size.h / INFO_LINE_H;
@@ -318,7 +323,8 @@ static void draw_info_column(GContext *ctx, GRect area, struct tm *t) {
   if (n == 0) return;
   int total_h = n * INFO_LINE_H;
   int start_y = area.origin.y + (area.size.h - total_h) / 2;
-  draw_info_block(ctx, start_y, area.size.w + area.origin.x, area.size.w / 2, lines, n);
+  // x and width from area — keeps text inside the column, not full-screen
+  draw_info_block(ctx, area.origin.x, start_y, area.size.w, lines, n);
 }
 
 // ============================================================
@@ -348,62 +354,51 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     size   = s_size;
   }
 
-  bool draw_h_tens = s_leading_zero || (h_tens != 0) || s_demo_override;
-  // Suppress colon only during countdown demo, not during squish/blink
-  bool draw_colon  = s_show_colon && (s_phase != PHASE_COUNTDOWN) && !s_demo_override;
+  // Always draw leading zero; suppress colon only during countdown
+  bool draw_colon = (s_phase != PHASE_COUNTDOWN) && !s_demo_override;
 
   time_t now_t  = time(NULL);
   struct tm *tm = (s_phase == PHASE_DONE) ? localtime(&now_t) : NULL;
 
   if (s_layout == LAYOUT_WIDE) {
     int y = center_y - SCREEN_H / 2;
-    if (draw_h_tens) blit(ctx, get_bitmap(h_tens, size), SLOT_H_TENS, y);
+    blit(ctx, get_bitmap(h_tens, size), SLOT_H_TENS, y);
     blit(ctx, get_bitmap(h_ones, size), SLOT_H_ONES, y);
     if (draw_colon) blit(ctx, get_colon(size), COLON_SLOT_X, y);
     blit(ctx, get_bitmap(m_tens, size), SLOT_M_TENS, y);
     blit(ctx, get_bitmap(m_ones, size), SLOT_M_ONES, y);
 
   } else if (s_layout == LAYOUT_WIDE_COMPS) {
-    // Wide time at fixed size 2 (or current s_size during animations),
-    // with 3 info lines above and 3 below.
     int digit_h = digit_outer_h(size);
-    // Center the digit block vertically in unobstructed bounds
     int y = center_y - SCREEN_H / 2;
 
-    if (draw_h_tens) blit(ctx, get_bitmap(h_tens, size), SLOT_H_TENS, y);
+    blit(ctx, get_bitmap(h_tens, size), SLOT_H_TENS, y);
     blit(ctx, get_bitmap(h_ones, size), SLOT_H_ONES, y);
     if (draw_colon) blit(ctx, get_colon(size), COLON_SLOT_X, y);
     blit(ctx, get_bitmap(m_tens, size), SLOT_M_TENS, y);
     blit(ctx, get_bitmap(m_ones, size), SLOT_M_ONES, y);
 
-    // Draw info lines above and below when settled
     if (tm) {
       char lines[8][32];
       int n = build_info_lines(lines, 8, tm);
+      int above = (n < WIDE_COMP_LINES) ? n : WIDE_COMP_LINES;
+      int below = (n - above < WIDE_COMP_LINES) ? n - above : WIDE_COMP_LINES;
 
-      // Split: first half above, second half below (up to WIDE_COMP_LINES each)
-      int above = n > WIDE_COMP_LINES ? WIDE_COMP_LINES : n;
-      int below = (n > above) ? (n - above < WIDE_COMP_LINES ? n - above : WIDE_COMP_LINES) : 0;
+      int digit_top = center_y - digit_h / 2;
+      int digit_bot = center_y + digit_h / 2;
 
-      // Top of digit content in screen coords: center_y - digit_h/2
-      int digit_top_screen = center_y - digit_h / 2;
-      int digit_bot_screen = center_y + digit_h / 2;
-
-      // Lines above: block sits immediately above digit, growing upward
       if (above > 0) {
-        int block_h = above * INFO_LINE_H;
-        int start_y_above = digit_top_screen - block_h - 4;
-        draw_info_block(ctx, start_y_above, SCREEN_W, SCREEN_W / 2, lines, above);
+        int block_h   = above * INFO_LINE_H;
+        int start_above = digit_top - block_h - 4;
+        draw_info_block(ctx, 0, start_above, SCREEN_W, lines, above);
       }
-      // Lines below: block sits immediately below digit
       if (below > 0) {
-        int start_y_below = digit_bot_screen + 4;
-        draw_info_block(ctx, start_y_below, SCREEN_W, SCREEN_W / 2, lines + above, below);
+        draw_info_block(ctx, 0, digit_bot + 4, SCREEN_W, lines + above, below);
       }
     }
 
   } else {
-    // Stacked LEFT / RIGHT
+    // LAYOUT_LEFT / LAYOUT_RIGHT
     int sdh = stack_digit_h(s_stack_size);
     int h_y = (center_y - sdh / 2 - HALF_UNIT) - SCREEN_H / 2;
     int m_y = (center_y + sdh / 2 + HALF_UNIT) - SCREEN_H / 2;
@@ -421,7 +416,7 @@ static void draw_layer(Layer *layer, GContext *ctx) {
       info_w = tens_x - SIDE_MARGIN * 2;
     }
 
-    if (draw_h_tens) blit(ctx, get_bitmap(h_tens, s_stack_size), tens_x, h_y);
+    blit(ctx, get_bitmap(h_tens, s_stack_size), tens_x, h_y);
     blit(ctx, get_bitmap(h_ones, s_stack_size), ones_x, h_y);
     blit(ctx, get_bitmap(m_tens, s_stack_size), tens_x, m_y);
     blit(ctx, get_bitmap(m_ones, s_stack_size), ones_x, m_y);
@@ -481,13 +476,15 @@ static void timer_cb(void *data) {
       } else {
         s_size++;
         layer_mark_dirty(s_canvas_layer);
-        if (s_size >= s_target_size) {
-          s_size = s_target_size;
+        if (s_size >= WIDE_FULL_SIZE) {
+          s_size = WIDE_FULL_SIZE;
           s_anim_rep++;
           if (s_anim_rep < BLINK_REPS) {
-            s_size = 6; s_going_down = true;
+            s_going_down = true;
             schedule(ANIM_FAST_MS);
           } else {
+            // Boot complete: settle at full size, set target for future squish
+            s_target_size = WIDE_FULL_SIZE;
             s_phase = PHASE_DONE;
             layer_mark_dirty(s_canvas_layer);
           }
@@ -552,9 +549,11 @@ static void timer_cb(void *data) {
 static void unobstructed_change(AnimationProgress progress, void *ctx) {
   Layer *root = window_get_root_layer(s_window);
   GRect ub = layer_get_unobstructed_bounds(root);
-  s_target_size = pick_size(ub.size.h);
-  s_stack_size  = pick_stack_size(ub.size.h);
-  if (s_phase == PHASE_DONE) {
+  // Only update target_size for non-comps wide layouts
+  if (s_layout == LAYOUT_WIDE)
+    s_target_size = pick_size(ub.size.h);
+  s_stack_size = pick_stack_size(ub.size.h);
+  if (s_phase == PHASE_DONE && s_layout == LAYOUT_WIDE) {
     s_size = s_target_size;
     layer_mark_dirty(s_canvas_layer);
   }
@@ -563,25 +562,23 @@ static void unobstructed_change(AnimationProgress progress, void *ctx) {
 static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   if (s_phase != PHASE_DONE) return;
   s_layout = (s_layout + 1) % LAYOUT_COUNT;
-  // In LAYOUT_WIDE_COMPS use fixed size 2 for digits
   if (s_layout == LAYOUT_WIDE_COMPS) {
-    s_size = WIDE_COMP_SIZE;
     s_target_size = WIDE_COMP_SIZE;
+    s_size        = WIDE_COMP_SIZE;
   } else if (s_layout == LAYOUT_WIDE) {
-    // Returning to full wide: animate with shake cycle
-    s_size = WIDE_COMP_SIZE;  // start from current size
+    s_target_size = WIDE_FULL_SIZE;
     s_phase = PHASE_SHAKE_CYCLE;
     s_anim_step = 0; s_anim_rep = 0;
     s_size = SIZE_CYCLE[0];
     schedule(ANIM_FAST_MS);
   } else {
-    s_target_size = pick_size(s_size);  // stacked uses s_stack_size anyway
+    // LEFT / RIGHT: use stack size, target_size not relevant for wide anim
+    s_target_size = WIDE_FULL_SIZE;
   }
   layer_mark_dirty(s_canvas_layer);
 }
 
 static void tick_handler(struct tm *t, TimeUnits units) {
-  // Squish animation only fires on the two full-width wide layouts
   bool do_squish = (s_layout == LAYOUT_WIDE || s_layout == LAYOUT_WIDE_COMPS);
   if (s_phase == PHASE_DONE && do_squish) {
     s_pending_hour   = t->tm_hour;
@@ -668,7 +665,7 @@ static void window_load(Window *window) {
   layer_set_update_proc(s_canvas_layer, draw_layer);
   layer_add_child(root, s_canvas_layer);
   GRect ub = layer_get_unobstructed_bounds(root);
-  s_target_size = pick_size(ub.size.h);
+  s_target_size = WIDE_FULL_SIZE;
   s_stack_size  = pick_stack_size(ub.size.h);
   s_size = 6;
   UnobstructedAreaHandlers ua = { .change = unobstructed_change };
