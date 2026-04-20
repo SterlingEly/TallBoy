@@ -1,14 +1,14 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v1.2
+// TallBoy — main.c  v1.3
 //
-// Fixes from v1.1:
-//   - Leading zero + colon: always drawn (no toggle), colon fallback
-//     searches adjacent sizes so a missing resource never blanks it
-//   - Boot: s_target_size protected from underflow; blink always ends at 6
-//   - Left stack: info column rect corrected (was painting full-screen)
-//   - Info font: GOTHIC_18_BOLD on all platforms for stacked column too
+// Fixes from v1.2:
+//   - Colon now scales with s_size during all animations (squish, blink, shake)
+//   - WIDE_COMPS: dynamic line count = max(0, 6-size) lines total, split above/below
+//     with dynamic vertical recentering so odd counts don't look lopsided
+//   - Info lines: day on one line, abbreviated date (e.g. "APR 20") on next
+//   - Stacked column: abbreviated info strings to fit narrow column
 // ============================================================
 
 #define LAYOUT_WIDE        0
@@ -53,7 +53,9 @@ static int s_layout = LAYOUT_WIDE;
   #define INFO_LINE_H    20
 #endif
 
-#define WIDE_COMP_LINES 3
+// Max info lines for WIDE_COMPS by size: lines = max(0, 6 - size)
+// size 6→0, 5→1, 4→2, 3→3, 2→4, 1→5
+#define WIDE_COMP_MAX_LINES(sz) ((sz) < 6 ? (6 - (sz)) : 0)
 #define WIDE_COMP_SIZE  2
 
 static int s_stack_size = 2;
@@ -94,7 +96,7 @@ static const int SHRINK[] = { 5, 4, 3, 2, 1 };
 #define COUNTDOWN_MS  55
 #define BLINK_REPS    2
 #define ANIM_FAST_MS  80
-#define WIDE_FULL_SIZE 6  // size LAYOUT_WIDE settles at after animations
+#define WIDE_FULL_SIZE 6
 
 static const int SIZE_CYCLE[] = { 6, 5, 4, 3, 2, 1, 2, 3, 4, 5, 6 };
 #define SIZE_CYCLE_LEN 11
@@ -217,21 +219,17 @@ static GBitmap *get_bitmap(int digit, int size) {
   return s_bitmaps[digit][si];
 }
 
-// get_colon: tries requested size, then falls back to adjacent sizes so a
-// single missing resource never blanks the colon entirely.
 static GBitmap *get_colon(int size) {
   int si = size - 1;
   if (!s_colon_bm[si]) {
-    // Try requested size first
     if (s_colon_res[si])
       s_colon_bm[si] = gbitmap_create_with_resource(s_colon_res[si]);
-    // If still null, search for any loaded/loadable colon
     if (!s_colon_bm[si]) {
       for (int i = 0; i < 6; i++) {
         if (i == si) continue;
         if (!s_colon_bm[i] && s_colon_res[i])
           s_colon_bm[i] = gbitmap_create_with_resource(s_colon_res[i]);
-        if (s_colon_bm[i]) { return s_colon_bm[i]; }
+        if (s_colon_bm[i]) return s_colon_bm[i];
       }
     }
   }
@@ -254,17 +252,25 @@ static void blit(GContext *ctx, GBitmap *bm, int x, int y) {
 
 // ============================================================
 // INFO LINES
+// Two flavors: full (WIDE_COMPS, centered) and abbreviated (stacked column)
 // ============================================================
 static const char *s_day_names[]   = { "SUN","MON","TUE","WED","THU","FRI","SAT" };
+static const char *s_day_full[]    = { "SUNDAY","MONDAY","TUESDAY","WEDNESDAY",
+                                       "THURSDAY","FRIDAY","SATURDAY" };
 static const char *s_month_abbrs[] = {
   "JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"
 };
 
-static int build_info_lines(char lines[][32], int max_lines, struct tm *t) {
+// Full info lines for WIDE_COMPS: day and date on separate lines
+static int build_info_lines_full(char lines[][32], int max_lines, struct tm *t) {
   int n = 0;
+  // Day name (full) on one line
   if (n < max_lines && t)
-    snprintf(lines[n++], 32, "%s %s %d",
-             s_day_names[t->tm_wday], s_month_abbrs[t->tm_mon], t->tm_mday);
+    snprintf(lines[n++], 32, "%s", s_day_full[t->tm_wday]);
+  // Date on next line: "APR 20"
+  if (n < max_lines && t)
+    snprintf(lines[n++], 32, "%s %d", s_month_abbrs[t->tm_mon], t->tm_mday);
+  // Weather
   if (n < max_lines && s_weather_temp[0] && s_weather_desc[0])
     snprintf(lines[n++], 32, "%s %s", s_weather_temp, s_weather_desc);
   else if (n < max_lines && s_weather_temp[0])
@@ -289,19 +295,41 @@ static int build_info_lines(char lines[][32], int max_lines, struct tm *t) {
     snprintf(lines[n++], 32, "%d bpm", s_heart_rate);
 #endif
   if (n < max_lines)
-    snprintf(lines[n++], 32, "bat %d%%%s", s_battery_pct, s_charging ? " chg" : "");
+    snprintf(lines[n++], 32, "bat %d%%%s", s_battery_pct, s_charging ? "+" : "");
   if (n < max_lines && !s_bt_connected)
     snprintf(lines[n++], 32, "bt off");
   return n;
 }
 
-// GOTHIC_18_BOLD on both platforms (looks better in stacked column too)
+// Abbreviated info lines for stacked column (narrow width)
+static int build_info_lines_short(char lines[][32], int max_lines, struct tm *t) {
+  int n = 0;
+  if (n < max_lines && t)
+    snprintf(lines[n++], 32, "%s %s %d",
+             s_day_names[t->tm_wday], s_month_abbrs[t->tm_mon], t->tm_mday);
+  if (n < max_lines && s_weather_temp[0])
+    snprintf(lines[n++], 32, "%s", s_weather_temp);
+#if defined(PBL_HEALTH)
+  if (n < max_lines) {
+    if (s_steps >= 1000)
+      snprintf(lines[n++], 32, "%dk", s_steps / 1000);
+    else
+      snprintf(lines[n++], 32, "%d", s_steps);
+  }
+  if (n < max_lines && s_heart_rate > 0)
+    snprintf(lines[n++], 32, "%dbpm", s_heart_rate);
+#endif
+  if (n < max_lines)
+    snprintf(lines[n++], 32, "%d%%", s_battery_pct);
+  if (n < max_lines && !s_bt_connected)
+    snprintf(lines[n++], 32, "BT!");
+  return n;
+}
+
 static GFont prv_info_font(void) {
   return fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
 }
 
-// Draw n lines from a lines array, centered horizontally in [x, x+width],
-// starting at start_y, spaced by INFO_LINE_H.
 static void draw_info_block(GContext *ctx,
                             int x, int start_y, int width,
                             char lines[][32], int n) {
@@ -315,15 +343,13 @@ static void draw_info_block(GContext *ctx,
   }
 }
 
-// Draw info lines into a side column, vertically centered within area.
 static void draw_info_column(GContext *ctx, GRect area, struct tm *t) {
   char lines[8][32];
   int max_fit = area.size.h / INFO_LINE_H;
-  int n = build_info_lines(lines, max_fit < 8 ? max_fit : 8, t);
+  int n = build_info_lines_short(lines, max_fit < 8 ? max_fit : 8, t);
   if (n == 0) return;
   int total_h = n * INFO_LINE_H;
   int start_y = area.origin.y + (area.size.h - total_h) / 2;
-  // x and width from area — keeps text inside the column, not full-screen
   draw_info_block(ctx, area.origin.x, start_y, area.size.w, lines, n);
 }
 
@@ -354,7 +380,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     size   = s_size;
   }
 
-  // Always draw leading zero; suppress colon only during countdown
   bool draw_colon = (s_phase != PHASE_COUNTDOWN) && !s_demo_override;
 
   time_t now_t  = time(NULL);
@@ -379,26 +404,46 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     blit(ctx, get_bitmap(m_ones, size), SLOT_M_ONES, y);
 
     if (tm) {
-      char lines[8][32];
-      int n = build_info_lines(lines, 8, tm);
-      int above = (n < WIDE_COMP_LINES) ? n : WIDE_COMP_LINES;
-      int below = (n - above < WIDE_COMP_LINES) ? n - above : WIDE_COMP_LINES;
+      int max_total = WIDE_COMP_MAX_LINES(size);
+      if (max_total > 0) {
+        char lines[8][32];
+        int n = build_info_lines_full(lines, max_total < 8 ? max_total : 8, tm);
+        if (n > 0) {
+          // Split evenly; extra line goes above
+          int above = (n + 1) / 2;
+          int below = n - above;
 
-      int digit_top = center_y - digit_h / 2;
-      int digit_bot = center_y + digit_h / 2;
+          int digit_top = center_y - digit_h / 2;
+          int digit_bot = center_y + digit_h / 2;
 
-      if (above > 0) {
-        int block_h   = above * INFO_LINE_H;
-        int start_above = digit_top - block_h - 4;
-        draw_info_block(ctx, 0, start_above, SCREEN_W, lines, above);
-      }
-      if (below > 0) {
-        draw_info_block(ctx, 0, digit_bot + 4, SCREEN_W, lines + above, below);
+          // Recenter the whole composition (digits + both blocks) vertically
+          int total_content_h = digit_h + (above > 0 ? above * INFO_LINE_H + 4 : 0)
+                                        + (below > 0 ? below * INFO_LINE_H + 4 : 0);
+          int comp_top = center_y - total_content_h / 2;
+
+          int above_start = comp_top;
+          int digit_y_offset = above > 0 ? above * INFO_LINE_H + 4 : 0;
+          int below_start = comp_top + digit_y_offset + digit_h + 4;
+
+          // Redraw digits at recentered position
+          int new_y = comp_top + digit_y_offset - SCREEN_H / 2;
+          graphics_context_set_fill_color(ctx, s_bg);
+          // Clear and redraw at new y
+          blit(ctx, get_bitmap(h_tens, size), SLOT_H_TENS, new_y);
+          blit(ctx, get_bitmap(h_ones, size), SLOT_H_ONES, new_y);
+          if (draw_colon) blit(ctx, get_colon(size), COLON_SLOT_X, new_y);
+          blit(ctx, get_bitmap(m_tens, size), SLOT_M_TENS, new_y);
+          blit(ctx, get_bitmap(m_ones, size), SLOT_M_ONES, new_y);
+
+          if (above > 0)
+            draw_info_block(ctx, 0, above_start, SCREEN_W, lines, above);
+          if (below > 0)
+            draw_info_block(ctx, 0, below_start, SCREEN_W, lines + above, below);
+        }
       }
     }
 
   } else {
-    // LAYOUT_LEFT / LAYOUT_RIGHT
     int sdh = stack_digit_h(s_stack_size);
     int h_y = (center_y - sdh / 2 - HALF_UNIT) - SCREEN_H / 2;
     int m_y = (center_y + sdh / 2 + HALF_UNIT) - SCREEN_H / 2;
@@ -483,7 +528,6 @@ static void timer_cb(void *data) {
             s_going_down = true;
             schedule(ANIM_FAST_MS);
           } else {
-            // Boot complete: settle at full size, set target for future squish
             s_target_size = WIDE_FULL_SIZE;
             s_phase = PHASE_DONE;
             layer_mark_dirty(s_canvas_layer);
@@ -549,7 +593,6 @@ static void timer_cb(void *data) {
 static void unobstructed_change(AnimationProgress progress, void *ctx) {
   Layer *root = window_get_root_layer(s_window);
   GRect ub = layer_get_unobstructed_bounds(root);
-  // Only update target_size for non-comps wide layouts
   if (s_layout == LAYOUT_WIDE)
     s_target_size = pick_size(ub.size.h);
   s_stack_size = pick_stack_size(ub.size.h);
@@ -572,7 +615,6 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
     s_size = SIZE_CYCLE[0];
     schedule(ANIM_FAST_MS);
   } else {
-    // LEFT / RIGHT: use stack size, target_size not relevant for wide anim
     s_target_size = WIDE_FULL_SIZE;
   }
   layer_mark_dirty(s_canvas_layer);
