@@ -1,0 +1,11 @@
+    case 1: {
+      // Full 4u base at bottom, centered vertical stem, 45deg top-left diagonal
+      HBAR(bot_y - sw);
+      int stem_x = gx + (GLYPH_W / 2) - (sw / 2);
+      VBAR(stem_x, top_y + sw, bot_y - sw);
+      // Top-left diagonal: 45deg from top of stem going up-left, clipped at gx
+      for (int i = 0; i < stem_x - gx; i++) {
+        graphics_fill_rect(ctx, GRect(stem_x - i - 1, top_y + sw + i, sw, sw), 0, GCornerNone);
+      }
+      break;
+    }
