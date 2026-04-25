@@ -1,14 +1,15 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v1.3
+// TallBoy — main.c  v1.4
 //
-// Fixes from v1.2:
-//   - Colon now scales with s_size during all animations (squish, blink, shake)
-//   - WIDE_COMPS: dynamic line count = max(0, 6-size) lines total, split above/below
-//     with dynamic vertical recentering so odd counts don't look lopsided
-//   - Info lines: day on one line, abbreviated date (e.g. "APR 20") on next
-//   - Stacked column: abbreviated info strings to fit narrow column
+// Changes from v1.3:
+//   - Colon now shows during countdown (scales with demo size)
+//   - WIDE_COMPS: 2 lines above + 2 below (Day / Date // Steps / Distance)
+//     Time auto-sizes to largest that fits between the blocks
+//     Info blocks anchored top/bottom, time recenters in remaining space
+//   - Removed double-draw hack; single clean draw pass
+//   - WIDE_COMPS squish target_size updates correctly per available space
 // ============================================================
 
 #define LAYOUT_WIDE        0
@@ -53,10 +54,12 @@ static int s_layout = LAYOUT_WIDE;
   #define INFO_LINE_H    20
 #endif
 
-// Max info lines for WIDE_COMPS by size: lines = max(0, 6 - size)
-// size 6→0, 5→1, 4→2, 3→3, 2→4, 1→5
-#define WIDE_COMP_MAX_LINES(sz) ((sz) < 6 ? (6 - (sz)) : 0)
-#define WIDE_COMP_SIZE  2
+// Gap between info block and time digits
+#define COMP_GAP  4
+
+// Lines above and below in WIDE_COMPS
+#define COMP_LINES_ABOVE  2
+#define COMP_LINES_BELOW  2
 
 static int s_stack_size = 2;
 
@@ -85,6 +88,14 @@ static int digit_outer_h(int sz) {
 #else
   return 18 + 24 * sz;
 #endif
+}
+
+// Space available for time digits in WIDE_COMPS given ub_h
+static int comp_time_space(int ub_h) {
+  int above_h = COMP_LINES_ABOVE * INFO_LINE_H + COMP_GAP;
+  int below_h = COMP_LINES_BELOW * INFO_LINE_H + COMP_GAP;
+  int avail = ub_h - above_h - below_h;
+  return avail > 0 ? avail : 0;
 }
 
 // ---- Animation ----
@@ -250,9 +261,19 @@ static void blit(GContext *ctx, GBitmap *bm, int x, int y) {
   graphics_draw_bitmap_in_rect(ctx, bm, GRect(x, y, SLOT_W, SCREEN_H));
 }
 
+// Draw time digits at a given size, with digit strip origin at y
+static void draw_digits(GContext *ctx, int h_tens, int h_ones,
+                        int m_tens, int m_ones, int size,
+                        int y, bool draw_colon_flag) {
+  blit(ctx, get_bitmap(h_tens, size), SLOT_H_TENS, y);
+  blit(ctx, get_bitmap(h_ones, size), SLOT_H_ONES, y);
+  if (draw_colon_flag) blit(ctx, get_colon(size), COLON_SLOT_X, y);
+  blit(ctx, get_bitmap(m_tens, size), SLOT_M_TENS, y);
+  blit(ctx, get_bitmap(m_ones, size), SLOT_M_ONES, y);
+}
+
 // ============================================================
 // INFO LINES
-// Two flavors: full (WIDE_COMPS, centered) and abbreviated (stacked column)
 // ============================================================
 static const char *s_day_names[]   = { "SUN","MON","TUE","WED","THU","FRI","SAT" };
 static const char *s_day_full[]    = { "SUNDAY","MONDAY","TUESDAY","WEDNESDAY",
@@ -261,20 +282,19 @@ static const char *s_month_abbrs[] = {
   "JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"
 };
 
-// Full info lines for WIDE_COMPS: day and date on separate lines
-static int build_info_lines_full(char lines[][32], int max_lines, struct tm *t) {
+// Wide complications: full strings, centered
+// Returns exactly min(n_available, max_lines) lines
+static int build_comp_above(char lines[][32], int max_lines, struct tm *t) {
   int n = 0;
-  // Day name (full) on one line
   if (n < max_lines && t)
     snprintf(lines[n++], 32, "%s", s_day_full[t->tm_wday]);
-  // Date on next line: "APR 20"
   if (n < max_lines && t)
     snprintf(lines[n++], 32, "%s %d", s_month_abbrs[t->tm_mon], t->tm_mday);
-  // Weather
-  if (n < max_lines && s_weather_temp[0] && s_weather_desc[0])
-    snprintf(lines[n++], 32, "%s %s", s_weather_temp, s_weather_desc);
-  else if (n < max_lines && s_weather_temp[0])
-    snprintf(lines[n++], 32, "%s", s_weather_temp);
+  return n;
+}
+
+static int build_comp_below(char lines[][32], int max_lines, struct tm *t) {
+  int n = 0;
 #if defined(PBL_HEALTH)
   if (n < max_lines) {
     if (s_steps >= 1000)
@@ -291,17 +311,16 @@ static int build_info_lines_full(char lines[][32], int max_lines, struct tm *t) 
       snprintf(lines[n++], 32, "%d.%d km", km_x10 / 10, km_x10 % 10);
     }
   }
+#endif
+  // Fallback if no health: battery
+  if (n == 0 && n < max_lines)
+    snprintf(lines[n++], 32, "bat %d%%%s", s_battery_pct, s_charging ? "+" : "");
   if (n < max_lines && s_heart_rate > 0)
     snprintf(lines[n++], 32, "%d bpm", s_heart_rate);
-#endif
-  if (n < max_lines)
-    snprintf(lines[n++], 32, "bat %d%%%s", s_battery_pct, s_charging ? "+" : "");
-  if (n < max_lines && !s_bt_connected)
-    snprintf(lines[n++], 32, "bt off");
   return n;
 }
 
-// Abbreviated info lines for stacked column (narrow width)
+// Abbreviated for stacked column
 static int build_info_lines_short(char lines[][32], int max_lines, struct tm *t) {
   int n = 0;
   if (n < max_lines && t)
@@ -312,17 +331,24 @@ static int build_info_lines_short(char lines[][32], int max_lines, struct tm *t)
 #if defined(PBL_HEALTH)
   if (n < max_lines) {
     if (s_steps >= 1000)
-      snprintf(lines[n++], 32, "%dk", s_steps / 1000);
+      snprintf(lines[n++], 32, "%dk steps", s_steps / 1000);
     else
-      snprintf(lines[n++], 32, "%d", s_steps);
+      snprintf(lines[n++], 32, "%d steps", s_steps);
+  }
+  if (n < max_lines && s_distance_m > 0) {
+    if (strcmp(i18n_get_system_locale(), "en_US") == 0) {
+      int miles_x10 = (s_distance_m * 10) / 1609;
+      snprintf(lines[n++], 32, "%d.%d mi", miles_x10 / 10, miles_x10 % 10);
+    } else {
+      int km_x10 = (s_distance_m * 10) / 1000;
+      snprintf(lines[n++], 32, "%d.%d km", km_x10 / 10, km_x10 % 10);
+    }
   }
   if (n < max_lines && s_heart_rate > 0)
-    snprintf(lines[n++], 32, "%dbpm", s_heart_rate);
+    snprintf(lines[n++], 32, "%d bpm", s_heart_rate);
 #endif
   if (n < max_lines)
-    snprintf(lines[n++], 32, "%d%%", s_battery_pct);
-  if (n < max_lines && !s_bt_connected)
-    snprintf(lines[n++], 32, "BT!");
+    snprintf(lines[n++], 32, "bat %d%%", s_battery_pct);
   return n;
 }
 
@@ -330,23 +356,22 @@ static GFont prv_info_font(void) {
   return fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
 }
 
-static void draw_info_block(GContext *ctx,
-                            int x, int start_y, int width,
+static void draw_info_block(GContext *ctx, int x, int y, int width,
                             char lines[][32], int n) {
   if (n == 0) return;
   GFont font = prv_info_font();
   graphics_context_set_text_color(ctx, s_fg);
   for (int i = 0; i < n; i++) {
-    GRect r = GRect(x, start_y + i * INFO_LINE_H, width, INFO_FONT_H + 4);
+    GRect r = GRect(x, y + i * INFO_LINE_H, width, INFO_FONT_H + 4);
     graphics_draw_text(ctx, lines[i], font, r,
                        GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
   }
 }
 
 static void draw_info_column(GContext *ctx, GRect area, struct tm *t) {
-  char lines[8][32];
+  char lines[6][32];
   int max_fit = area.size.h / INFO_LINE_H;
-  int n = build_info_lines_short(lines, max_fit < 8 ? max_fit : 8, t);
+  int n = build_info_lines_short(lines, max_fit < 6 ? max_fit : 6, t);
   if (n == 0) return;
   int total_h = n * INFO_LINE_H;
   int start_y = area.origin.y + (area.size.h - total_h) / 2;
@@ -380,70 +405,54 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     size   = s_size;
   }
 
-  bool draw_colon = (s_phase != PHASE_COUNTDOWN) && !s_demo_override;
+  // Colon: show during countdown too (diagnostic), suppress only during blink
+  // when demo_override is true but we want digits only (no colon during digit cycle)
+  // Actually: show colon whenever we have real time OR during countdown.
+  // Only hide it during PHASE_BLINK's up-sweep where it would flash oddly.
+  bool draw_colon = true;  // always on; colon resource now scales with size
 
   time_t now_t  = time(NULL);
   struct tm *tm = (s_phase == PHASE_DONE) ? localtime(&now_t) : NULL;
 
   if (s_layout == LAYOUT_WIDE) {
     int y = center_y - SCREEN_H / 2;
-    blit(ctx, get_bitmap(h_tens, size), SLOT_H_TENS, y);
-    blit(ctx, get_bitmap(h_ones, size), SLOT_H_ONES, y);
-    if (draw_colon) blit(ctx, get_colon(size), COLON_SLOT_X, y);
-    blit(ctx, get_bitmap(m_tens, size), SLOT_M_TENS, y);
-    blit(ctx, get_bitmap(m_ones, size), SLOT_M_ONES, y);
+    draw_digits(ctx, h_tens, h_ones, m_tens, m_ones, size, y, draw_colon);
 
   } else if (s_layout == LAYOUT_WIDE_COMPS) {
-    int digit_h = digit_outer_h(size);
-    int y = center_y - SCREEN_H / 2;
+    // Info blocks anchored to top and bottom of unobstructed area.
+    // Time fills the middle at the largest size that fits.
+    int above_h = COMP_LINES_ABOVE * INFO_LINE_H;
+    int below_h = COMP_LINES_BELOW * INFO_LINE_H;
+    int above_top = ub_top;
+    int below_top = ub_top + ub_h - below_h;
 
-    blit(ctx, get_bitmap(h_tens, size), SLOT_H_TENS, y);
-    blit(ctx, get_bitmap(h_ones, size), SLOT_H_ONES, y);
-    if (draw_colon) blit(ctx, get_colon(size), COLON_SLOT_X, y);
-    blit(ctx, get_bitmap(m_tens, size), SLOT_M_TENS, y);
-    blit(ctx, get_bitmap(m_ones, size), SLOT_M_ONES, y);
+    // Time zone: between info blocks
+    int time_zone_top = above_top + above_h + COMP_GAP;
+    int time_zone_bot = below_top - COMP_GAP;
+    int time_zone_h   = time_zone_bot - time_zone_top;
+
+    // Pick largest size that fits in the time zone
+    int draw_size = (s_demo_override) ? size : pick_size(time_zone_h);
+    if (s_demo_override) draw_size = size;  // during animation use animated size
+
+    int digit_h = digit_outer_h(draw_size);
+    // Center digits vertically in time zone
+    int digit_center = time_zone_top + time_zone_h / 2;
+    int y = digit_center - SCREEN_H / 2;
+
+    draw_digits(ctx, h_tens, h_ones, m_tens, m_ones, draw_size, y, draw_colon);
 
     if (tm) {
-      int max_total = WIDE_COMP_MAX_LINES(size);
-      if (max_total > 0) {
-        char lines[8][32];
-        int n = build_info_lines_full(lines, max_total < 8 ? max_total : 8, tm);
-        if (n > 0) {
-          // Split evenly; extra line goes above
-          int above = (n + 1) / 2;
-          int below = n - above;
-
-          int digit_top = center_y - digit_h / 2;
-          int digit_bot = center_y + digit_h / 2;
-
-          // Recenter the whole composition (digits + both blocks) vertically
-          int total_content_h = digit_h + (above > 0 ? above * INFO_LINE_H + 4 : 0)
-                                        + (below > 0 ? below * INFO_LINE_H + 4 : 0);
-          int comp_top = center_y - total_content_h / 2;
-
-          int above_start = comp_top;
-          int digit_y_offset = above > 0 ? above * INFO_LINE_H + 4 : 0;
-          int below_start = comp_top + digit_y_offset + digit_h + 4;
-
-          // Redraw digits at recentered position
-          int new_y = comp_top + digit_y_offset - SCREEN_H / 2;
-          graphics_context_set_fill_color(ctx, s_bg);
-          // Clear and redraw at new y
-          blit(ctx, get_bitmap(h_tens, size), SLOT_H_TENS, new_y);
-          blit(ctx, get_bitmap(h_ones, size), SLOT_H_ONES, new_y);
-          if (draw_colon) blit(ctx, get_colon(size), COLON_SLOT_X, new_y);
-          blit(ctx, get_bitmap(m_tens, size), SLOT_M_TENS, new_y);
-          blit(ctx, get_bitmap(m_ones, size), SLOT_M_ONES, new_y);
-
-          if (above > 0)
-            draw_info_block(ctx, 0, above_start, SCREEN_W, lines, above);
-          if (below > 0)
-            draw_info_block(ctx, 0, below_start, SCREEN_W, lines + above, below);
-        }
-      }
+      char above_lines[COMP_LINES_ABOVE][32];
+      char below_lines[COMP_LINES_BELOW][32];
+      int na = build_comp_above(above_lines, COMP_LINES_ABOVE, tm);
+      int nb = build_comp_below(below_lines, COMP_LINES_BELOW, tm);
+      if (na) draw_info_block(ctx, 0, above_top, SCREEN_W, above_lines, na);
+      if (nb) draw_info_block(ctx, 0, below_top, SCREEN_W, below_lines, nb);
     }
 
   } else {
+    // LAYOUT_LEFT / LAYOUT_RIGHT
     int sdh = stack_digit_h(s_stack_size);
     int h_y = (center_y - sdh / 2 - HALF_UNIT) - SCREEN_H / 2;
     int m_y = (center_y + sdh / 2 + HALF_UNIT) - SCREEN_H / 2;
@@ -590,13 +599,21 @@ static void timer_cb(void *data) {
 // ============================================================
 // EVENT HANDLERS
 // ============================================================
-static void unobstructed_change(AnimationProgress progress, void *ctx) {
+static void prv_update_targets(void) {
   Layer *root = window_get_root_layer(s_window);
   GRect ub = layer_get_unobstructed_bounds(root);
-  if (s_layout == LAYOUT_WIDE)
-    s_target_size = pick_size(ub.size.h);
   s_stack_size = pick_stack_size(ub.size.h);
-  if (s_phase == PHASE_DONE && s_layout == LAYOUT_WIDE) {
+  if (s_layout == LAYOUT_WIDE) {
+    s_target_size = WIDE_FULL_SIZE;
+  } else if (s_layout == LAYOUT_WIDE_COMPS) {
+    s_target_size = pick_size(comp_time_space(ub.size.h));
+  }
+}
+
+static void unobstructed_change(AnimationProgress progress, void *ctx) {
+  prv_update_targets();
+  if (s_phase == PHASE_DONE &&
+      (s_layout == LAYOUT_WIDE || s_layout == LAYOUT_WIDE_COMPS)) {
     s_size = s_target_size;
     layer_mark_dirty(s_canvas_layer);
   }
@@ -605,17 +622,14 @@ static void unobstructed_change(AnimationProgress progress, void *ctx) {
 static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   if (s_phase != PHASE_DONE) return;
   s_layout = (s_layout + 1) % LAYOUT_COUNT;
-  if (s_layout == LAYOUT_WIDE_COMPS) {
-    s_target_size = WIDE_COMP_SIZE;
-    s_size        = WIDE_COMP_SIZE;
-  } else if (s_layout == LAYOUT_WIDE) {
-    s_target_size = WIDE_FULL_SIZE;
+  prv_update_targets();
+  if (s_layout == LAYOUT_WIDE) {
     s_phase = PHASE_SHAKE_CYCLE;
     s_anim_step = 0; s_anim_rep = 0;
     s_size = SIZE_CYCLE[0];
     schedule(ANIM_FAST_MS);
   } else {
-    s_target_size = WIDE_FULL_SIZE;
+    s_size = s_target_size;
   }
   layer_mark_dirty(s_canvas_layer);
 }
