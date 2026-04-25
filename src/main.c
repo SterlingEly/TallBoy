@@ -1,16 +1,16 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v1.6
+// TallBoy — main.c  v1.7
 //
-// Vector digit geometry corrected:
-//   - Pebble fill_radial angles: 0=North, clockwise
-//   - All arc ranges verified against pixel analysis
-//   - Digit 1: centered stem, base, 45deg top-left diagonal
-//   - Digit 2: right-semi top cap, diagonal stroke, left base + cap
-//   - Digit 3: right-semi top + bottom caps, right stroke only
-//   - Digit 6: left-semi top cap, left stroke, full bottom ring
-//   - Digit 9: full top ring, right stroke, lower-right bottom cap
+// Vector digits corrected via screenshot analysis:
+//   1: 2u base (not 4u), stem centered, 45deg diagonal cap
+//   2: full-body diagonal, no middle bar, bottom base only
+//   3: right-semi top + bottom + right stroke (correct, no middle bar)
+//   5: no middle bar; left stroke flows to bottom-left arc, then full bottom ring
+//   6: no middle bar; left stroke full height with left-semi top cap, full bottom ring
+//   8: only digit with true middle horizontal bar
+//   9: no middle bar; full top ring, right stroke, lower-right bottom cap
 // ============================================================
 
 #define LAYOUT_WIDE        0
@@ -207,14 +207,25 @@ static void draw_digits(GContext *ctx, int h_tens, int h_ones, int m_tens, int m
 // VECTOR DIGIT DRAWING
 //
 // Pebble fill_radial: 0=North(up), clockwise.
-//   Top semi    270->90   (W→N→E)
-//   Bottom semi  90->270  (E→S→W)
-//   Right semi    0->180  (N→E→S)
-//   Left semi   180->360  (S→W→N)
+//   Top semi    270->90   (W→N→E)   — north/upper half
+//   Bottom semi  90->270  (E→S→W)   — south/lower half
+//   Right semi    0->180  (N→E→S)   — east/right half
+//   Left semi   180->360  (S→W→N)   — west/left half
 //   Upper-right   0->90
 //   Lower-right  90->180
 //   Lower-left  180->270
 //   Upper-left  270->360
+//
+// Key geometry:
+//   h = (3 + 4*size) * UNIT      total digit height
+//   ro = 2u = UNIT*2             outer cap radius
+//   ri = 1u = UNIT*1             inner cap radius (stroke = 1u)
+//   body_h = h - 4u              straight section between cap centers
+//   top_cy = cy - body_h/2       top cap center y
+//   bot_cy = cy + body_h/2       bottom cap center y
+//   cap_cx = gx + ro             cap horizontal center
+//   gx = slot_x + HALF_SLOT_PAD  glyph left edge (after half-unit padding)
+//   gx_r = gx + GLYPH_W - sw    right stroke left edge
 // ============================================================
 
 static void fill_arc(GContext *ctx, int cx, int cy, int ro, int ri, int a0, int a1) {
@@ -239,15 +250,16 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
   int bot_cy = cy + body_h / 2;
   int top_y  = cy - h / 2;
   int bot_y  = cy + h / 2;
-  int mid_y  = cy;
 
+// vertical bar from y0 to y1 at x (exclusive end)
 #define VBAR(x,y0,y1) if((y1)>(y0)) graphics_fill_rect(ctx,GRect((x),(y0),sw,(y1)-(y0)),0,GCornerNone)
-#define HBAR(y)       graphics_fill_rect(ctx,GRect(gx,(y),GLYPH_W,sw),0,GCornerNone)
-#define HBAR_W(x,y,w) graphics_fill_rect(ctx,GRect((x),(y),(w),sw),0,GCornerNone)
+// full-width horizontal bar at y
+#define HBAR(y) graphics_fill_rect(ctx,GRect(gx,(y),GLYPH_W,sw),0,GCornerNone)
 
   switch (digit) {
 
     case 0:
+      // Rounded rectangle ring
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 90);   // top semi
       fill_arc(ctx, cap_cx, bot_cy, ro, ri, 90, 270);   // bottom semi
       VBAR(gx,   top_cy, bot_cy);
@@ -255,13 +267,19 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 1: {
-      // Base: 4u wide × 1u at bottom
-      HBAR(bot_y - sw);
-      // Stem: centered, 1u wide
+      // Centered vertical stem
+      // ~2u base centered under stem (1u either side of stem center)
       int stem_x = gx + (GLYPH_W / 2) - (sw / 2);
+      int base_x = stem_x - sw;   // base is 2u wide: 1u left + stem + 1u right... actually
+      // base: stem_x-UNIT to stem_x+UNIT+sw = 2u+sw wide, centered
+      int base_left = stem_x - UNIT;
+      int base_w    = UNIT * 2 + sw;
+      if (base_left < gx) base_left = gx;
+      if (base_left + base_w > gx + GLYPH_W) base_w = gx + GLYPH_W - base_left;
+      graphics_fill_rect(ctx, GRect(base_left, bot_y - sw, base_w, sw), 0, GCornerNone);
+      // Stem
       VBAR(stem_x, top_y + sw, bot_y - sw);
-      // Top-left diagonal: from (stem_x, top_y+sw) going up-left at 45deg, clipped at gx
-      // Each step: x--, y-- (but y increases going down, so y-- is up the screen)
+      // Top-left diagonal: 45deg from top of stem going up-left, clipped at gx
       for (int i = 0; i < stem_x - gx; i++) {
         graphics_fill_rect(ctx, GRect(stem_x - i - 1, top_y + sw + i, sw, sw), 0, GCornerNone);
       }
@@ -269,79 +287,91 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
     }
 
     case 2:
-      // Top: right semi cap (0->180, N→E→S)
+      // Top: right semi cap (opens left, faces right: N→E→S = 0->180)
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 0, 180);
-      // Right stroke: top_cy to mid
-      VBAR(gx_r, top_cy, mid_y);
-      // Middle bar
-      HBAR(mid_y);
-      // Diagonal: (gx_r, mid_y+sw) → (gx, bot_cy), 1u wide steps
+      // Right stroke: top_cy down to top_cy (just connects cap to diagonal start)
+      // The right side of the cap already ends at top_cy, so start diagonal from there
+      // Diagonal: sweeps from (gx_r, top_cy) to (gx, bot_cy), 1u-wide stepped line
       {
-        int dh = bot_cy - (mid_y + sw);
+        int dh = bot_cy - top_cy;
         int dw = GLYPH_W - sw;
-        for (int i = 0; i < dh; i++) {
-          int bx = gx_r - (dw > 0 ? (i * dw / dh) : 0);
-          graphics_fill_rect(ctx, GRect(bx, mid_y + sw + i, sw, sw), 0, GCornerNone);
+        if (dh > 0) {
+          for (int i = 0; i < dh; i++) {
+            int bx = gx_r - (i * dw / dh);
+            graphics_fill_rect(ctx, GRect(bx, top_cy + i, sw, sw), 0, GCornerNone);
+          }
         }
       }
-      // Left stroke: bot_cy - ro → bot_cy (lower part of left side)
-      VBAR(gx, bot_cy - ro + ri, bot_cy);
-      // Bottom left cap: lower-left quarter (180->270, S→W)
-      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 180, 270);
-      // Bottom bar: full width
+      // Bottom: left stroke from bot_cy-ri up to connect, then lower-left arc, then base bar
+      VBAR(gx, bot_cy - ri, bot_cy);
+      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 180, 270);   // lower-left quarter
       HBAR(bot_y - sw);
       break;
 
     case 3:
-      // Right semi top (0->180) + right stroke + right semi bottom (0->180)
-      fill_arc(ctx, cap_cx, top_cy, ro, ri, 0, 180);
-      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 0, 180);
-      VBAR(gx_r, top_cy, bot_cy);
+      // Two right-side bumps: right-semi top cap + right stroke + right-semi bottom cap
+      // The middle naturally concaves inward where the two arcs meet
+      fill_arc(ctx, cap_cx, top_cy, ro, ri, 0, 180);    // right semi top
+      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 0, 180);    // right semi bottom
+      VBAR(gx_r, top_cy, bot_cy);                        // right stroke connecting caps
       break;
 
     case 4:
-      VBAR(gx,   top_y, mid_y + sw);
+      // Left stroke top half, right stroke full, horizontal bar at mid
+      VBAR(gx,   top_y, cy + sw);
       VBAR(gx_r, top_y, bot_y);
-      HBAR(mid_y);
+      graphics_fill_rect(ctx, GRect(gx, cy, GLYPH_W, sw), 0, GCornerNone);
       break;
 
     case 5:
+      // Top bar, left stroke top half, then curves to bottom-left arc → full bottom ring
       HBAR(top_y);
-      VBAR(gx, top_y + sw, mid_y + sw);
-      HBAR(mid_y);
-      VBAR(gx_r, mid_y + sw, bot_cy);
-      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 270, 90);   // top semi of bottom cap (closes left)
-      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 90, 270);   // bottom semi = full bottom ring
+      VBAR(gx, top_y + sw, top_cy + ro);  // left stroke: top bar to top of bottom loop
+      // The bottom loop center is at bot_cy, but for 5 the loop starts at midpoint
+      // Left stroke connects to the left side of the bottom ring at its top
+      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 270, 90);   // top semi of bottom ring (W→N→E)
+      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 90, 270);   // bottom semi of bottom ring
+      // Right stroke: from bot_cy - ro (top of ring) down to bot_cy
+      VBAR(gx_r, bot_cy - ro, bot_cy);
       break;
 
     case 6:
+      // Left stroke full height with left-semi cap at top (opening to the right)
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 180, 360);  // left semi top cap (S→W→N)
-      VBAR(gx, top_cy, bot_cy);
-      HBAR(mid_y);
-      VBAR(gx_r, mid_y + sw, bot_cy);
-      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 270, 90);   // top semi (closes top of bottom ring)
-      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 90, 270);   // bottom semi = full bottom ring
+      VBAR(gx, top_cy, bot_cy);                          // left stroke
+      // Full bottom ring
+      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 270, 90);   // top semi of bottom ring
+      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 90, 270);   // bottom semi
+      // Right stroke: connects mid of body to top of bottom ring
+      VBAR(gx_r, cy, bot_cy);
       break;
 
     case 7:
+      // Top bar + right stroke
       HBAR(top_y);
       VBAR(gx_r, top_y + sw, bot_y);
       break;
 
     case 8:
+      // 0 shape + horizontal middle bar (only digit with explicit middle bar)
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 90);
       fill_arc(ctx, cap_cx, bot_cy, ro, ri, 90, 270);
       VBAR(gx,   top_cy, bot_cy);
       VBAR(gx_r, top_cy, bot_cy);
-      HBAR(mid_y);
+      graphics_fill_rect(ctx, GRect(gx, cy, GLYPH_W, sw), 0, GCornerNone);
       break;
 
     case 9:
-      fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 90);   // full top ring
-      VBAR(gx,   top_cy, mid_y);                         // left stroke top half only
-      VBAR(gx_r, top_cy, bot_cy);                        // right stroke full
-      HBAR(mid_y);
-      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 90, 180);   // lower-right quarter (E→S)
+      // Mirror of 6: right stroke full height with full top ring, lower-right cap
+      // Full top ring
+      fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 90);   // top semi
+      fill_arc(ctx, cap_cx, top_cy, ro, ri, 90, 270);   // bottom semi = full top ring
+      // Right stroke full height
+      VBAR(gx_r, top_cy, bot_cy);
+      // Left stroke: top ring connects, left stroke from top_cy down to cy
+      VBAR(gx, top_cy, cy);
+      // Lower-right cap: just right-side, opening left (N→E→S = right semi? or just lower-right)
+      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 0, 180);    // right semi bottom cap
       break;
 
     default: break;
@@ -349,14 +379,13 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
 
 #undef VBAR
 #undef HBAR
-#undef HBAR_W
 }
 
 static void draw_colon_vec(GContext *ctx, int slot_x, int cy, int size) {
   graphics_context_set_fill_color(ctx, s_fg);
   int h   = digit_outer_h(size);
   int dot = UNIT;
-  int dx  = slot_x + UNIT * 2;            // centered in 5u slot
+  int dx  = slot_x + UNIT * 2;
   graphics_fill_rect(ctx, GRect(dx, cy - h / 4 - dot / 2, dot, dot), 0, GCornerNone);
   graphics_fill_rect(ctx, GRect(dx, cy + h / 4 - dot / 2, dot, dot), 0, GCornerNone);
 }
@@ -467,8 +496,7 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     draw_digits(ctx, h_tens, h_ones, m_tens, m_ones, size, center_y - SCREEN_H/2, true);
 
   } else if (s_layout == LAYOUT_WIDE_COMPS) {
-    int above_h = COMP_LINES_ABOVE * INFO_LINE_H;
-    int below_h = COMP_LINES_BELOW * INFO_LINE_H;
+    int above_h = COMP_LINES_ABOVE * INFO_LINE_H, below_h = COMP_LINES_BELOW * INFO_LINE_H;
     int above_top = ub_top, below_top = ub_top + ub_h - below_h;
     int tz_top = above_top + above_h + COMP_GAP, tz_bot = below_top - COMP_GAP;
     int tz_h = tz_bot - tz_top;
@@ -525,17 +553,17 @@ static void timer_cb(void *data) {
       break;
     }
     case PHASE_BLINK:
-      if (s_going_down) { s_size--; layer_mark_dirty(s_canvas_layer); if (s_size<=1){s_size=1;s_going_down=false;} schedule(ANIM_FAST_MS); }
-      else { s_size++; layer_mark_dirty(s_canvas_layer); if (s_size>=WIDE_FULL_SIZE){s_size=WIDE_FULL_SIZE;if(++s_anim_rep<BLINK_REPS){s_going_down=true;schedule(ANIM_FAST_MS);}else{s_target_size=WIDE_FULL_SIZE;s_phase=PHASE_DONE;layer_mark_dirty(s_canvas_layer);}}else schedule(ANIM_FAST_MS); }
+      if (s_going_down) { s_size--; layer_mark_dirty(s_canvas_layer); if(s_size<=1){s_size=1;s_going_down=false;} schedule(ANIM_FAST_MS); }
+      else { s_size++; layer_mark_dirty(s_canvas_layer); if(s_size>=WIDE_FULL_SIZE){s_size=WIDE_FULL_SIZE;if(++s_anim_rep<BLINK_REPS){s_going_down=true;schedule(ANIM_FAST_MS);}else{s_target_size=WIDE_FULL_SIZE;s_phase=PHASE_DONE;layer_mark_dirty(s_canvas_layer);}}else schedule(ANIM_FAST_MS); }
       break;
     case PHASE_SQUISH:
-      if (s_going_down) { s_size--; layer_mark_dirty(s_canvas_layer); if (s_size<=1){s_size=1;if(s_digit_pending){s_hour=s_pending_hour;s_minute=s_pending_minute;s_digit_pending=false;}s_going_down=false;} schedule(ANIM_FAST_MS); }
-      else { s_size++; layer_mark_dirty(s_canvas_layer); if (s_size>=s_target_size){s_size=s_target_size;s_phase=PHASE_DONE;layer_mark_dirty(s_canvas_layer);}else schedule(ANIM_FAST_MS); }
+      if (s_going_down) { s_size--; layer_mark_dirty(s_canvas_layer); if(s_size<=1){s_size=1;if(s_digit_pending){s_hour=s_pending_hour;s_minute=s_pending_minute;s_digit_pending=false;}s_going_down=false;} schedule(ANIM_FAST_MS); }
+      else { s_size++; layer_mark_dirty(s_canvas_layer); if(s_size>=s_target_size){s_size=s_target_size;s_phase=PHASE_DONE;layer_mark_dirty(s_canvas_layer);}else schedule(ANIM_FAST_MS); }
       break;
     case PHASE_SHAKE_CYCLE:
-      if (++s_anim_step < SIZE_CYCLE_LEN) { s_size=SIZE_CYCLE[s_anim_step];layer_mark_dirty(s_canvas_layer);schedule(ANIM_FAST_MS); }
-      else if (++s_anim_rep < 2) { s_anim_step=0;s_size=SIZE_CYCLE[0];layer_mark_dirty(s_canvas_layer);schedule(ANIM_FAST_MS); }
-      else { s_phase=PHASE_DONE;s_size=s_target_size;layer_mark_dirty(s_canvas_layer); }
+      if(++s_anim_step<SIZE_CYCLE_LEN){s_size=SIZE_CYCLE[s_anim_step];layer_mark_dirty(s_canvas_layer);schedule(ANIM_FAST_MS);}
+      else if(++s_anim_rep<2){s_anim_step=0;s_size=SIZE_CYCLE[0];layer_mark_dirty(s_canvas_layer);schedule(ANIM_FAST_MS);}
+      else{s_phase=PHASE_DONE;s_size=s_target_size;layer_mark_dirty(s_canvas_layer);}
       break;
     case PHASE_DONE: break;
   }
@@ -548,38 +576,38 @@ static void prv_update_targets(void) {
   Layer *root = window_get_root_layer(s_window);
   GRect ub = layer_get_unobstructed_bounds(root);
   s_stack_size = pick_stack_size(ub.size.h);
-  if (s_layout == LAYOUT_WIDE || s_layout == LAYOUT_VECTOR) s_target_size = WIDE_FULL_SIZE;
-  else if (s_layout == LAYOUT_WIDE_COMPS) s_target_size = pick_size(comp_time_space(ub.size.h));
+  if (s_layout==LAYOUT_WIDE||s_layout==LAYOUT_VECTOR) s_target_size=WIDE_FULL_SIZE;
+  else if (s_layout==LAYOUT_WIDE_COMPS) s_target_size=pick_size(comp_time_space(ub.size.h));
 }
 
 static void unobstructed_change(AnimationProgress progress, void *ctx) {
   prv_update_targets();
-  if (s_phase == PHASE_DONE && (s_layout == LAYOUT_WIDE || s_layout == LAYOUT_WIDE_COMPS || s_layout == LAYOUT_VECTOR))
-    { s_size = s_target_size; layer_mark_dirty(s_canvas_layer); }
+  if (s_phase==PHASE_DONE&&(s_layout==LAYOUT_WIDE||s_layout==LAYOUT_WIDE_COMPS||s_layout==LAYOUT_VECTOR))
+    { s_size=s_target_size; layer_mark_dirty(s_canvas_layer); }
 }
 
 static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   if (s_phase != PHASE_DONE) return;
   s_layout = (s_layout + 1) % LAYOUT_COUNT;
   prv_update_targets();
-  if (s_layout == LAYOUT_WIDE) { s_phase=PHASE_SHAKE_CYCLE;s_anim_step=0;s_anim_rep=0;s_size=SIZE_CYCLE[0];schedule(ANIM_FAST_MS); }
-  else { s_size = s_target_size; }
+  if (s_layout==LAYOUT_WIDE){s_phase=PHASE_SHAKE_CYCLE;s_anim_step=0;s_anim_rep=0;s_size=SIZE_CYCLE[0];schedule(ANIM_FAST_MS);}
+  else{s_size=s_target_size;}
   layer_mark_dirty(s_canvas_layer);
 }
 
 static void tick_handler(struct tm *t, TimeUnits units) {
-  bool sq = (s_layout==LAYOUT_WIDE||s_layout==LAYOUT_WIDE_COMPS||s_layout==LAYOUT_VECTOR);
-  if (s_phase==PHASE_DONE && sq) { s_pending_hour=t->tm_hour;s_pending_minute=t->tm_min;s_digit_pending=true;s_phase=PHASE_SQUISH;s_going_down=true;schedule(ANIM_FAST_MS); }
-  else if (s_phase==PHASE_SQUISH) { s_pending_hour=t->tm_hour;s_pending_minute=t->tm_min;s_digit_pending=true; }
-  else { s_hour=t->tm_hour;s_minute=t->tm_min;layer_mark_dirty(s_canvas_layer); }
+  bool sq=(s_layout==LAYOUT_WIDE||s_layout==LAYOUT_WIDE_COMPS||s_layout==LAYOUT_VECTOR);
+  if(s_phase==PHASE_DONE&&sq){s_pending_hour=t->tm_hour;s_pending_minute=t->tm_min;s_digit_pending=true;s_phase=PHASE_SQUISH;s_going_down=true;schedule(ANIM_FAST_MS);}
+  else if(s_phase==PHASE_SQUISH){s_pending_hour=t->tm_hour;s_pending_minute=t->tm_min;s_digit_pending=true;}
+  else{s_hour=t->tm_hour;s_minute=t->tm_min;layer_mark_dirty(s_canvas_layer);}
 }
 
-static void battery_handler(BatteryChargeState state) { s_battery_pct=state.charge_percent;s_charging=state.is_charging;layer_mark_dirty(s_canvas_layer); }
-static void bt_handler(bool connected) { s_bt_connected=connected;layer_mark_dirty(s_canvas_layer); }
+static void battery_handler(BatteryChargeState state){s_battery_pct=state.charge_percent;s_charging=state.is_charging;layer_mark_dirty(s_canvas_layer);}
+static void bt_handler(bool connected){s_bt_connected=connected;layer_mark_dirty(s_canvas_layer);}
 
 #if defined(PBL_HEALTH)
 static void health_handler(HealthEventType event, void *context) {
-  if (event==HealthEventMovementUpdate||event==HealthEventSignificantUpdate) {
+  if(event==HealthEventMovementUpdate||event==HealthEventSignificantUpdate){
     HealthServiceAccessibilityMask mask;
     mask=health_service_metric_accessible(HealthMetricStepCount,time_start_of_today(),time(NULL));
     s_steps=(mask&HealthServiceAccessibilityMaskAvailable)?(int)health_service_sum_today(HealthMetricStepCount):0;
@@ -587,7 +615,7 @@ static void health_handler(HealthEventType event, void *context) {
     s_distance_m=(mask&HealthServiceAccessibilityMaskAvailable)?(int)health_service_sum_today(HealthMetricWalkedDistanceMeters):0;
   }
 #if defined(PBL_PLATFORM_EMERY)||defined(PBL_PLATFORM_DIORITE)
-  if (event==HealthEventHeartRateUpdate) {
+  if(event==HealthEventHeartRateUpdate){
     HealthServiceAccessibilityMask mask=health_service_metric_accessible(HealthMetricHeartRateBPM,time(NULL),time(NULL)+1);
     s_heart_rate=(mask&HealthServiceAccessibilityMaskAvailable)?(int)health_service_peek_current_value(HealthMetricHeartRateBPM):0;
   }
@@ -598,59 +626,56 @@ static void health_handler(HealthEventType event, void *context) {
 
 static void inbox_received(DictionaryIterator *iter, void *context) {
   Tuple *t;
-  t=dict_find(iter,MESSAGE_KEY_WeatherTempF); if(t) snprintf(s_weather_temp,sizeof(s_weather_temp),"%dF",(int)t->value->int32);
-  t=dict_find(iter,MESSAGE_KEY_WeatherTempC); if(t&&!s_weather_temp[0]) snprintf(s_weather_temp,sizeof(s_weather_temp),"%dC",(int)t->value->int32);
+  t=dict_find(iter,MESSAGE_KEY_WeatherTempF);if(t)snprintf(s_weather_temp,sizeof(s_weather_temp),"%dF",(int)t->value->int32);
+  t=dict_find(iter,MESSAGE_KEY_WeatherTempC);if(t&&!s_weather_temp[0])snprintf(s_weather_temp,sizeof(s_weather_temp),"%dC",(int)t->value->int32);
   t=dict_find(iter,MESSAGE_KEY_WeatherCode);
-  if(t){int code=(int)t->value->int32;const char*d="WEATHER";if(code==0)d="CLEAR";else if(code<=3)d="CLOUDY";else if(code<=49)d="FOG";else if(code<=69)d="RAIN";else if(code<=79)d="SNOW";else if(code<=99)d="STORM";snprintf(s_weather_desc,sizeof(s_weather_desc),"%s",d);}
+  if(t){int c=(int)t->value->int32;const char*d="WEATHER";if(c==0)d="CLEAR";else if(c<=3)d="CLOUDY";else if(c<=49)d="FOG";else if(c<=69)d="RAIN";else if(c<=79)d="SNOW";else if(c<=99)d="STORM";snprintf(s_weather_desc,sizeof(s_weather_desc),"%s",d);}
   layer_mark_dirty(s_canvas_layer);
 }
 
-// ============================================================
-// WINDOW / APP LIFECYCLE
-// ============================================================
 static void window_load(Window *window) {
   Layer *root = window_get_root_layer(window);
   s_canvas_layer = layer_create(layer_get_bounds(root));
   layer_set_update_proc(s_canvas_layer, draw_layer);
   layer_add_child(root, s_canvas_layer);
   GRect ub = layer_get_unobstructed_bounds(root);
-  s_target_size = WIDE_FULL_SIZE; s_stack_size = pick_stack_size(ub.size.h); s_size = 6;
-  UnobstructedAreaHandlers ua = {.change=unobstructed_change};
-  unobstructed_area_service_subscribe(ua, NULL);
+  s_target_size=WIDE_FULL_SIZE; s_stack_size=pick_stack_size(ub.size.h); s_size=6;
+  UnobstructedAreaHandlers ua={.change=unobstructed_change};
+  unobstructed_area_service_subscribe(ua,NULL);
   accel_tap_service_subscribe(accel_tap_handler);
-  s_phase=PHASE_COUNTDOWN; s_countdown_digit=9; s_anim_step=0;
-  s_demo_override=true; s_demo_digit=9; s_demo_size=GROW[0];
-  layer_mark_dirty(s_canvas_layer); schedule(COUNTDOWN_MS);
+  s_phase=PHASE_COUNTDOWN;s_countdown_digit=9;s_anim_step=0;
+  s_demo_override=true;s_demo_digit=9;s_demo_size=GROW[0];
+  layer_mark_dirty(s_canvas_layer);schedule(COUNTDOWN_MS);
 }
 
 static void window_unload(Window *window) {
-  unobstructed_area_service_unsubscribe(); accel_tap_service_unsubscribe();
-  if (s_timer){app_timer_cancel(s_timer);s_timer=NULL;}
-  free_bitmaps(); layer_destroy(s_canvas_layer);
+  unobstructed_area_service_unsubscribe();accel_tap_service_unsubscribe();
+  if(s_timer){app_timer_cancel(s_timer);s_timer=NULL;}
+  free_bitmaps();layer_destroy(s_canvas_layer);
 }
 
 static void init(void) {
-  s_fg=GColorWhite; s_bg=GColorBlack;
-  memset(s_bitmaps,0,sizeof(s_bitmaps)); memset(s_colon_bm,0,sizeof(s_colon_bm));
-  s_window=window_create(); window_set_background_color(s_window,GColorBlack);
+  s_fg=GColorWhite;s_bg=GColorBlack;
+  memset(s_bitmaps,0,sizeof(s_bitmaps));memset(s_colon_bm,0,sizeof(s_colon_bm));
+  s_window=window_create();window_set_background_color(s_window,GColorBlack);
   window_set_window_handlers(s_window,(WindowHandlers){.load=window_load,.unload=window_unload});
   window_stack_push(s_window,true);
-  time_t now=time(NULL); struct tm *t=localtime(&now); s_hour=t->tm_hour; s_minute=t->tm_min;
+  time_t now=time(NULL);struct tm *t=localtime(&now);s_hour=t->tm_hour;s_minute=t->tm_min;
   tick_timer_service_subscribe(MINUTE_UNIT,tick_handler);
-  battery_state_service_subscribe(battery_handler); battery_handler(battery_state_service_peek());
-  bluetooth_connection_service_subscribe(bt_handler); s_bt_connected=bluetooth_connection_service_peek();
+  battery_state_service_subscribe(battery_handler);battery_handler(battery_state_service_peek());
+  bluetooth_connection_service_subscribe(bt_handler);s_bt_connected=bluetooth_connection_service_peek();
 #if defined(PBL_HEALTH)
-  health_service_events_subscribe(health_handler,NULL); health_handler(HealthEventSignificantUpdate,NULL);
+  health_service_events_subscribe(health_handler,NULL);health_handler(HealthEventSignificantUpdate,NULL);
 #endif
-  app_message_register_inbox_received(inbox_received); app_message_open(256,64);
+  app_message_register_inbox_received(inbox_received);app_message_open(256,64);
 }
 
 static void deinit(void) {
-  tick_timer_service_unsubscribe(); battery_state_service_unsubscribe(); bluetooth_connection_service_unsubscribe();
+  tick_timer_service_unsubscribe();battery_state_service_unsubscribe();bluetooth_connection_service_unsubscribe();
 #if defined(PBL_HEALTH)
   health_service_events_unsubscribe();
 #endif
   window_destroy(s_window);
 }
 
-int main(void) { init(); app_event_loop(); deinit(); }
+int main(void){init();app_event_loop();deinit();}
