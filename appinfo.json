@@ -13,6 +13,9 @@
   "targetPlatforms": ["aplite","basalt","diorite","emery","flint"],
   "resources": {
     "media": [
+      {"type":"png","name":"TALLBOY_DUMMY1","file":"images/dummy-1.png"},
+      {"type":"png","name":"TALLBOY_DUMMY2","file":"images/dummy-2.png"},
+      {"type":"png","name":"TALLBOY_DUMMY3","file":"images/dummy-3.png"},
       {"type":"png","name":"TALLBOY_01","file":"images/tallboy_0-1.png"},
       {"type":"png","name":"TALLBOY_02","file":"images/tallboy_0-2.png"},
       {"type":"png","name":"TALLBOY_03","file":"images/tallboy_0-3.png"},
