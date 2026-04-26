@@ -1,9 +1,11 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v2.1
+// TallBoy — main.c  v2.2
 //
-// Fix: free bitmaps between countdown digits to prevent OOM crash.
+// Countdown: slow workshop mode — each digit shown full size (6)
+// for 1500ms, no grow/shrink animation. Outer slots raster,
+// inner slots + colon vector. Advance manually or auto after hold.
 // ============================================================
 
 #define LAYOUT_WIDE        0
@@ -56,6 +58,15 @@ static int s_layout = LAYOUT_WIDE;
 #define COMP_LINES_ABOVE  2
 #define COMP_LINES_BELOW  2
 
+// Countdown: one static frame per digit, held this long
+#define COUNTDOWN_HOLD_MS  1500
+#define BLINK_REPS    2
+#define ANIM_FAST_MS  80
+#define WIDE_FULL_SIZE 6
+
+static const int SIZE_CYCLE[] = { 6, 5, 4, 3, 2, 1, 2, 3, 4, 5, 6 };
+#define SIZE_CYCLE_LEN 11
+
 static int s_stack_size = 2;
 static int pick_stack_size(int ub_h) { return (ub_h >= STACK_SZ2_MIN) ? 2 : 1; }
 static int stack_digit_h(int sz)     { return (sz == 2) ? STACK_H_SZ2 : STACK_H_SZ1; }
@@ -74,19 +85,6 @@ static int comp_time_space(int ub_h) {
   return avail > 0 ? avail : 0;
 }
 
-static const int GROW[]   = { 1, 2, 3, 4, 5, 6 };
-static const int SHRINK[] = { 5, 4, 3, 2, 1 };
-#define GROW_LEN    6
-#define SHRINK_LEN  5
-#define COUNTDOWN_FRAMES (GROW_LEN + SHRINK_LEN)
-#define COUNTDOWN_MS  55
-#define BLINK_REPS    2
-#define ANIM_FAST_MS  80
-#define WIDE_FULL_SIZE 6
-
-static const int SIZE_CYCLE[] = { 6, 5, 4, 3, 2, 1, 2, 3, 4, 5, 6 };
-#define SIZE_CYCLE_LEN 11
-
 typedef enum { PHASE_COUNTDOWN, PHASE_BLINK, PHASE_DONE, PHASE_SQUISH, PHASE_SHAKE_CYCLE } Phase;
 
 static Window    *s_window;
@@ -99,7 +97,7 @@ static bool       s_going_down = true;
 static int        s_countdown_digit = 9;
 static AppTimer  *s_timer = NULL;
 static bool       s_demo_override = false;
-static int        s_demo_digit = 9, s_demo_size = 1;
+static int        s_demo_digit = 9, s_demo_size = 6;
 static bool       s_digit_pending = false;
 static int        s_pending_hour = 0, s_pending_minute = 0;
 static int        s_battery_pct = 100;
@@ -179,7 +177,6 @@ static void free_bitmaps(void) {
     if (s_colon_bm[s]) { gbitmap_destroy(s_colon_bm[s]); s_colon_bm[s] = NULL; }
 }
 
-// Free only the bitmaps for a specific digit — used between countdown digits
 static void free_digit_bitmaps(int digit) {
   for (int s = 0; s < 6; s++)
     if (s_bitmaps[digit][s]) { gbitmap_destroy(s_bitmaps[digit][s]); s_bitmaps[digit][s] = NULL; }
@@ -310,7 +307,7 @@ static void draw_digits_vec(GContext *ctx, int h_tens, int h_ones,
   draw_digit_vec(ctx, m_ones, SLOT_M_ONES, cy, size);
 }
 
-// Countdown split: slots 1&4 raster, slots 2&3 + colon vector
+// Countdown split: outer slots raster, inner slots + colon vector
 static void draw_digits_countdown_split(GContext *ctx, int digit, int size, int cy) {
   int y = cy - SCREEN_H / 2;
   blit(ctx, get_bitmap(digit, size), SLOT_H_TENS, y);
@@ -464,28 +461,24 @@ static void schedule(uint32_t ms) { if (s_timer) app_timer_cancel(s_timer); s_ti
 static void timer_cb(void *data) {
   s_timer = NULL;
   switch (s_phase) {
-    case PHASE_COUNTDOWN: {
-      int frame = s_anim_step % COUNTDOWN_FRAMES;
-      s_demo_size    = (frame < GROW_LEN) ? GROW[frame] : SHRINK[frame - GROW_LEN];
-      s_demo_digit   = s_countdown_digit;
-      s_demo_override = true;
-      layer_mark_dirty(s_canvas_layer);
-      if (++s_anim_step >= COUNTDOWN_FRAMES) {
-        s_anim_step = 0;
-        // Free bitmaps for the completed digit before loading the next one
-        free_digit_bitmaps(s_countdown_digit);
-        if (s_countdown_digit > 0) { s_countdown_digit--; schedule(COUNTDOWN_MS); }
-        else {
-          s_demo_override = false;
-          // Free any remaining colon bitmaps too
-          for (int s = 0; s < 6; s++)
-            if (s_colon_bm[s]) { gbitmap_destroy(s_colon_bm[s]); s_colon_bm[s] = NULL; }
-          s_size=6; s_going_down=true; s_anim_rep=0; s_phase=PHASE_BLINK;
-          layer_mark_dirty(s_canvas_layer); schedule(ANIM_FAST_MS);
-        }
-      } else schedule(COUNTDOWN_MS);
+    case PHASE_COUNTDOWN:
+      // Advance to next digit, free bitmaps for the one just shown
+      free_digit_bitmaps(s_countdown_digit);
+      if (s_countdown_digit > 0) {
+        s_countdown_digit--;
+        s_demo_digit = s_countdown_digit;
+        s_demo_size  = WIDE_FULL_SIZE;
+        s_demo_override = true;
+        layer_mark_dirty(s_canvas_layer);
+        schedule(COUNTDOWN_HOLD_MS);
+      } else {
+        s_demo_override = false;
+        for (int s = 0; s < 6; s++)
+          if (s_colon_bm[s]) { gbitmap_destroy(s_colon_bm[s]); s_colon_bm[s] = NULL; }
+        s_size=6; s_going_down=true; s_anim_rep=0; s_phase=PHASE_BLINK;
+        layer_mark_dirty(s_canvas_layer); schedule(ANIM_FAST_MS);
+      }
       break;
-    }
     case PHASE_BLINK:
       if (s_going_down) { s_size--; layer_mark_dirty(s_canvas_layer); if(s_size<=1){s_size=1;s_going_down=false;} schedule(ANIM_FAST_MS); }
       else { s_size++; layer_mark_dirty(s_canvas_layer); if(s_size>=WIDE_FULL_SIZE){s_size=WIDE_FULL_SIZE;if(++s_anim_rep<BLINK_REPS){s_going_down=true;schedule(ANIM_FAST_MS);}else{s_target_size=WIDE_FULL_SIZE;s_phase=PHASE_DONE;layer_mark_dirty(s_canvas_layer);}}else schedule(ANIM_FAST_MS); }
@@ -574,9 +567,11 @@ static void window_load(Window *window) {
   UnobstructedAreaHandlers ua={.change=unobstructed_change};
   unobstructed_area_service_subscribe(ua,NULL);
   accel_tap_service_subscribe(accel_tap_handler);
-  s_phase=PHASE_COUNTDOWN;s_countdown_digit=9;s_anim_step=0;
-  s_demo_override=true;s_demo_digit=9;s_demo_size=GROW[0];
-  layer_mark_dirty(s_canvas_layer);schedule(COUNTDOWN_MS);
+  // Countdown: start on digit 9, full size, held for COUNTDOWN_HOLD_MS
+  s_phase=PHASE_COUNTDOWN; s_countdown_digit=9;
+  s_demo_override=true; s_demo_digit=9; s_demo_size=WIDE_FULL_SIZE;
+  layer_mark_dirty(s_canvas_layer);
+  schedule(COUNTDOWN_HOLD_MS);
 }
 
 static void window_unload(Window *window) {
