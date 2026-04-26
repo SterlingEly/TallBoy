@@ -1,11 +1,12 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v1.9
+// TallBoy — main.c  v2.0
 //
-// Fix: digit 8 = two independent overlapping full rings.
-// Each ring has center at top_cy / bot_cy respectively.
-// Their inner edges overlap at cy — no explicit bar needed.
+// Countdown: split rendering per slot for raster vs vector comparison.
+//   Slots 1 & 4 (outer): raster bitmap
+//   Slots 2 & 3 (inner) + colon: vector
+// This shows every digit in both renderers simultaneously.
 // ============================================================
 
 #define LAYOUT_WIDE        0
@@ -198,19 +199,6 @@ static void draw_digits(GContext *ctx, int h_tens, int h_ones, int m_tens, int m
 
 // ============================================================
 // VECTOR DIGIT DRAWING
-//
-// Pebble fill_radial: 0=North(up), clockwise.
-//   Top semi    270->90   (W→N→E)
-//   Bottom semi  90->270  (E→S→W)
-//   Right semi    0->180  (N→E→S)
-//   Left semi   180->360  (S→W→N)
-//
-// All digits: 4u wide glyph, variable height = (3+4*size)u.
-// Cap radius ro=2u, hole radius ri=1u, stroke=1u everywhere.
-//
-// For 8: two independent full rings centered at top_cy and bot_cy.
-// Their inner edges overlap at cy producing the characteristic
-// waist — no explicit bar drawn.
 // ============================================================
 
 static void fill_arc(GContext *ctx, int cx, int cy, int ro, int ri, int a0, int a1) {
@@ -219,135 +207,95 @@ static void fill_arc(GContext *ctx, int cx, int cy, int ro, int ri, int a0, int 
                        DEG_TO_TRIGANGLE(a0), DEG_TO_TRIGANGLE(a1));
 }
 
-// Draw a complete ring (full circle annulus) centered at (cap_cx, ring_cy)
 static void full_ring(GContext *ctx, int cap_cx, int ring_cy, int ro, int ri) {
-  fill_arc(ctx, cap_cx, ring_cy, ro, ri, 270, 90);   // top semi
-  fill_arc(ctx, cap_cx, ring_cy, ro, ri, 90, 270);   // bottom semi
+  fill_arc(ctx, cap_cx, ring_cy, ro, ri, 270, 90);
+  fill_arc(ctx, cap_cx, ring_cy, ro, ri, 90, 270);
 }
 
 static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int size) {
   graphics_context_set_fill_color(ctx, s_fg);
-
   int h      = digit_outer_h(size);
-  int ro     = UNIT * 2;
-  int ri     = UNIT * 1;
-  int sw     = UNIT;
+  int ro     = UNIT * 2, ri = UNIT * 1, sw = UNIT;
   int body_h = h - ro * 2;
-
   int gx     = slot_x + HALF_SLOT_PAD;
   int gx_r   = gx + GLYPH_W - sw;
   int cap_cx = gx + ro;
-  int top_cy = cy - body_h / 2;
-  int bot_cy = cy + body_h / 2;
-  int top_y  = cy - h / 2;
-  int bot_y  = cy + h / 2;
+  int top_cy = cy - body_h / 2, bot_cy = cy + body_h / 2;
+  int top_y  = cy - h / 2,      bot_y  = cy + h / 2;
 
 #define VBAR(x,y0,y1) if((y1)>(y0)) graphics_fill_rect(ctx,GRect((x),(y0),sw,(y1)-(y0)),0,GCornerNone)
 #define HBAR(y) graphics_fill_rect(ctx,GRect(gx,(y),GLYPH_W,sw),0,GCornerNone)
 
   switch (digit) {
-
     case 0:
-      // Rounded rect ring: top semi + bottom semi + left/right straight strokes
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 90);
       fill_arc(ctx, cap_cx, bot_cy, ro, ri, 90, 270);
-      VBAR(gx,   top_cy, bot_cy);
-      VBAR(gx_r, top_cy, bot_cy);
+      VBAR(gx, top_cy, bot_cy); VBAR(gx_r, top_cy, bot_cy);
       break;
-
     case 1: {
-      // Full 4u base, centered 1u stem, 45deg top-left diagonal cap
       HBAR(bot_y - sw);
       int stem_x = gx + (GLYPH_W / 2) - (sw / 2);
       VBAR(stem_x, top_y + sw, bot_y - sw);
       for (int i = 0; i < stem_x - gx; i++)
-        graphics_fill_rect(ctx, GRect(stem_x - i - 1, top_y + sw + i, sw, sw), 0, GCornerNone);
+        graphics_fill_rect(ctx, GRect(stem_x-i-1, top_y+sw+i, sw, sw), 0, GCornerNone);
       break;
     }
-
     case 2:
-      // Right-semi top cap, diagonal body sweeping L→R top to bottom, bottom-left quarter + base
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 0, 180);
-      {
-        int dh = bot_cy - top_cy;
-        int dw = GLYPH_W - sw;
-        if (dh > 0)
-          for (int i = 0; i < dh; i++)
-            graphics_fill_rect(ctx, GRect(gx_r - (i * dw / dh), top_cy + i, sw, sw), 0, GCornerNone);
-      }
-      VBAR(gx, bot_cy - ri, bot_cy);
+      { int dh=bot_cy-top_cy, dw=GLYPH_W-sw;
+        if (dh > 0) for (int i=0; i<dh; i++)
+          graphics_fill_rect(ctx, GRect(gx_r-(i*dw/dh), top_cy+i, sw, sw), 0, GCornerNone); }
+      VBAR(gx, bot_cy-ri, bot_cy);
       fill_arc(ctx, cap_cx, bot_cy, ro, ri, 180, 270);
       HBAR(bot_y - sw);
       break;
-
     case 3:
-      // Two right-semi bumps sharing a right stroke — open on left
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 0, 180);
       fill_arc(ctx, cap_cx, bot_cy, ro, ri, 0, 180);
       VBAR(gx_r, top_cy, bot_cy);
       break;
-
     case 4:
-      VBAR(gx,   top_y, cy + sw);
-      VBAR(gx_r, top_y, bot_y);
+      VBAR(gx, top_y, cy+sw); VBAR(gx_r, top_y, bot_y);
       graphics_fill_rect(ctx, GRect(gx, cy, GLYPH_W, sw), 0, GCornerNone);
       break;
-
     case 5:
-      // Top bar, left stroke to top of bottom ring, full bottom ring, right stroke at ring top
       HBAR(top_y);
-      VBAR(gx,   top_y + sw, bot_cy - ro);
+      VBAR(gx, top_y+sw, bot_cy-ro);
       full_ring(ctx, cap_cx, bot_cy, ro, ri);
-      VBAR(gx_r, bot_cy - ro, bot_cy);
+      VBAR(gx_r, bot_cy-ro, bot_cy);
       break;
-
     case 6:
-      // Left-semi cap at top, left stroke full height, full bottom ring, right stroke bottom half
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 180, 360);
       VBAR(gx, top_cy, bot_cy);
       full_ring(ctx, cap_cx, bot_cy, ro, ri);
       VBAR(gx_r, cy, bot_cy);
       break;
-
     case 7:
       HBAR(top_y);
-      VBAR(gx_r, top_y + sw, bot_y);
+      VBAR(gx_r, top_y+sw, bot_y);
       break;
-
     case 8:
-      // Two independent overlapping rings — waist forms naturally from overlap
-      // Top ring centered at top_cy, bottom ring centered at bot_cy
-      // At size 1: top_cy == bot_cy == cy (rings are identical, stacked)
-      // At size 2+: rings spread apart, their inner edges overlap around cy
       full_ring(ctx, cap_cx, top_cy, ro, ri);
       full_ring(ctx, cap_cx, bot_cy, ro, ri);
-      // Side strokes connect the outer edges of both rings
-      VBAR(gx,   top_cy, bot_cy);
-      VBAR(gx_r, top_cy, bot_cy);
+      VBAR(gx, top_cy, bot_cy); VBAR(gx_r, top_cy, bot_cy);
       break;
-
     case 9:
-      // Full top ring, right stroke full, left stroke top half, right-semi bottom cap
       full_ring(ctx, cap_cx, top_cy, ro, ri);
       VBAR(gx_r, top_cy, bot_cy);
-      VBAR(gx,   top_cy, cy);
+      VBAR(gx, top_cy, cy);
       fill_arc(ctx, cap_cx, bot_cy, ro, ri, 0, 180);
       break;
-
     default: break;
   }
-
 #undef VBAR
 #undef HBAR
 }
 
 static void draw_colon_vec(GContext *ctx, int slot_x, int cy, int size) {
   graphics_context_set_fill_color(ctx, s_fg);
-  int h   = digit_outer_h(size);
-  int dot = UNIT;
-  int dx  = slot_x + UNIT * 2;
-  graphics_fill_rect(ctx, GRect(dx, cy - h / 4 - dot / 2, dot, dot), 0, GCornerNone);
-  graphics_fill_rect(ctx, GRect(dx, cy + h / 4 - dot / 2, dot, dot), 0, GCornerNone);
+  int h = digit_outer_h(size), dot = UNIT, dx = slot_x + UNIT * 2;
+  graphics_fill_rect(ctx, GRect(dx, cy - h/4 - dot/2, dot, dot), 0, GCornerNone);
+  graphics_fill_rect(ctx, GRect(dx, cy + h/4 - dot/2, dot, dot), 0, GCornerNone);
 }
 
 static void draw_digits_vec(GContext *ctx, int h_tens, int h_ones,
@@ -357,6 +305,19 @@ static void draw_digits_vec(GContext *ctx, int h_tens, int h_ones,
   draw_colon_vec(ctx, COLON_SLOT_X, cy, size);
   draw_digit_vec(ctx, m_tens, SLOT_M_TENS, cy, size);
   draw_digit_vec(ctx, m_ones, SLOT_M_ONES, cy, size);
+}
+
+// Countdown split: slots 1&4 raster, slots 2&3 + colon vector
+// cy is digit vertical center; y is bitmap strip origin (cy - SCREEN_H/2)
+static void draw_digits_countdown_split(GContext *ctx, int digit, int size, int cy) {
+  int y = cy - SCREEN_H / 2;
+  // Outer slots: raster
+  blit(ctx, get_bitmap(digit, size), SLOT_H_TENS, y);
+  blit(ctx, get_bitmap(digit, size), SLOT_M_ONES, y);
+  // Inner slots + colon: vector
+  draw_digit_vec(ctx, digit, SLOT_H_ONES, cy, size);
+  draw_digit_vec(ctx, digit, SLOT_M_TENS, cy, size);
+  draw_colon_vec(ctx, COLON_SLOT_X, cy, size);
 }
 
 // ============================================================
@@ -449,7 +410,11 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   time_t now_t = time(NULL);
   struct tm *tm = (s_phase == PHASE_DONE) ? localtime(&now_t) : NULL;
 
-  if (s_layout == LAYOUT_VECTOR) {
+  if (s_demo_override && s_phase == PHASE_COUNTDOWN) {
+    // Split: outer slots raster, inner slots + colon vector
+    draw_digits_countdown_split(ctx, s_demo_digit, s_demo_size, center_y);
+
+  } else if (s_layout == LAYOUT_VECTOR) {
     draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, size, center_y);
 
   } else if (s_layout == LAYOUT_WIDE) {
@@ -460,7 +425,7 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int above_top = ub_top, below_top = ub_top + ub_h - below_h;
     int tz_top = above_top + above_h + COMP_GAP, tz_bot = below_top - COMP_GAP;
     int tz_h = tz_bot - tz_top;
-    int dsz = s_demo_override ? size : pick_size(tz_h);
+    int dsz = pick_size(tz_h);
     int y = (tz_top + tz_h/2) - SCREEN_H/2;
     draw_digits(ctx, h_tens, h_ones, m_tens, m_ones, dsz, y, true);
     if (tm) {
@@ -502,13 +467,18 @@ static void timer_cb(void *data) {
   switch (s_phase) {
     case PHASE_COUNTDOWN: {
       int frame = s_anim_step % COUNTDOWN_FRAMES;
-      s_demo_size = (frame < GROW_LEN) ? GROW[frame] : SHRINK[frame - GROW_LEN];
-      s_demo_digit = s_countdown_digit; s_demo_override = true;
+      s_demo_size    = (frame < GROW_LEN) ? GROW[frame] : SHRINK[frame - GROW_LEN];
+      s_demo_digit   = s_countdown_digit;
+      s_demo_override = true;
       layer_mark_dirty(s_canvas_layer);
       if (++s_anim_step >= COUNTDOWN_FRAMES) {
         s_anim_step = 0;
         if (s_countdown_digit > 0) { s_countdown_digit--; schedule(COUNTDOWN_MS); }
-        else { s_demo_override=false; s_size=6; s_going_down=true; s_anim_rep=0; s_phase=PHASE_BLINK; layer_mark_dirty(s_canvas_layer); schedule(ANIM_FAST_MS); }
+        else {
+          s_demo_override = false;
+          s_size=6; s_going_down=true; s_anim_rep=0; s_phase=PHASE_BLINK;
+          layer_mark_dirty(s_canvas_layer); schedule(ANIM_FAST_MS);
+        }
       } else schedule(COUNTDOWN_MS);
       break;
     }
