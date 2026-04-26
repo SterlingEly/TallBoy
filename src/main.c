@@ -1,12 +1,9 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v2.0
+// TallBoy — main.c  v2.1
 //
-// Countdown: split rendering per slot for raster vs vector comparison.
-//   Slots 1 & 4 (outer): raster bitmap
-//   Slots 2 & 3 (inner) + colon: vector
-// This shows every digit in both renderers simultaneously.
+// Fix: free bitmaps between countdown digits to prevent OOM crash.
 // ============================================================
 
 #define LAYOUT_WIDE        0
@@ -182,6 +179,12 @@ static void free_bitmaps(void) {
     if (s_colon_bm[s]) { gbitmap_destroy(s_colon_bm[s]); s_colon_bm[s] = NULL; }
 }
 
+// Free only the bitmaps for a specific digit — used between countdown digits
+static void free_digit_bitmaps(int digit) {
+  for (int s = 0; s < 6; s++)
+    if (s_bitmaps[digit][s]) { gbitmap_destroy(s_bitmaps[digit][s]); s_bitmaps[digit][s] = NULL; }
+}
+
 static void blit(GContext *ctx, GBitmap *bm, int x, int y) {
   if (!bm) return;
   graphics_context_set_compositing_mode(ctx, GCompOpSet);
@@ -308,13 +311,10 @@ static void draw_digits_vec(GContext *ctx, int h_tens, int h_ones,
 }
 
 // Countdown split: slots 1&4 raster, slots 2&3 + colon vector
-// cy is digit vertical center; y is bitmap strip origin (cy - SCREEN_H/2)
 static void draw_digits_countdown_split(GContext *ctx, int digit, int size, int cy) {
   int y = cy - SCREEN_H / 2;
-  // Outer slots: raster
   blit(ctx, get_bitmap(digit, size), SLOT_H_TENS, y);
   blit(ctx, get_bitmap(digit, size), SLOT_M_ONES, y);
-  // Inner slots + colon: vector
   draw_digit_vec(ctx, digit, SLOT_H_ONES, cy, size);
   draw_digit_vec(ctx, digit, SLOT_M_TENS, cy, size);
   draw_colon_vec(ctx, COLON_SLOT_X, cy, size);
@@ -411,7 +411,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   struct tm *tm = (s_phase == PHASE_DONE) ? localtime(&now_t) : NULL;
 
   if (s_demo_override && s_phase == PHASE_COUNTDOWN) {
-    // Split: outer slots raster, inner slots + colon vector
     draw_digits_countdown_split(ctx, s_demo_digit, s_demo_size, center_y);
 
   } else if (s_layout == LAYOUT_VECTOR) {
@@ -473,9 +472,14 @@ static void timer_cb(void *data) {
       layer_mark_dirty(s_canvas_layer);
       if (++s_anim_step >= COUNTDOWN_FRAMES) {
         s_anim_step = 0;
+        // Free bitmaps for the completed digit before loading the next one
+        free_digit_bitmaps(s_countdown_digit);
         if (s_countdown_digit > 0) { s_countdown_digit--; schedule(COUNTDOWN_MS); }
         else {
           s_demo_override = false;
+          // Free any remaining colon bitmaps too
+          for (int s = 0; s < 6; s++)
+            if (s_colon_bm[s]) { gbitmap_destroy(s_colon_bm[s]); s_colon_bm[s] = NULL; }
           s_size=6; s_going_down=true; s_anim_rep=0; s_phase=PHASE_BLINK;
           layer_mark_dirty(s_canvas_layer); schedule(ANIM_FAST_MS);
         }
