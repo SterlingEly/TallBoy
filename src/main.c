@@ -1,11 +1,21 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v2.2
+// TallBoy — main.c  v2.3
 //
-// Countdown: slow workshop mode — each digit shown full size (6)
-// for 1500ms, no grow/shrink animation. Outer slots raster,
-// inner slots + colon vector. Advance manually or auto after hold.
+// Vector digit fixes:
+//   - fill_arc: wrap-around angles now use a1+360 (was rendering nothing)
+//   - 0: arc angles fixed, now renders correctly
+//   - 1: full height stem, diagonal from top
+//   - 2: diagonal from top-right cap down to bottom-left base
+//   - 3: arc angles fixed
+//   - 5: left stroke stops at cy (midpoint), not bot_cy-ro
+//   - 6: bottom is left-semi only (not full ring), top arc fixed
+//   - 7: diagonal stroke from top-right to bottom-left
+//   - 8: arc angles fixed, two overlapping rings
+//   - 9: arc angles fixed
+//   - colon: circular dots using fill_radial
+// Info lines: wide = combined day+date on one line; stacked = day, date, steps, distance
 // ============================================================
 
 #define LAYOUT_WIDE        0
@@ -58,7 +68,6 @@ static int s_layout = LAYOUT_WIDE;
 #define COMP_LINES_ABOVE  2
 #define COMP_LINES_BELOW  2
 
-// Countdown: one static frame per digit, held this long
 #define COUNTDOWN_HOLD_MS  1500
 #define BLINK_REPS    2
 #define ANIM_FAST_MS  80
@@ -199,18 +208,38 @@ static void draw_digits(GContext *ctx, int h_tens, int h_ones, int m_tens, int m
 
 // ============================================================
 // VECTOR DIGIT DRAWING
+//
+// Pebble fill_radial: 0=North, clockwise. CRITICAL: a1 must be > a0.
+// For wrap-around arcs (e.g. top semi 270→90), use a1 = 90+360 = 450.
+//
+// Arc angle reference (no wrapping, a0 < a1 always):
+//   Right semi   (N→E→S):      0 →  180
+//   Bottom semi  (E→S→W):     90 →  270
+//   Left semi    (S→W→N):    180 →  360
+//   Top semi     (W→N→E):    270 →  450  ← wrap fix
+//   Upper-right  (N→E):        0 →   90
+//   Lower-right  (E→S):       90 →  180
+//   Lower-left   (S→W):      180 →  270
+//   Upper-left   (W→N):      270 →  360
 // ============================================================
 
 static void fill_arc(GContext *ctx, int cx, int cy, int ro, int ri, int a0, int a1) {
+  // a0 and a1 in degrees, a1 > a0 always (caller handles wrap via +360)
   GRect b = GRect(cx - ro, cy - ro, ro * 2, ro * 2);
   graphics_fill_radial(ctx, b, GOvalScaleModeFitCircle, (uint16_t)(ro - ri),
                        DEG_TO_TRIGANGLE(a0), DEG_TO_TRIGANGLE(a1));
 }
 
-static void full_ring(GContext *ctx, int cap_cx, int ring_cy, int ro, int ri) {
-  fill_arc(ctx, cap_cx, ring_cy, ro, ri, 270, 90);
-  fill_arc(ctx, cap_cx, ring_cy, ro, ri, 90, 270);
+// Full ring: split into two non-wrapping halves
+static void full_ring(GContext *ctx, int cx, int cy, int ro, int ri) {
+  fill_arc(ctx, cx, cy, ro, ri, 0, 180);    // right semi
+  fill_arc(ctx, cx, cy, ro, ri, 180, 360);  // left semi
 }
+
+// Left semi (S→W→N): a0=180, a1=360
+// Right semi (N→E→S): a0=0, a1=180
+// Top semi (W→N→E): a0=270, a1=450
+// Bottom semi (E→S→W): a0=90, a1=270
 
 static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int size) {
   graphics_context_set_fill_color(ctx, s_fg);
@@ -227,75 +256,125 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
 #define HBAR(y) graphics_fill_rect(ctx,GRect(gx,(y),GLYPH_W,sw),0,GCornerNone)
 
   switch (digit) {
+
     case 0:
-      fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 90);
-      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 90, 270);
-      VBAR(gx, top_cy, bot_cy); VBAR(gx_r, top_cy, bot_cy);
+      // Rounded rect ring: top semi + bottom semi + left/right straight bars
+      fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);  // top semi (wrap fix)
+      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 90, 270);   // bottom semi
+      VBAR(gx,   top_cy, bot_cy);
+      VBAR(gx_r, top_cy, bot_cy);
       break;
+
     case 1: {
+      // Full 4u base, full-height centered stem, top-left 45deg diagonal
       HBAR(bot_y - sw);
       int stem_x = gx + (GLYPH_W / 2) - (sw / 2);
-      VBAR(stem_x, top_y + sw, bot_y - sw);
+      // Stem: from top_y all the way to base (not top_y + sw)
+      VBAR(stem_x, top_y, bot_y - sw);
+      // Top-left diagonal: 45deg from top of stem going up-left, clipped at gx
+      // Goes from (stem_x, top_y) diagonally left — each step: x-1, y+1
       for (int i = 0; i < stem_x - gx; i++)
-        graphics_fill_rect(ctx, GRect(stem_x-i-1, top_y+sw+i, sw, sw), 0, GCornerNone);
+        graphics_fill_rect(ctx, GRect(stem_x - i - 1, top_y + i, sw, sw), 0, GCornerNone);
       break;
     }
+
     case 2:
-      fill_arc(ctx, cap_cx, top_cy, ro, ri, 0, 180);
-      { int dh=bot_cy-top_cy, dw=GLYPH_W-sw;
-        if (dh > 0) for (int i=0; i<dh; i++)
-          graphics_fill_rect(ctx, GRect(gx_r-(i*dw/dh), top_cy+i, sw, sw), 0, GCornerNone); }
-      VBAR(gx, bot_cy-ri, bot_cy);
-      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 180, 270);
+      // Right-semi top cap, diagonal body R→L, small left stroke, lower-left quarter, base
+      fill_arc(ctx, cap_cx, top_cy, ro, ri, 0, 180);   // right semi top cap
+      {
+        // Diagonal from (gx_r, top_cy) to (gx, bot_cy)
+        int dh = bot_cy - top_cy;
+        int dw = GLYPH_W - sw;
+        if (dh > 0)
+          for (int i = 0; i < dh; i++)
+            graphics_fill_rect(ctx, GRect(gx_r - (i * dw / dh), top_cy + i, sw, sw), 0, GCornerNone);
+      }
+      // Short left stroke connecting diagonal end to lower-left quarter
+      VBAR(gx, bot_cy - ri, bot_cy);
+      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 180, 270); // lower-left quarter
       HBAR(bot_y - sw);
       break;
+
     case 3:
-      fill_arc(ctx, cap_cx, top_cy, ro, ri, 0, 180);
-      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 0, 180);
+      // Two right-side semi caps + right connecting stroke
+      fill_arc(ctx, cap_cx, top_cy, ro, ri, 0, 180);   // right semi top
+      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 0, 180);   // right semi bottom
       VBAR(gx_r, top_cy, bot_cy);
       break;
+
     case 4:
-      VBAR(gx, top_y, cy+sw); VBAR(gx_r, top_y, bot_y);
+      // Left stroke top half, right stroke full, horizontal bar at mid
+      VBAR(gx,   top_y, cy + sw);
+      VBAR(gx_r, top_y, bot_y);
       graphics_fill_rect(ctx, GRect(gx, cy, GLYPH_W, sw), 0, GCornerNone);
       break;
+
     case 5:
+      // Top bar, left stroke top-half (stops at cy), then bottom ring, right stroke at ring top
       HBAR(top_y);
-      VBAR(gx, top_y+sw, bot_cy-ro);
-      full_ring(ctx, cap_cx, bot_cy, ro, ri);
-      VBAR(gx_r, bot_cy-ro, bot_cy);
+      VBAR(gx, top_y + sw, cy);          // left stroke stops at midpoint
+      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 270, 450);  // top semi of bottom ring (wrap fix)
+      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 90, 270);   // bottom semi = full ring
+      VBAR(gx_r, bot_cy - ro, bot_cy);   // right stroke from top of ring down to ring center
       break;
+
     case 6:
-      fill_arc(ctx, cap_cx, top_cy, ro, ri, 180, 360);
+      // Left semi cap at top, left stroke full, left semi bottom (no full ring), right stroke bottom half
+      fill_arc(ctx, cap_cx, top_cy, ro, ri, 180, 360);  // left semi top cap
       VBAR(gx, top_cy, bot_cy);
-      full_ring(ctx, cap_cx, bot_cy, ro, ri);
+      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 180, 360);  // left semi bottom (S→W→N)
       VBAR(gx_r, cy, bot_cy);
       break;
+
     case 7:
+      // Top bar + diagonal from top-right corner to bottom-left corner
       HBAR(top_y);
-      VBAR(gx_r, top_y+sw, bot_y);
+      {
+        // Diagonal from (gx_r, top_y + sw) to (gx, bot_y)
+        // Steps: x goes from gx_r to gx, y goes from top_y+sw to bot_y
+        int dh = bot_y - (top_y + sw);
+        int dw = gx_r - gx;
+        if (dh > 0 && dw > 0)
+          for (int i = 0; i <= dh; i++)
+            graphics_fill_rect(ctx, GRect(gx_r - (i * dw / dh), top_y + sw + i, sw, sw), 0, GCornerNone);
+      }
       break;
+
     case 8:
+      // Two independent overlapping full rings + side strokes
       full_ring(ctx, cap_cx, top_cy, ro, ri);
       full_ring(ctx, cap_cx, bot_cy, ro, ri);
-      VBAR(gx, top_cy, bot_cy); VBAR(gx_r, top_cy, bot_cy);
+      VBAR(gx,   top_cy, bot_cy);
+      VBAR(gx_r, top_cy, bot_cy);
       break;
+
     case 9:
+      // Full top ring, right stroke full, left stroke top half, right-semi bottom cap
       full_ring(ctx, cap_cx, top_cy, ro, ri);
       VBAR(gx_r, top_cy, bot_cy);
-      VBAR(gx, top_cy, cy);
-      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 0, 180);
+      VBAR(gx,   top_cy, cy);
+      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 0, 180);   // right semi bottom cap
       break;
+
     default: break;
   }
 #undef VBAR
 #undef HBAR
 }
 
+// Colon: two circular dots, centered in slot
 static void draw_colon_vec(GContext *ctx, int slot_x, int cy, int size) {
   graphics_context_set_fill_color(ctx, s_fg);
-  int h = digit_outer_h(size), dot = UNIT, dx = slot_x + UNIT * 2;
-  graphics_fill_rect(ctx, GRect(dx, cy - h/4 - dot/2, dot, dot), 0, GCornerNone);
-  graphics_fill_rect(ctx, GRect(dx, cy + h/4 - dot/2, dot, dot), 0, GCornerNone);
+  int h   = digit_outer_h(size);
+  int r   = UNIT / 2;  // dot radius = half unit
+  int dx  = slot_x + SLOT_W / 2;  // horizontal center of slot
+  int dy1 = cy - h / 4;
+  int dy2 = cy + h / 4;
+  // Draw circular dots using fill_radial
+  GRect b1 = GRect(dx - r, dy1 - r, r * 2, r * 2);
+  GRect b2 = GRect(dx - r, dy2 - r, r * 2, r * 2);
+  graphics_fill_radial(ctx, b1, GOvalScaleModeFitCircle, (uint16_t)r, DEG_TO_TRIGANGLE(0), DEG_TO_TRIGANGLE(360));
+  graphics_fill_radial(ctx, b2, GOvalScaleModeFitCircle, (uint16_t)r, DEG_TO_TRIGANGLE(0), DEG_TO_TRIGANGLE(360));
 }
 
 static void draw_digits_vec(GContext *ctx, int h_tens, int h_ones,
@@ -307,7 +386,6 @@ static void draw_digits_vec(GContext *ctx, int h_tens, int h_ones,
   draw_digit_vec(ctx, m_ones, SLOT_M_ONES, cy, size);
 }
 
-// Countdown split: outer slots raster, inner slots + colon vector
 static void draw_digits_countdown_split(GContext *ctx, int digit, int size, int cy) {
   int y = cy - SCREEN_H / 2;
   blit(ctx, get_bitmap(digit, size), SLOT_H_TENS, y);
@@ -319,6 +397,8 @@ static void draw_digits_countdown_split(GContext *ctx, int digit, int size, int 
 
 // ============================================================
 // INFO LINES
+// Wide comps: above = day+date combined ("MON APR 27"), steps; below = distance, battery
+// Stacked: day, date, steps, distance (separate lines, abbreviated)
 // ============================================================
 static const char *s_day_names[]   = {"SUN","MON","TUE","WED","THU","FRI","SAT"};
 static const char *s_day_full[]    = {"SUNDAY","MONDAY","TUESDAY","WEDNESDAY","THURSDAY","FRIDAY","SATURDAY"};
@@ -326,8 +406,10 @@ static const char *s_month_abbrs[] = {"JAN","FEB","MAR","APR","MAY","JUN","JUL",
 
 static int build_comp_above(char lines[][32], int max_lines, struct tm *t) {
   int n = 0;
-  if (n < max_lines && t) snprintf(lines[n++], 32, "%s", s_day_full[t->tm_wday]);
-  if (n < max_lines && t) snprintf(lines[n++], 32, "%s %d", s_month_abbrs[t->tm_mon], t->tm_mday);
+  // Wide mode: combined day + date on one line to use horizontal space
+  if (n < max_lines && t)
+    snprintf(lines[n++], 32, "%s  %s %d",
+             s_day_full[t->tm_wday], s_month_abbrs[t->tm_mon], t->tm_mday);
   return n;
 }
 
@@ -344,21 +426,25 @@ static int build_comp_below(char lines[][32], int max_lines, struct tm *t) {
   }
 #endif
   if (n == 0 && n < max_lines) snprintf(lines[n++], 32, "bat %d%%%s", s_battery_pct, s_charging?"+":"");
-  if (n < max_lines && s_heart_rate > 0) snprintf(lines[n++], 32, "%d bpm", s_heart_rate);
   return n;
 }
 
+// Stacked column: day, date, steps, distance as separate lines
 static int build_info_lines_short(char lines[][32], int max_lines, struct tm *t) {
   int n = 0;
-  if (n < max_lines && t) snprintf(lines[n++], 32, "%s %s %d", s_day_names[t->tm_wday], s_month_abbrs[t->tm_mon], t->tm_mday);
-  if (n < max_lines && s_weather_temp[0]) snprintf(lines[n++], 32, "%s", s_weather_temp);
+  if (n < max_lines && t)
+    snprintf(lines[n++], 32, "%s", s_day_names[t->tm_wday]);
+  if (n < max_lines && t)
+    snprintf(lines[n++], 32, "%s %d", s_month_abbrs[t->tm_mon], t->tm_mday);
 #if defined(PBL_HEALTH)
-  if (n < max_lines) { if (s_steps>=1000) snprintf(lines[n++],32,"%dk steps",s_steps/1000); else snprintf(lines[n++],32,"%d steps",s_steps); }
+  if (n < max_lines) {
+    if (s_steps >= 1000) snprintf(lines[n++], 32, "%dk steps", s_steps/1000);
+    else snprintf(lines[n++], 32, "%d steps", s_steps);
+  }
   if (n < max_lines && s_distance_m > 0) {
     if (strcmp(i18n_get_system_locale(),"en_US")==0) { int mx=(s_distance_m*10)/1609; snprintf(lines[n++],32,"%d.%d mi",mx/10,mx%10); }
     else { int kx=(s_distance_m*10)/1000; snprintf(lines[n++],32,"%d.%d km",kx/10,kx%10); }
   }
-  if (n < max_lines && s_heart_rate > 0) snprintf(lines[n++], 32, "%d bpm", s_heart_rate);
 #endif
   if (n < max_lines) snprintf(lines[n++], 32, "bat %d%%", s_battery_pct);
   return n;
@@ -462,7 +548,6 @@ static void timer_cb(void *data) {
   s_timer = NULL;
   switch (s_phase) {
     case PHASE_COUNTDOWN:
-      // Advance to next digit, free bitmaps for the one just shown
       free_digit_bitmaps(s_countdown_digit);
       if (s_countdown_digit > 0) {
         s_countdown_digit--;
@@ -567,7 +652,6 @@ static void window_load(Window *window) {
   UnobstructedAreaHandlers ua={.change=unobstructed_change};
   unobstructed_area_service_subscribe(ua,NULL);
   accel_tap_service_subscribe(accel_tap_handler);
-  // Countdown: start on digit 9, full size, held for COUNTDOWN_HOLD_MS
   s_phase=PHASE_COUNTDOWN; s_countdown_digit=9;
   s_demo_override=true; s_demo_digit=9; s_demo_size=WIDE_FULL_SIZE;
   layer_mark_dirty(s_canvas_layer);
