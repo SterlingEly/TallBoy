@@ -1,15 +1,16 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v2.6
+// TallBoy — main.c  v2.7
 //
 // RULE: circles ALWAYS fixed: ro=2u, ri=1u. Only straight spans stretch.
 //
-// 8 = two stacked 0s sharing the middle cap:
-//   Top-0:    top cap at top_cy,  bottom cap at cy,     VBARs top_cy→cy
-//   Bottom-0: top cap at cy,      bottom cap at bot_cy, VBARs cy→bot_cy
-//   Shared middle cap drawn once as full ring at cy.
-//   No single spanning VBAR — the two 0-halves each have their own short bars.
+// 8 geometry (correct):
+//   Two 0-rings, each occupying h/2 of the digit height.
+//   Top ring:    top cap at (top_y + ro),  bottom cap at (cy - ro)
+//   Bottom ring: top cap at (cy + ro),     bottom cap at (bot_y - ro)
+//   VBARs connect each ring's cap centers (auto-absent at size 1 since y0>y1).
+//   At size 1: just two overlapping circles, exactly 1u (stroke width) overlap.
 // ============================================================
 
 #define LAYOUT_WIDE        0
@@ -213,9 +214,9 @@ static void fill_arc(GContext *ctx, int cx, int cy, int ro, int ri, int a0, int 
 static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int size) {
   graphics_context_set_fill_color(ctx, s_fg);
 
-  const int ro = UNIT * 2;  // always fixed
-  const int ri = UNIT * 1;  // always fixed
-  const int sw = UNIT;      // always fixed
+  const int ro = UNIT * 2;
+  const int ri = UNIT * 1;
+  const int sw = UNIT;
 
   int h      = digit_outer_h(size);
   int body_h = h - ro * 2;
@@ -301,19 +302,25 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       }
       break;
 
-    case 8:
-      // Two stacked 0s sharing the middle cap at cy.
-      // Top-0:    top cap at top_cy, bottom cap at cy,     VBARs top_cy→cy
-      // Bottom-0: top cap at cy,     bottom cap at bot_cy, VBARs cy→bot_cy
-      // Middle cap drawn once as full ring.
-      fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450); // top of top-0
-      RING(cap_cx, cy);                                 // shared middle cap
-      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 90, 270);  // bottom of bottom-0
-      VBAR(gx,   top_cy, cy);                           // top-0 left bar
-      VBAR(gx_r, top_cy, cy);                           // top-0 right bar
-      VBAR(gx,   cy, bot_cy);                           // bottom-0 left bar
-      VBAR(gx_r, cy, bot_cy);                           // bottom-0 right bar
+    case 8: {
+      // Two 0-rings each occupying h/2 of digit height.
+      // Top ring:    top cap at (top_y+ro),  bottom cap at (cy-ro)
+      // Bottom ring: top cap at (cy+ro),     bottom cap at (bot_y-ro)
+      // VBARs auto-absent at size 1 (y0 >= y1 condition in VBAR macro).
+      int t_tc = top_y + ro;   // top ring, top cap center
+      int t_bc = cy - ro;      // top ring, bottom cap center
+      int b_tc = cy + ro;      // bottom ring, top cap center
+      int b_bc = bot_y - ro;   // bottom ring, bottom cap center
+      fill_arc(ctx, cap_cx, t_tc, ro, ri, 270, 450); // top ring top cap
+      fill_arc(ctx, cap_cx, t_bc, ro, ri, 90, 270);  // top ring bottom cap
+      VBAR(gx,   t_tc, t_bc);                         // top ring left bar
+      VBAR(gx_r, t_tc, t_bc);                         // top ring right bar
+      fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450); // bottom ring top cap
+      fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);  // bottom ring bottom cap
+      VBAR(gx,   b_tc, b_bc);                         // bottom ring left bar
+      VBAR(gx_r, b_tc, b_bc);                         // bottom ring right bar
       break;
+    }
 
     case 9:
       RING(cap_cx, top_cy);
