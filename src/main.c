@@ -1,14 +1,24 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v2.9
+// TallBoy — main.c  v3.0
 //
 // RULE: circles ALWAYS fixed: ro=2u, ri=1u. Only straight spans stretch.
 //
-// 8 geometry — inner caps at cy ± (ro - HALF_UNIT) = cy ± 1.5u
-//   Distance between inner cap centers = 3u = 2*ro - ri
-//   Overlap = 2*ro - 3u = 1u = exactly one stroke width ✓
-//   Bar per half = (size-1) * 2 * UNIT
+// Master ring positions (shared across 3,5,6,8,9):
+//   bar   = (size-1) * 2 * UNIT  (bar length per half)
+//   t_bc  = cy - (ro - HALF_UNIT)   top ring inner cap  (cy - 1.5u)
+//   t_tc  = t_bc - bar              top ring outer cap
+//   b_tc  = cy + (ro - HALF_UNIT)   bottom ring inner cap (cy + 1.5u)
+//   b_bc  = b_tc + bar              bottom ring outer cap
+//
+// Digits derived from 8:
+//   3  = 8 with right semi only on each circle (0°→180°)
+//   6  = left stroke + left semi top cap + full bottom ring (b_tc/b_bc)
+//   9  = full top ring (t_tc/t_bc) + right stroke + right semi bottom cap
+//   5  = top bar + left stroke to cy + bottom ring right stroke + top semi of bottom ring
+//
+// 7: diagonal steps by x-axis (short dimension) to avoid vertical stub.
 // ============================================================
 
 #define LAYOUT_WIDE        0
@@ -226,6 +236,13 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
   int top_y  = cy - h / 2;
   int bot_y  = cy + h / 2;
 
+  // Master ring cap positions — shared by 3, 5, 6, 8, 9
+  int bar  = (size - 1) * 2 * UNIT;
+  int t_bc = cy - (ro - HALF_UNIT);  // top ring inner cap  (cy - 1.5u)
+  int t_tc = t_bc - bar;             // top ring outer cap
+  int b_tc = cy + (ro - HALF_UNIT);  // bottom ring inner cap (cy + 1.5u)
+  int b_bc = b_tc + bar;             // bottom ring outer cap
+
 #define VBAR(x,y0,y1) if((y1)>(y0)) graphics_fill_rect(ctx,GRect((x),(y0),sw,(y1)-(y0)),0,GCornerNone)
 #define HBAR(y) graphics_fill_rect(ctx,GRect(gx,(y),GLYPH_W,sw),0,GCornerNone)
 #define RING(ccx,ccy) do { \
@@ -264,9 +281,13 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 3:
-      fill_arc(ctx, cap_cx, top_cy, ro, ri, 0, 180);
-      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 0, 180);
-      VBAR(gx_r, top_cy, bot_cy);
+      // 8 with right semi only on each circle
+      fill_arc(ctx, cap_cx, t_tc, ro, ri, 0, 180);   // top ring top cap, right semi
+      fill_arc(ctx, cap_cx, t_bc, ro, ri, 0, 180);   // top ring bottom cap, right semi
+      VBAR(gx_r, t_tc, t_bc);                         // top ring right bar
+      fill_arc(ctx, cap_cx, b_tc, ro, ri, 0, 180);   // bottom ring top cap, right semi
+      fill_arc(ctx, cap_cx, b_bc, ro, ri, 0, 180);   // bottom ring bottom cap, right semi
+      VBAR(gx_r, b_tc, b_bc);                         // bottom ring right bar
       break;
 
     case 4:
@@ -276,39 +297,36 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 5:
+      // Top bar + left stroke to cy + top semi of bottom ring + right stroke at bottom ring
       HBAR(top_y);
       VBAR(gx, top_y + sw, cy);
-      RING(cap_cx, bot_cy);
-      VBAR(gx_r, bot_cy - ro, bot_cy);
+      fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450); // top semi of bottom ring (same as 8 b_tc)
+      fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);  // bottom semi of bottom ring
+      VBAR(gx_r, b_tc, b_bc);                         // right bar of bottom ring
       break;
 
     case 6:
-      fill_arc(ctx, cap_cx, top_cy, ro, ri, 180, 360);
-      VBAR(gx, top_cy, bot_cy);
-      RING(cap_cx, bot_cy);
-      VBAR(gx_r, cy, bot_cy);
+      // Left semi top cap + left stroke full + full bottom ring (same as 8 bottom ring)
+      fill_arc(ctx, cap_cx, t_tc, ro, ri, 180, 360); // left semi of top ring outer cap
+      VBAR(gx, t_tc, b_bc);                           // left stroke spanning full height
+      fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450); // bottom ring top cap
+      fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);  // bottom ring bottom cap
+      VBAR(gx_r, b_tc, b_bc);                         // bottom ring right bar
       break;
 
     case 7:
+      // Top bar + diagonal from top-right to bottom-left, stepping by x (no vertical stub)
       HBAR(top_y);
       {
-        int x0 = gx_r, y0 = top_y + sw, x1 = gx, y1 = bot_y;
-        int dh = y1 - y0, dw = x0 - x1;
-        if (dh > 0 && dw > 0)
-          for (int i = 0; i <= dh; i++)
-            graphics_fill_rect(ctx, GRect(x0-(i*dw/dh), y0+i, sw, sw), 0, GCornerNone);
+        int dw = gx_r - gx;   // horizontal span (shorter dimension)
+        int dh = bot_y - (top_y + sw);  // vertical span
+        if (dw > 0 && dh > 0)
+          for (int i = 0; i <= dw; i++)
+            graphics_fill_rect(ctx, GRect(gx_r - i, top_y + sw + (i * dh / dw), sw, sw), 0, GCornerNone);
       }
       break;
 
-    case 8: {
-      // Inner caps at cy ± (ro - HALF_UNIT) = cy ± 1.5u
-      // Distance between inner cap centers = 3u → overlap = 4u - 3u = 1u ✓
-      // Bar per half = (size-1) * 2 * UNIT (0u at size 1, 2u at size 2, etc.)
-      int bar = (size - 1) * 2 * UNIT;
-      int t_bc = cy - (ro - HALF_UNIT);  // top ring inner cap = cy - 1.5u
-      int t_tc = t_bc - bar;
-      int b_tc = cy + (ro - HALF_UNIT);  // bottom ring inner cap = cy + 1.5u
-      int b_bc = b_tc + bar;
+    case 8:
       fill_arc(ctx, cap_cx, t_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, t_bc, ro, ri, 90, 270);
       VBAR(gx,   t_tc, t_bc);
@@ -318,13 +336,15 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       VBAR(gx,   b_tc, b_bc);
       VBAR(gx_r, b_tc, b_bc);
       break;
-    }
 
     case 9:
-      RING(cap_cx, top_cy);
-      VBAR(gx_r, top_cy, bot_cy);
-      VBAR(gx,   top_cy, cy);
-      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 0, 180);
+      // Full top ring (same as 8 top ring) + right stroke + right semi bottom cap
+      fill_arc(ctx, cap_cx, t_tc, ro, ri, 270, 450); // top ring outer cap
+      fill_arc(ctx, cap_cx, t_bc, ro, ri, 90, 270);  // top ring inner cap
+      VBAR(gx,   t_tc, t_bc);                         // top ring left bar
+      VBAR(gx_r, t_tc, b_bc);                         // right stroke spanning full height
+      fill_arc(ctx, cap_cx, b_tc, ro, ri, 0, 180);   // bottom right semi cap (outer)
+      fill_arc(ctx, cap_cx, b_bc, ro, ri, 0, 180);   // bottom right semi cap (inner)
       break;
 
     default: break;
