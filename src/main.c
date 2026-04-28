@@ -1,18 +1,15 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v2.5
+// TallBoy — main.c  v2.6
 //
-// FUNDAMENTAL RULE: circles are ALWAYS 4u outer diameter (ro=2u),
-// 2u inner hole (ri=1u), 1u stroke. NEVER changes with size.
-// Only straight VBARs between cap centers stretch with size.
+// RULE: circles ALWAYS fixed: ro=2u, ri=1u. Only straight spans stretch.
 //
-// 8 fix: two full rings at top_cy and bot_cy (same positions as 0),
-// plus VBARs. Waist notch forms naturally from inner holes.
-//
-// Arc angles: a1 MUST > a0. Wrap via a1+360.
-//   Right semi:   0→180   Bottom semi: 90→270
-//   Left semi:  180→360   Top semi:   270→450
+// 8 = two stacked 0s sharing the middle cap:
+//   Top-0:    top cap at top_cy,  bottom cap at cy,     VBARs top_cy→cy
+//   Bottom-0: top cap at cy,      bottom cap at bot_cy, VBARs cy→bot_cy
+//   Shared middle cap drawn once as full ring at cy.
+//   No single spanning VBAR — the two 0-halves each have their own short bars.
 // ============================================================
 
 #define LAYOUT_WIDE        0
@@ -205,17 +202,6 @@ static void draw_digits(GContext *ctx, int h_tens, int h_ones, int m_tens, int m
 
 // ============================================================
 // VECTOR DIGIT DRAWING
-//
-// RULE: ro = UNIT*2, ri = UNIT*1 ALWAYS. Circles never distort.
-// Only VBARs (straight sections between cap centers) stretch.
-//
-// Standard positions for cap-bearing digits:
-//   h      = (3 + 4*size) * UNIT        total height
-//   body_h = h - ro*2                   straight section
-//   top_cy = cy - body_h/2              top cap center
-//   bot_cy = cy + body_h/2              bottom cap center
-//   top_y  = cy - h/2                   top edge
-//   bot_y  = cy + h/2                   bottom edge
 // ============================================================
 
 static void fill_arc(GContext *ctx, int cx, int cy, int ro, int ri, int a0, int a1) {
@@ -227,12 +213,10 @@ static void fill_arc(GContext *ctx, int cx, int cy, int ro, int ri, int a0, int 
 static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int size) {
   graphics_context_set_fill_color(ctx, s_fg);
 
-  // These are CONSTANTS — never change with size
-  const int ro = UNIT * 2;
-  const int ri = UNIT * 1;
-  const int sw = UNIT;
+  const int ro = UNIT * 2;  // always fixed
+  const int ri = UNIT * 1;  // always fixed
+  const int sw = UNIT;      // always fixed
 
-  // These scale with size
   int h      = digit_outer_h(size);
   int body_h = h - ro * 2;
   int gx     = slot_x + HALF_SLOT_PAD;
@@ -245,15 +229,13 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
 
 #define VBAR(x,y0,y1) if((y1)>(y0)) graphics_fill_rect(ctx,GRect((x),(y0),sw,(y1)-(y0)),0,GCornerNone)
 #define HBAR(y) graphics_fill_rect(ctx,GRect(gx,(y),GLYPH_W,sw),0,GCornerNone)
-// Full ring at given cap center (both semis)
-#define RING(cx2,cy2) do { \
-  fill_arc(ctx,(cx2),(cy2),ro,ri,270,450); \
-  fill_arc(ctx,(cx2),(cy2),ro,ri,90,270); } while(0)
+#define RING(ccx,ccy) do { \
+  fill_arc(ctx,(ccx),(ccy),ro,ri,270,450); \
+  fill_arc(ctx,(ccx),(ccy),ro,ri,90,270); } while(0)
 
   switch (digit) {
 
     case 0:
-      // Rounded rect ring: fixed caps, stretching VBARs
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, bot_cy, ro, ri, 90, 270);
       VBAR(gx,   top_cy, bot_cy);
@@ -270,11 +252,9 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
     }
 
     case 2:
-      // Top semi cap (top of a circle, fixed size), diagonal body, lower-left quarter, base
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);
       {
-        int dh = bot_cy - top_cy;
-        int dw = GLYPH_W - sw;
+        int dh = bot_cy - top_cy, dw = GLYPH_W - sw;
         if (dh > 0)
           for (int i = 0; i < dh; i++)
             graphics_fill_rect(ctx, GRect(gx_r-(i*dw/dh), top_cy+i, sw, sw), 0, GCornerNone);
@@ -313,8 +293,7 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
     case 7:
       HBAR(top_y);
       {
-        int x0 = gx_r, y0 = top_y + sw;
-        int x1 = gx,   y1 = bot_y;
+        int x0 = gx_r, y0 = top_y + sw, x1 = gx, y1 = bot_y;
         int dh = y1 - y0, dw = x0 - x1;
         if (dh > 0 && dw > 0)
           for (int i = 0; i <= dh; i++)
@@ -323,14 +302,17 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 8:
-      // 0 geometry PLUS an extra full ring at bot_cy.
-      // Circles always fixed size. VBARs stretch between top_cy and bot_cy.
-      // Middle "notch" forms from inner holes of the two rings meeting near cy.
-      fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450); // top cap
-      RING(cap_cx, cy);                                 // middle ring at exact center
-      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 90, 270);  // bottom cap
-      VBAR(gx,   top_cy, bot_cy);
-      VBAR(gx_r, top_cy, bot_cy);
+      // Two stacked 0s sharing the middle cap at cy.
+      // Top-0:    top cap at top_cy, bottom cap at cy,     VBARs top_cy→cy
+      // Bottom-0: top cap at cy,     bottom cap at bot_cy, VBARs cy→bot_cy
+      // Middle cap drawn once as full ring.
+      fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450); // top of top-0
+      RING(cap_cx, cy);                                 // shared middle cap
+      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 90, 270);  // bottom of bottom-0
+      VBAR(gx,   top_cy, cy);                           // top-0 left bar
+      VBAR(gx_r, top_cy, cy);                           // top-0 right bar
+      VBAR(gx,   cy, bot_cy);                           // bottom-0 left bar
+      VBAR(gx_r, cy, bot_cy);                           // bottom-0 right bar
       break;
 
     case 9:
@@ -349,11 +331,9 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
 
 static void draw_colon_vec(GContext *ctx, int slot_x, int cy, int size) {
   graphics_context_set_fill_color(ctx, s_fg);
-  int h = digit_outer_h(size);
-  int r = UNIT / 2;
-  int dx = slot_x + SLOT_W / 2;
-  GRect b1 = GRect(dx - r, cy - h/4 - r, r*2, r*2);
-  GRect b2 = GRect(dx - r, cy + h/4 - r, r*2, r*2);
+  int h = digit_outer_h(size), r = UNIT / 2, dx = slot_x + SLOT_W / 2;
+  GRect b1 = GRect(dx-r, cy-h/4-r, r*2, r*2);
+  GRect b2 = GRect(dx-r, cy+h/4-r, r*2, r*2);
   graphics_fill_radial(ctx, b1, GOvalScaleModeFitCircle, (uint16_t)r, 0, DEG_TO_TRIGANGLE(360));
   graphics_fill_radial(ctx, b2, GOvalScaleModeFitCircle, (uint16_t)r, 0, DEG_TO_TRIGANGLE(360));
 }
@@ -469,19 +449,15 @@ static void draw_layer(Layer *layer, GContext *ctx) {
 
   if (s_demo_override && s_phase == PHASE_COUNTDOWN) {
     draw_digits_countdown_split(ctx, s_demo_digit, s_demo_size, center_y);
-
   } else if (s_layout == LAYOUT_VECTOR) {
     draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, size, center_y);
-
   } else if (s_layout == LAYOUT_WIDE) {
     draw_digits(ctx, h_tens, h_ones, m_tens, m_ones, size, center_y - SCREEN_H/2, true);
-
   } else if (s_layout == LAYOUT_WIDE_COMPS) {
     int above_h = COMP_LINES_ABOVE * INFO_LINE_H, below_h = COMP_LINES_BELOW * INFO_LINE_H;
     int above_top = ub_top, below_top = ub_top + ub_h - below_h;
     int tz_top = above_top + above_h + COMP_GAP, tz_bot = below_top - COMP_GAP;
-    int tz_h = tz_bot - tz_top;
-    int dsz = pick_size(tz_h);
+    int tz_h = tz_bot - tz_top, dsz = pick_size(tz_h);
     int y = (tz_top + tz_h/2) - SCREEN_H/2;
     draw_digits(ctx, h_tens, h_ones, m_tens, m_ones, dsz, y, true);
     if (tm) {
@@ -491,7 +467,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
       if (na) draw_info_block(ctx, 0, above_top, SCREEN_W, al, na);
       if (nb) draw_info_block(ctx, 0, below_top, SCREEN_W, bl, nb);
     }
-
   } else {
     int sdh = stack_digit_h(s_stack_size);
     int h_y = (center_y - sdh/2 - HALF_UNIT) - SCREEN_H/2;
@@ -524,16 +499,12 @@ static void timer_cb(void *data) {
     case PHASE_COUNTDOWN:
       free_digit_bitmaps(s_countdown_digit);
       if (s_countdown_digit > 0) {
-        s_countdown_digit--;
-        s_demo_digit = s_countdown_digit;
-        s_demo_size  = WIDE_FULL_SIZE;
-        s_demo_override = true;
-        layer_mark_dirty(s_canvas_layer);
-        schedule(COUNTDOWN_HOLD_MS);
+        s_countdown_digit--; s_demo_digit = s_countdown_digit;
+        s_demo_size = WIDE_FULL_SIZE; s_demo_override = true;
+        layer_mark_dirty(s_canvas_layer); schedule(COUNTDOWN_HOLD_MS);
       } else {
         s_demo_override = false;
-        for (int s = 0; s < 6; s++)
-          if (s_colon_bm[s]) { gbitmap_destroy(s_colon_bm[s]); s_colon_bm[s] = NULL; }
+        for (int s = 0; s < 6; s++) if (s_colon_bm[s]) { gbitmap_destroy(s_colon_bm[s]); s_colon_bm[s] = NULL; }
         s_size=6; s_going_down=true; s_anim_rep=0; s_phase=PHASE_BLINK;
         layer_mark_dirty(s_canvas_layer); schedule(ANIM_FAST_MS);
       }
@@ -628,34 +599,33 @@ static void window_load(Window *window) {
   accel_tap_service_subscribe(accel_tap_handler);
   s_phase=PHASE_COUNTDOWN; s_countdown_digit=9;
   s_demo_override=true; s_demo_digit=9; s_demo_size=WIDE_FULL_SIZE;
-  layer_mark_dirty(s_canvas_layer);
-  schedule(COUNTDOWN_HOLD_MS);
+  layer_mark_dirty(s_canvas_layer); schedule(COUNTDOWN_HOLD_MS);
 }
 
 static void window_unload(Window *window) {
-  unobstructed_area_service_unsubscribe();accel_tap_service_unsubscribe();
+  unobstructed_area_service_unsubscribe(); accel_tap_service_unsubscribe();
   if(s_timer){app_timer_cancel(s_timer);s_timer=NULL;}
-  free_bitmaps();layer_destroy(s_canvas_layer);
+  free_bitmaps(); layer_destroy(s_canvas_layer);
 }
 
 static void init(void) {
-  s_fg=GColorWhite;s_bg=GColorBlack;
-  memset(s_bitmaps,0,sizeof(s_bitmaps));memset(s_colon_bm,0,sizeof(s_colon_bm));
-  s_window=window_create();window_set_background_color(s_window,GColorBlack);
+  s_fg=GColorWhite; s_bg=GColorBlack;
+  memset(s_bitmaps,0,sizeof(s_bitmaps)); memset(s_colon_bm,0,sizeof(s_colon_bm));
+  s_window=window_create(); window_set_background_color(s_window,GColorBlack);
   window_set_window_handlers(s_window,(WindowHandlers){.load=window_load,.unload=window_unload});
   window_stack_push(s_window,true);
-  time_t now=time(NULL);struct tm *t=localtime(&now);s_hour=t->tm_hour;s_minute=t->tm_min;
+  time_t now=time(NULL); struct tm *t=localtime(&now); s_hour=t->tm_hour; s_minute=t->tm_min;
   tick_timer_service_subscribe(MINUTE_UNIT,tick_handler);
-  battery_state_service_subscribe(battery_handler);battery_handler(battery_state_service_peek());
-  bluetooth_connection_service_subscribe(bt_handler);s_bt_connected=bluetooth_connection_service_peek();
+  battery_state_service_subscribe(battery_handler); battery_handler(battery_state_service_peek());
+  bluetooth_connection_service_subscribe(bt_handler); s_bt_connected=bluetooth_connection_service_peek();
 #if defined(PBL_HEALTH)
-  health_service_events_subscribe(health_handler,NULL);health_handler(HealthEventSignificantUpdate,NULL);
+  health_service_events_subscribe(health_handler,NULL); health_handler(HealthEventSignificantUpdate,NULL);
 #endif
-  app_message_register_inbox_received(inbox_received);app_message_open(256,64);
+  app_message_register_inbox_received(inbox_received); app_message_open(256,64);
 }
 
 static void deinit(void) {
-  tick_timer_service_unsubscribe();battery_state_service_unsubscribe();bluetooth_connection_service_unsubscribe();
+  tick_timer_service_unsubscribe(); battery_state_service_unsubscribe(); bluetooth_connection_service_unsubscribe();
 #if defined(PBL_HEALTH)
   health_service_events_unsubscribe();
 #endif
