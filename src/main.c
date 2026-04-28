@@ -1,20 +1,14 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v2.8
+// TallBoy — main.c  v2.9
 //
 // RULE: circles ALWAYS fixed: ro=2u, ri=1u. Only straight spans stretch.
 //
-// 8 geometry — inner caps overlap by exactly 1u (= ri):
-//   t_bc = cy - ri  (top ring inner cap, was cy-ro, now 1u closer)
-//   b_tc = cy + ri  (bottom ring inner cap, was cy+ro, now 1u closer)
-//   The two inner holes are 2u apart (2*ri), outer edges overlap by 2u,
-//   creating a 1u-wide waist at the center — matching the raster design.
-//
-// Bar length per half = (size-1) * 2 * UNIT:
-//   size 1: 0u (no bars), size 2: 2u, size 3: 4u ... size 6: 10u
-//   t_tc = t_bc - bar_len = (cy - ri) - (size-1)*2*UNIT
-//   b_bc = b_tc + bar_len = (cy + ri) + (size-1)*2*UNIT
+// 8 geometry — inner caps at cy ± (ro - HALF_UNIT) = cy ± 1.5u
+//   Distance between inner cap centers = 3u = 2*ro - ri
+//   Overlap = 2*ro - 3u = 1u = exactly one stroke width ✓
+//   Bar per half = (size-1) * 2 * UNIT
 // ============================================================
 
 #define LAYOUT_WIDE        0
@@ -307,23 +301,20 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 8: {
-      // Inner caps meet at cy ± ri so inner holes are coincident → 1u waist.
-      // Bar per half = (size-1) * 2 * UNIT.
-      // t_bc = cy - ri  (top ring inner/bottom cap)
-      // t_tc = t_bc - bar_len  (top ring outer/top cap)
-      // b_tc = cy + ri  (bottom ring inner/top cap)
-      // b_bc = b_tc + bar_len  (bottom ring outer/bottom cap)
+      // Inner caps at cy ± (ro - HALF_UNIT) = cy ± 1.5u
+      // Distance between inner cap centers = 3u → overlap = 4u - 3u = 1u ✓
+      // Bar per half = (size-1) * 2 * UNIT (0u at size 1, 2u at size 2, etc.)
       int bar = (size - 1) * 2 * UNIT;
-      int t_bc = cy - ri;
+      int t_bc = cy - (ro - HALF_UNIT);  // top ring inner cap = cy - 1.5u
       int t_tc = t_bc - bar;
-      int b_tc = cy + ri;
+      int b_tc = cy + (ro - HALF_UNIT);  // bottom ring inner cap = cy + 1.5u
       int b_bc = b_tc + bar;
-      fill_arc(ctx, cap_cx, t_tc, ro, ri, 270, 450); // top ring top cap
-      fill_arc(ctx, cap_cx, t_bc, ro, ri, 90, 270);  // top ring bottom cap
+      fill_arc(ctx, cap_cx, t_tc, ro, ri, 270, 450);
+      fill_arc(ctx, cap_cx, t_bc, ro, ri, 90, 270);
       VBAR(gx,   t_tc, t_bc);
       VBAR(gx_r, t_tc, t_bc);
-      fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450); // bottom ring top cap
-      fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);  // bottom ring bottom cap
+      fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
+      fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
       VBAR(gx,   b_tc, b_bc);
       VBAR(gx_r, b_tc, b_bc);
       break;
