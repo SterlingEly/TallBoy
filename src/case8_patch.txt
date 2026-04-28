@@ -1,0 +1,20 @@
+    case 8: {
+      // Inner caps at cy ± (ro - HALF_UNIT) = cy ± 1.5u
+      // Distance between inner cap centers = 3u = 2*ro - 1u
+      // → overlap = 1u (one stroke width) → clean 1u waist
+      // Bar per half = (size-1) * 2 * UNIT
+      int bar = (size - 1) * 2 * UNIT;
+      int t_bc = cy - (ro - HALF_UNIT);   // top ring inner cap (1.5u above cy)
+      int t_tc = t_bc - bar;
+      int b_tc = cy + (ro - HALF_UNIT);   // bottom ring inner cap (1.5u below cy)
+      int b_bc = b_tc + bar;
+      fill_arc(ctx, cap_cx, t_tc, ro, ri, 270, 450);
+      fill_arc(ctx, cap_cx, t_bc, ro, ri, 90, 270);
+      VBAR(gx,   t_tc, t_bc);
+      VBAR(gx_r, t_tc, t_bc);
+      fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
+      fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
+      VBAR(gx,   b_tc, b_bc);
+      VBAR(gx_r, b_tc, b_bc);
+      break;
+    }
