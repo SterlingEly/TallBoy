@@ -1,19 +1,29 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v3.3
+// TallBoy — main.c  v3.4
 //
 // RULE: circles ALWAYS fixed: ro=2u, ri=1u. Only straight spans stretch.
 //
-// Master ring positions (shared across 3,5,6,8,9):
+// Universal tail: tail = max(0, size-2) * UNIT
+//   sizes 1-2: 0u  size 3: 1u  size 4: 2u  size 5: 3u  size 6: 4u
+//
+// Master ring positions (shared 3,5,6,8,9):
 //   bar  = (size-1) * 2 * UNIT
 //   t_bc = cy - (ro - HALF_UNIT)   top ring inner cap
 //   t_tc = t_bc - bar              top ring outer cap
 //   b_tc = cy + (ro - HALF_UNIT)   bottom ring inner cap
 //   b_bc = b_tc + bar              bottom ring outer cap
 //
-// 2 top cap bar formula: bar2 = max(0, size-2) * UNIT
-//   size 1-2: 0 (no bars), size 3: 1u, size 4: 2u, size 5: 3u, size 6: 4u
+// Digit geometry:
+//   1: diagonal = draw_diagonal stroke (1u wide), clipped at left boundary
+//   2: top semi, symmetric tail VBARs, diagonal corner-to-corner, base
+//   3: right semi at all 4 ring caps + bars between all adjacent pairs
+//      + tail extensions above t_tc and below b_bc
+//   5: top HBAR, left full stroke+tail, right tail only, bottom ring right+tail
+//   6: top semi, left full+tail, right tail, bottom ring right+tail
+//   7: parallelogram diagonal (per x-column strips)
+//   9: full top ring, right full+tail, left top-ring only, bottom semi at bot_cy
 // ============================================================
 
 #define LAYOUT_WIDE        0
@@ -214,7 +224,7 @@ static void fill_arc(GContext *ctx, int cx, int cy, int ro, int ri, int a0, int 
                        DEG_TO_TRIGANGLE(a0), DEG_TO_TRIGANGLE(a1));
 }
 
-// Solid diagonal: scanline per row, no gaps
+// Scanline diagonal: 1px-high rows. Clean for strokes where dh >> dw.
 static void draw_diagonal(GContext *ctx, int x_start, int y_start,
                            int x_end, int y_end, int sw) {
   int dh = y_end - y_start;
@@ -223,6 +233,18 @@ static void draw_diagonal(GContext *ctx, int x_start, int y_start,
   for (int row = 0; row <= dh; row++) {
     int x = x_start + (row * dx / dh);
     graphics_fill_rect(ctx, GRect(x, y_start + row, sw, 1), 0, GCornerNone);
+  }
+}
+
+// Parallelogram diagonal: per x-column sw-tall strips. Clean for dw ~ dh (7 shape).
+static void draw_diagonal_para(GContext *ctx, int x_start, int y_start,
+                                int x_end, int y_end, int sw) {
+  int dw = x_start - x_end;  // going left, positive
+  int dh = y_end - y_start;  // going down, positive
+  if (dw <= 0 || dh <= 0) return;
+  for (int col = 0; col <= dw; col++) {
+    int y = y_start + (col * dh / dw);
+    graphics_fill_rect(ctx, GRect(x_start - col, y, sw, sw), 0, GCornerNone);
   }
 }
 
@@ -243,15 +265,15 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
   int top_y  = cy - h / 2;
   int bot_y  = cy + h / 2;
 
-  // 8-style ring positions
+  // 8-style ring cap positions
   int bar  = (size - 1) * 2 * UNIT;
   int t_bc = cy - (ro - HALF_UNIT);
   int t_tc = t_bc - bar;
   int b_tc = cy + (ro - HALF_UNIT);
   int b_bc = b_tc + bar;
 
-  // 2's top cap bar: 0 at sizes 1-2, then (size-2)*UNIT at sizes 3-6
-  int bar2 = (size > 2) ? (size - 2) * UNIT : 0;
+  // Universal tail: 0 at sizes 1-2, (size-2)*UNIT at sizes 3-6
+  int tail = (size > 2) ? (size - 2) * UNIT : 0;
 
 #define VBAR(x,y0,y1) if((y1)>(y0)) graphics_fill_rect(ctx,GRect((x),(y0),sw,(y1)-(y0)),0,GCornerNone)
 #define HBAR(y) graphics_fill_rect(ctx,GRect(gx,(y),GLYPH_W,sw),0,GCornerNone)
@@ -266,30 +288,35 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 1: {
+      // Base, centered stem, 1u-wide diagonal stroke from top of stem going up-left
       HBAR(bot_y - sw);
       int stem_x = gx + GLYPH_W / 2 - sw / 2;
       VBAR(stem_x, top_y, bot_y - sw);
-      for (int x = gx; x < stem_x; x++)
-        graphics_fill_rect(ctx, GRect(x, top_y, sw, stem_x - x), 0, GCornerNone);
+      draw_diagonal(ctx, stem_x, top_y, gx, top_y + (stem_x - gx), sw);
       break;
     }
 
     case 2:
-      // Top semi cap, bar2-length VBARs on both sides, diagonal, base
+      // Top semi, symmetric tail VBARs both sides, diagonal corner-to-corner, base
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);
-      VBAR(gx,   top_cy, top_cy + bar2);
-      VBAR(gx_r, top_cy, top_cy + bar2);
-      draw_diagonal(ctx, gx_r, top_cy + bar2, gx, bot_y - sw, sw);
+      VBAR(gx,   top_cy, top_cy + tail);
+      VBAR(gx_r, top_cy, top_cy + tail);
+      draw_diagonal(ctx, gx_r, top_cy + tail, gx, bot_y - sw, sw);
       HBAR(bot_y - sw);
       break;
 
     case 3:
-      fill_arc(ctx, cap_cx, t_tc, ro, ri, 0, 180);
-      VBAR(gx_r, t_tc, t_bc);
-      fill_arc(ctx, cap_cx, t_bc, ro, ri, 0, 180);
-      fill_arc(ctx, cap_cx, b_tc, ro, ri, 0, 180);
-      VBAR(gx_r, b_tc, b_bc);
-      fill_arc(ctx, cap_cx, b_bc, ro, ri, 0, 180);
+      // Right semi at all 4 ring cap positions + right bars between each adjacent pair
+      // + tail extensions above t_tc and below b_bc
+      VBAR(gx_r, t_tc - ro - tail, t_tc);          // tail above top outer cap
+      fill_arc(ctx, cap_cx, t_tc, ro, ri, 0, 180); // top outer cap
+      VBAR(gx_r, t_tc, t_bc);                       // bar: outer→inner top
+      fill_arc(ctx, cap_cx, t_bc, ro, ri, 0, 180); // top inner cap (8 middle top)
+      VBAR(gx_r, t_bc, b_tc);                       // bar: middle gap (8 "bite" on right)
+      fill_arc(ctx, cap_cx, b_tc, ro, ri, 0, 180); // bottom inner cap (8 middle bottom)
+      VBAR(gx_r, b_tc, b_bc);                       // bar: inner→outer bottom
+      fill_arc(ctx, cap_cx, b_bc, ro, ri, 0, 180); // bottom outer cap
+      VBAR(gx_r, b_bc, b_bc + ro + tail);           // tail below bottom outer cap
       break;
 
     case 4:
@@ -299,26 +326,29 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 5:
+      // Top HBAR + left full stroke+tail + right tail only + bottom ring right+tail
       HBAR(top_y);
-      VBAR(gx,   top_y + sw, b_bc);
-      VBAR(gx_r, top_y + sw, top_y + sw + bar);
+      VBAR(gx,   top_y + sw, b_bc + ro + tail);    // left: full height + tail past bottom cap
+      VBAR(gx_r, top_y + sw, top_y + sw + tail);   // right: tail length only
       fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
-      VBAR(gx_r, b_tc, b_bc);
+      VBAR(gx_r, b_tc, b_bc + ro + tail);           // bottom ring right bar + tail
       break;
 
     case 6:
+      // Top semi + left full+tail + right tail + bottom ring right+tail
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);
-      VBAR(gx,   top_cy, b_bc);
-      VBAR(gx_r, top_cy, top_cy + bar);
+      VBAR(gx,   top_cy, b_bc + ro + tail);         // left: full height + tail
+      VBAR(gx_r, top_cy, top_cy + tail);             // right: tail only
       fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
-      VBAR(gx_r, b_tc, b_bc);
+      VBAR(gx_r, b_tc, b_bc + ro + tail);            // bottom ring right bar + tail
       break;
 
     case 7:
+      // Top HBAR + solid parallelogram diagonal to full bottom of canvas
       HBAR(top_y);
-      draw_diagonal(ctx, gx_r, top_y + sw, gx, bot_y - sw, sw);
+      draw_diagonal_para(ctx, gx_r, top_y + sw, gx, bot_y, sw);
       break;
 
     case 8:
@@ -333,12 +363,12 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 9:
-      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 90, 270);
-      VBAR(gx_r, t_tc, bot_cy);
-      VBAR(gx,   bot_cy - bar, bot_cy);
+      // Full top ring + right bar full height+tail + left top-ring only + bottom semi
       fill_arc(ctx, cap_cx, t_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, t_bc, ro, ri, 90, 270);
-      VBAR(gx,   t_tc, t_bc);
+      VBAR(gx,   t_tc, t_bc);                        // left: top ring only
+      VBAR(gx_r, t_tc, bot_cy + ro + tail);           // right: full height + tail
+      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 90, 270); // bottom semi cap (0-style position)
       break;
 
     default: break;
