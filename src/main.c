@@ -1,7 +1,7 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v3.2
+// TallBoy — main.c  v3.3
 //
 // RULE: circles ALWAYS fixed: ro=2u, ri=1u. Only straight spans stretch.
 //
@@ -12,14 +12,8 @@
 //   b_tc = cy + (ro - HALF_UNIT)   bottom ring inner cap
 //   b_bc = b_tc + bar              bottom ring outer cap
 //
-// Corrections v3.2:
-//   1: diagonal drawn as filled trapezoid (strip per x-column), no bottom-cut
-//   2: top-semi + ONE right VBAR only + diagonal to (gx, bot_y-sw) + HBAR; no left VBAR, no bottom arc
-//   3: remove middle connecting bar — two separate right-C shapes with natural gap
-//   5: top HBAR + left long VBAR + right SHORT VBAR (bar length) + full bottom ring (right bar only, left side is main stroke)
-//   6: top-semi cap (270→450) same as 0 — NOT left-semi; left long VBAR; right short VBAR; full bottom ring
-//   7: solid diagonal drawn scanline-by-scanline (1px high rects) to eliminate gaps
-//   9: mirror of 6; bottom-semi cap (90→270); right long VBAR; left short VBAR; full top ring
+// 2 top cap bar formula: bar2 = max(0, size-2) * UNIT
+//   size 1-2: 0 (no bars), size 3: 1u, size 4: 2u, size 5: 3u, size 6: 4u
 // ============================================================
 
 #define LAYOUT_WIDE        0
@@ -220,13 +214,11 @@ static void fill_arc(GContext *ctx, int cx, int cy, int ro, int ri, int a0, int 
                        DEG_TO_TRIGANGLE(a0), DEG_TO_TRIGANGLE(a1));
 }
 
-// Solid diagonal stroke: scanline per y-row to eliminate gaps.
-// Draws from (x_start, y_start) to (x_end, y_end), stroke width sw.
-// x moves from x_start to x_end as y moves from y_start to y_end.
+// Solid diagonal: scanline per row, no gaps
 static void draw_diagonal(GContext *ctx, int x_start, int y_start,
                            int x_end, int y_end, int sw) {
   int dh = y_end - y_start;
-  int dx = x_end - x_start; // negative if going left
+  int dx = x_end - x_start;
   if (dh <= 0) return;
   for (int row = 0; row <= dh; row++) {
     int x = x_start + (row * dx / dh);
@@ -258,6 +250,9 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
   int b_tc = cy + (ro - HALF_UNIT);
   int b_bc = b_tc + bar;
 
+  // 2's top cap bar: 0 at sizes 1-2, then (size-2)*UNIT at sizes 3-6
+  int bar2 = (size > 2) ? (size - 2) * UNIT : 0;
+
 #define VBAR(x,y0,y1) if((y1)>(y0)) graphics_fill_rect(ctx,GRect((x),(y0),sw,(y1)-(y0)),0,GCornerNone)
 #define HBAR(y) graphics_fill_rect(ctx,GRect(gx,(y),GLYPH_W,sw),0,GCornerNone)
 
@@ -271,38 +266,30 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 1: {
-      // Base bar + centered stem + diagonal drawn as filled trapezoid
       HBAR(bot_y - sw);
       int stem_x = gx + GLYPH_W / 2 - sw / 2;
       VBAR(stem_x, top_y, bot_y - sw);
-      // Diagonal: for each x column from gx to stem_x-1,
-      // draw a vertical strip from top_y to top_y+(stem_x-x-1)
-      // This creates a clean left-bounded triangle with no bottom cut.
-      for (int x = gx; x < stem_x; x++) {
-        int col_h = (stem_x - x);  // height of this column
-        graphics_fill_rect(ctx, GRect(x, top_y, sw, col_h), 0, GCornerNone);
-      }
+      for (int x = gx; x < stem_x; x++)
+        graphics_fill_rect(ctx, GRect(x, top_y, sw, stem_x - x), 0, GCornerNone);
       break;
     }
 
     case 2:
-      // Top semi cap, ONE right VBAR (bar length), diagonal to bottom-left, HBAR
+      // Top semi cap, bar2-length VBARs on both sides, diagonal, base
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);
-      VBAR(gx_r, top_cy, top_cy + bar);
-      draw_diagonal(ctx, gx_r, top_cy + bar, gx, bot_y - sw, sw);
+      VBAR(gx,   top_cy, top_cy + bar2);
+      VBAR(gx_r, top_cy, top_cy + bar2);
+      draw_diagonal(ctx, gx_r, top_cy + bar2, gx, bot_y - sw, sw);
       HBAR(bot_y - sw);
       break;
 
     case 3:
-      // Two independent right-C shapes: top-semi + right bar + bottom-semi, natural gap between.
-      // No connecting bar between the two rings.
-      fill_arc(ctx, cap_cx, t_tc, ro, ri, 0, 180);    // top ring top cap (right semi)
+      fill_arc(ctx, cap_cx, t_tc, ro, ri, 0, 180);
       VBAR(gx_r, t_tc, t_bc);
-      fill_arc(ctx, cap_cx, t_bc, ro, ri, 0, 180);    // top ring bottom cap (right semi)
-      // natural gap from t_bc to b_tc
-      fill_arc(ctx, cap_cx, b_tc, ro, ri, 0, 180);    // bottom ring top cap (right semi)
+      fill_arc(ctx, cap_cx, t_bc, ro, ri, 0, 180);
+      fill_arc(ctx, cap_cx, b_tc, ro, ri, 0, 180);
       VBAR(gx_r, b_tc, b_bc);
-      fill_arc(ctx, cap_cx, b_bc, ro, ri, 0, 180);    // bottom ring bottom cap (right semi)
+      fill_arc(ctx, cap_cx, b_bc, ro, ri, 0, 180);
       break;
 
     case 4:
@@ -312,27 +299,24 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 5:
-      // Top HBAR + left long VBAR + right short VBAR (bar length) + full bottom ring (right bar only)
       HBAR(top_y);
-      VBAR(gx,   top_y + sw, b_bc);    // left stroke all the way down
-      VBAR(gx_r, top_y + sw, top_y + sw + bar);  // right stroke short (bar length)
+      VBAR(gx,   top_y + sw, b_bc);
+      VBAR(gx_r, top_y + sw, top_y + sw + bar);
       fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
-      VBAR(gx_r, b_tc, b_bc);          // right bar of bottom ring only (left covered by main stroke)
+      VBAR(gx_r, b_tc, b_bc);
       break;
 
     case 6:
-      // Top semi cap (same as 0) + left long VBAR + right short VBAR + full bottom ring
-      fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);  // top semi — opens downward
-      VBAR(gx,   top_cy, b_bc);         // left stroke full height
-      VBAR(gx_r, top_cy, top_cy + bar); // right stroke short (bar length)
+      fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);
+      VBAR(gx,   top_cy, b_bc);
+      VBAR(gx_r, top_cy, top_cy + bar);
       fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
       VBAR(gx_r, b_tc, b_bc);
       break;
 
     case 7:
-      // Top HBAR + solid diagonal from top-right to bottom-left
       HBAR(top_y);
       draw_diagonal(ctx, gx_r, top_y + sw, gx, bot_y - sw, sw);
       break;
@@ -349,10 +333,9 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 9:
-      // Bottom semi cap + right long VBAR + left short VBAR + full top ring
-      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 90, 270);   // bottom semi — opens upward
-      VBAR(gx_r, t_tc, bot_cy);         // right stroke full height
-      VBAR(gx,   bot_cy - bar, bot_cy); // left stroke short (bar length)
+      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 90, 270);
+      VBAR(gx_r, t_tc, bot_cy);
+      VBAR(gx,   bot_cy - bar, bot_cy);
       fill_arc(ctx, cap_cx, t_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, t_bc, ro, ri, 90, 270);
       VBAR(gx,   t_tc, t_bc);
