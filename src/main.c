@@ -10,11 +10,11 @@
 //
 // v3.8 fixes:
 //   1: stem at gx_r (right edge), diagonal spans full 3u glyph width
-//   3: bottom left bar anchored to top of bottom ring arc (b_tc-ro-tail → b_tc-ro)
-//      NUB at (gx+sw, cy-HALF_UNIT) — 2nd slot, centered on cy
-//   5: add bottom-left bar (b_tc-ro-tail → b_tc-ro), matching right tail
+//   3: bottom left bar anchored to top of bottom ring arc (b_tc-ro-tail to b_tc-ro)
+//      NUB at (gx+sw, cy-HALF_UNIT) -- 2nd slot, centered on cy
+//   5: add bottom-left bar (b_tc-ro-tail to b_tc-ro), matching right tail
 //   6: right bar from bottom of top cap arc (top_cy+ro) to top of bottom ring arc (b_tc-ro)
-//   9: left tail moves to anchor at top of bottom cap arc (bot_cy-ro-tail → bot_cy-ro)
+//   9: left tail moves to anchor at top of bottom cap arc (bot_cy-ro-tail to bot_cy-ro)
 // ============================================================
 
 #define LAYOUT_WIDE        0
@@ -110,7 +110,7 @@ static bool       s_digit_pending = false;
 static int        s_pending_hour = 0, s_pending_minute = 0;
 static int        s_battery_pct = 100;
 static bool       s_charging = false, s_bt_connected = true;
-static int        s_steps = 0, s_distance_m = 0, s_heart_rate = 0;
+static int        s_steps = 0, s_distance_m = 0;
 static char       s_weather_temp[8] = "", s_weather_desc[32] = "";
 static GBitmap   *s_bitmaps[10][6];
 static GBitmap   *s_colon_bm[6];
@@ -257,10 +257,9 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
 
     case 1: {
       // Stem at RIGHT edge (gx_r), base bar, diagonal spans full 3u glyph width
-      // Diagonal: from (gx_r, top_y) going down-left to (gx, top_y + GLYPH_W - sw)
       HBAR(bot_y - sw);
       VBAR(gx_r, top_y, bot_y - sw);
-      int diag_h = GLYPH_W - sw;  // = 3u = full horizontal span
+      int diag_h = GLYPH_W - sw;
       if (diag_h > 0) {
         GPoint pts[4] = {
           {gx_r,      top_y},
@@ -277,7 +276,6 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
     }
 
     case 2: {
-      // Top semi + symmetric tail VBARs + GPath diagonal + base
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);
       VBAR(gx,   top_cy, top_cy + tail);
       VBAR(gx_r, top_cy, top_cy + tail);
@@ -300,18 +298,18 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
 
     case 3: {
       // Top circle
-      fill_arc(ctx, cap_cx, t_tc, ro, ri, 270, 450);   // top cap (full)
-      VBAR(gx,   t_tc, t_tc + tail);                    // left bar: tail from top
-      VBAR(gx_r, t_tc, t_bc);                           // right bar: full height
-      fill_arc(ctx, cap_cx, t_bc, ro, ri, 90, 180);     // bottom cap: right quarter (90→180)
-      NUB(gx, t_bc);                                    // nub: bridge gap at inner-left
+      fill_arc(ctx, cap_cx, t_tc, ro, ri, 270, 450);
+      VBAR(gx,   t_tc, t_tc + tail);
+      VBAR(gx_r, t_tc, t_bc);
+      fill_arc(ctx, cap_cx, t_bc, ro, ri, 90, 180);
+      NUB(gx, t_bc);
       // Bottom circle
-      fill_arc(ctx, cap_cx, b_tc, ro, ri, 360, 450);    // top cap: left quarter (360→450)
-      NUB(gx, b_tc - sw);                               // nub: bridge gap at inner-left top
-      NUB(gx + sw, cy - HALF_UNIT);                     // center nub: 2nd slot, centered on cy
-      VBAR(gx,   b_tc - ro - tail, b_tc - ro);          // left bar: tail anchored to top of b_tc arc
-      VBAR(gx_r, b_tc, b_bc);                           // right bar: full height
-      fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);     // bottom cap (full)
+      fill_arc(ctx, cap_cx, b_tc, ro, ri, 360, 450);
+      NUB(gx, b_tc - sw);
+      NUB(gx + sw, cy - HALF_UNIT);
+      VBAR(gx,   b_tc - ro - tail, b_tc - ro);
+      VBAR(gx_r, b_tc, b_bc);
+      fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
       break;
     }
 
@@ -322,28 +320,22 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 5:
-      // Top HBAR + left stroke to top of bottom ring arc
-      // + right tail anchored above top of bottom ring arc
-      // + bottom-left tail (mirror of right tail)
-      // + full bottom ring right bar between arc edges
       HBAR(top_y);
-      VBAR(gx,   top_y + sw, b_tc - ro);          // left: down to top of bottom ring arc
-      VBAR(gx_r, b_tc - ro - tail, b_tc - ro);    // right tail: above top of bottom ring
-      VBAR(gx,   b_tc - ro - tail, b_tc - ro);    // left tail: matching right (NEW)
+      VBAR(gx,   top_y + sw, b_tc - ro);
+      VBAR(gx_r, b_tc - ro - tail, b_tc - ro);
+      VBAR(gx,   b_tc - ro - tail, b_tc - ro);
       fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
-      VBAR(gx_r, b_tc + ro, b_bc - ro);           // bottom ring right bar
+      VBAR(gx_r, b_tc + ro, b_bc - ro);
       break;
 
     case 6:
-      // Top semi + right bar from bottom of top cap to top of bottom ring arc
-      // + left full stroke + bottom ring right bar between arc edges
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);
-      VBAR(gx_r, top_cy + ro, b_tc - ro);         // right: bottom of top cap → top of bottom ring
-      VBAR(gx,   top_cy, b_bc);                   // left: full height
+      VBAR(gx_r, top_cy + ro, b_tc - ro);
+      VBAR(gx,   top_cy, b_bc);
       fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
-      VBAR(gx_r, b_tc + ro, b_bc - ro);           // bottom ring right bar between arc edges
+      VBAR(gx_r, b_tc + ro, b_bc - ro);
       break;
 
     case 7: {
@@ -373,15 +365,12 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 9:
-      // Full top ring + right bar to bot_cy
-      // + left tail anchored just above top of bottom cap arc (bot_cy-ro-tail → bot_cy-ro)
-      // + bottom semi cap at bot_cy
       fill_arc(ctx, cap_cx, t_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, t_bc, ro, ri, 90, 270);
-      VBAR(gx,   t_tc, t_bc);                          // left: top ring only
-      VBAR(gx,   bot_cy - ro - tail, bot_cy - ro);     // left tail: above bottom cap arc
-      VBAR(gx_r, t_tc, bot_cy);                        // right: full height to cap center
-      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 90, 270);  // bottom semi cap
+      VBAR(gx,   t_tc, t_bc);
+      VBAR(gx,   bot_cy - ro - tail, bot_cy - ro);
+      VBAR(gx_r, t_tc, bot_cy);
+      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 90, 270);
       break;
 
     default: break;
@@ -630,12 +619,6 @@ static void health_handler(HealthEventType event, void *context) {
     mask=health_service_metric_accessible(HealthMetricWalkedDistanceMeters,time_start_of_today(),time(NULL));
     s_distance_m=(mask&HealthServiceAccessibilityMaskAvailable)?(int)health_service_sum_today(HealthMetricWalkedDistanceMeters):0;
   }
-#if defined(PBL_PLATFORM_EMERY)||defined(PBL_PLATFORM_DIORITE)
-  if(event==HealthEventHeartRateUpdate){
-    HealthServiceAccessibilityMask mask=health_service_metric_accessible(HealthMetricHeartRateBPM,time(NULL),time(NULL)+1);
-    s_heart_rate=(mask&HealthServiceAccessibilityMaskAvailable)?(int)health_service_peek_current_value(HealthMetricHeartRateBPM):0;
-  }
-#endif
   layer_mark_dirty(s_canvas_layer);
 }
 #endif
@@ -688,7 +671,8 @@ static void init(void) {
 
 static void deinit(void) {
   tick_timer_service_unsubscribe(); battery_state_service_unsubscribe(); bluetooth_connection_service_unsubscribe();
-#if defined(PBL_HEALTH)\n  health_service_events_unsubscribe();
+#if defined(PBL_HEALTH)
+  health_service_events_unsubscribe();
 #endif
   window_destroy(s_window);
 }
