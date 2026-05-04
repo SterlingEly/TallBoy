@@ -1,24 +1,19 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.11
+// TallBoy -- main.c  v3.12
 //
 // RULE: circles ALWAYS fixed: ro=2u, ri=1u. Only straight spans stretch.
-//
 // Universal tail: tail = max(0, size-2) * UNIT
 //
-// KEY INSIGHT: for vertical bars between ring caps, use center-to-center
-// (same as 8) not arc-edge-to-arc-edge. This is consistent and correct.
-//   Lower ring right bar: VBAR(gx_r, b_tc, b_bc)  -- same as 8
-//
-// v3.11 fixes:
-//   1: cap right edge at stem_x+sw (overlaps stem), extends full diag_h to left
-//   2: diagonal sw+2 wide, no offset
-//   3: lower right bar = VBAR(gx_r, b_tc, b_bc); left tail anchored to b_bc-ro
-//   5: lower right bar = VBAR(gx_r, b_tc, b_bc); add left tail below b_bc+ro
-//   6: top-right bar starts at top_cy-ro (top of cap arc); lower right = VBAR(gx_r, b_tc, b_bc)
-//   7: sw+2 wide, no offset, ends at bot_y
-//   9: left tail below cap bottom edge: VBAR(gx, bot_cy+ro, bot_cy+ro+tail)
+// v3.12 batch-8 fixes (surgical coordinate changes only):
+//   1: upper cap points up 1u, lower cap points up 0.5u
+//   2: left pts move -1px, right pts move -2px
+//   3: remove center NUB; left lower bar down 2u -> VBAR(gx, b_bc-tail, b_bc)
+//   5: left bar shortened -> VBAR(gx, top_y+sw, b_tc-ro)
+//   6: top right bar down -> VBAR(gx_r, top_cy+ro, top_cy+ro+tail)
+//   7: right pts move -1px -> gx_r+sw+1
+//   9: left tail moves up -> VBAR(gx, bot_cy-ro-tail, bot_cy-ro)
 // ============================================================
 
 #define LAYOUT_WIDE        0
@@ -115,6 +110,7 @@ static int        s_pending_hour = 0, s_pending_minute = 0;
 static int        s_battery_pct = 100;
 static bool       s_charging = false, s_bt_connected = true;
 static int        s_steps = 0, s_distance_m = 0;
+static int        s_steps_avg = -1;  // historical avg steps to now (-1 = no data)
 static char       s_weather_temp[8] = "", s_weather_desc[32] = "";
 static GBitmap   *s_bitmaps[10][6];
 static GBitmap   *s_colon_bm[6];
@@ -210,6 +206,50 @@ static void draw_digits(GContext *ctx, int h_tens, int h_ones, int m_tens, int m
 }
 
 // ============================================================
+// STEP PACE BACKGROUND COLOR (color platforms only)
+// ============================================================
+// Spectrum: no-data=black, far-behind=red, behind=yellow,
+//           on-pace=green, ahead=cyan, way-ahead=white
+#if defined(PBL_COLOR)
+static GColor prv_pace_color(int steps_today, int steps_avg) {
+  if (steps_avg <= 0) return GColorBlack;  // no history yet
+  // pct = (today / avg) * 100
+  int pct = (steps_today * 100) / steps_avg;
+  if (pct < 60)  return GColorRed;
+  if (pct < 80)  return GColorOrange;
+  if (pct < 90)  return GColorYellow;
+  if (pct <= 110) return GColorGreen;
+  if (pct <= 130) return GColorCyan;
+  if (pct <= 160) return GColorBlue;
+  return GColorWhite;
+}
+#endif
+
+// Calculate average steps accumulated to current minute-of-day over past 7 days.
+// Returns -1 if no history available.
+#if defined(PBL_HEALTH)
+static int prv_calc_steps_avg(void) {
+  time_t now = time(NULL);
+  struct tm *t = localtime(&now);
+  int elapsed_min = t->tm_hour * 60 + t->tm_min;
+  if (elapsed_min < 2) return -1;  // grace period
+
+  int total = 0, day_count = 0;
+  for (int day = 1; day <= 7; day++) {
+    time_t day_start = time_start_of_today() - (time_t)day * SECONDS_PER_DAY;
+    HealthMinuteData buf[elapsed_min];
+    uint32_t n = health_service_get_minute_history(buf, (uint32_t)elapsed_min, &day_start, NULL);
+    if (n == 0) continue;
+    int day_steps = 0;
+    for (uint32_t i = 0; i < n; i++)
+      if (!buf[i].is_invalid) day_steps += buf[i].steps;
+    if (day_steps > 0) { total += day_steps; day_count++; }
+  }
+  return day_count > 0 ? total / day_count : -1;
+}
+#endif
+
+// ============================================================
 // VECTOR DIGIT DRAWING
 // ============================================================
 
@@ -236,14 +276,11 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
   int top_y  = cy - h / 2;
   int bot_y  = cy + h / 2;
 
-  // 8-style ring cap positions
   int bar  = (size - 1) * 2 * UNIT;
   int t_bc = cy - (ro - HALF_UNIT);
   int t_tc = t_bc - bar;
   int b_tc = cy + (ro - HALF_UNIT);
   int b_bc = b_tc + bar;
-
-  // Universal tail
   int tail = (size > 2) ? (size - 2) * UNIT : 0;
 
 #define VBAR(x,y0,y1) if((y1)>(y0)) graphics_fill_rect(ctx,GRect((x),(y0),sw,(y1)-(y0)),0,GCornerNone)
@@ -260,20 +297,18 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 1: {
-      // Base + centered stem + cap parallelogram
-      // Cap right edge at stem_x+sw (right side of stem), goes down-left to gx
-      // This makes the cap visually wider and properly 1u thick
+      // Upper cap pts move up 1u; lower cap pts move up HALF_UNIT
       HBAR(bot_y - sw);
       int stem_x = gx + GLYPH_W / 2 - sw / 2;
       VBAR(stem_x, top_y, bot_y - sw);
-      int cap_right = stem_x + sw;  // right edge of cap = right side of stem
-      int diag_h = cap_right - gx;  // horizontal span from right edge to left boundary
+      int cap_right = stem_x + sw;
+      int diag_h = cap_right - gx;
       if (diag_h > 0) {
         GPoint pts[4] = {
-          {cap_right,      top_y},
-          {cap_right,      top_y + sw},
-          {gx,             top_y + sw + diag_h},
-          {gx,             top_y + diag_h},
+          {cap_right, top_y - sw},                    // upper right: up 1u
+          {cap_right, top_y + sw - HALF_UNIT},         // lower right: up 0.5u
+          {gx,        top_y + sw + diag_h - HALF_UNIT},// lower left:  up 0.5u
+          {gx,        top_y + diag_h - sw},            // upper left:  up 1u
         };
         GPathInfo info = { .num_points = 4, .points = pts };
         GPath *path = gpath_create(&info);
@@ -284,17 +319,17 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
     }
 
     case 2: {
-      // Top semi + symmetric tail VBARs + diagonal (sw+2 wide) + base
+      // Left pts -1px, right pts -2px
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);
       VBAR(gx,   top_cy, top_cy + tail);
       VBAR(gx_r, top_cy, top_cy + tail);
       int dy = (bot_y - sw) - (top_cy + tail);
       if (dy > 0) {
         GPoint pts[4] = {
-          {gx_r,          top_cy + tail},
-          {gx_r + sw + 2, top_cy + tail},
-          {gx  + sw + 2,  bot_y - sw},
-          {gx,            bot_y - sw},
+          {gx_r - 2,          top_cy + tail},
+          {gx_r - 2 + sw + 2, top_cy + tail},
+          {gx  - 1 + sw + 2,  bot_y - sw},
+          {gx  - 1,           bot_y - sw},
         };
         GPathInfo info = { .num_points = 4, .points = pts };
         GPath *path = gpath_create(&info);
@@ -306,17 +341,16 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
     }
 
     case 3: {
-      // Top circle (same as before -- working)
+      // Top circle (unchanged)
       fill_arc(ctx, cap_cx, t_tc, ro, ri, 270, 450);
       VBAR(gx,   t_tc, t_tc + tail);
       VBAR(gx_r, t_tc, t_bc);
       fill_arc(ctx, cap_cx, t_bc, ro, ri, 90, 180);
       NUB(gx, t_bc);
-      // Bottom circle
+      // Bottom circle: removed center NUB; left bar moved down 2u
       fill_arc(ctx, cap_cx, b_tc, ro, ri, 360, 450);
-      NUB(gx + sw, cy - HALF_UNIT);
-      VBAR(gx,   b_bc - ro - tail, b_bc - ro);  // left tail anchored to top of bottom cap
-      VBAR(gx_r, b_tc, b_bc);                    // right bar: center-to-center same as 8
+      VBAR(gx,   b_bc - tail, b_bc);    // left bar: down 2u from v3.11
+      VBAR(gx_r, b_tc, b_bc);
       fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
       break;
     }
@@ -328,35 +362,32 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 5:
-      // Top HBAR + left bar to b_tc+ro
-      // Bottom ring: right bar center-to-center (same as 8)
-      // Left tail below bottom of bottom cap
+      // Left bar ends at b_tc-ro (not b_tc+ro)
       HBAR(top_y);
-      VBAR(gx,   top_y + sw, b_tc + ro);
+      VBAR(gx,   top_y + sw, b_tc - ro);
       fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
-      VBAR(gx_r, b_tc, b_bc);                    // right bar: center-to-center
-      VBAR(gx,   b_bc + ro, b_bc + ro + tail);   // left tail below bottom of bottom cap
+      VBAR(gx_r, b_tc, b_bc);
+      VBAR(gx,   b_bc + ro, b_bc + ro + tail);
       break;
 
     case 6:
-      // Top semi + right tail from top of cap (top_cy-ro) down by tail
-      // Left full + bottom ring right bar center-to-center
+      // Top right bar: top now at top_cy+ro (bottom of cap arc)
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);
-      VBAR(gx_r, top_cy - ro, top_cy - ro + tail); // tail from TOP of cap arc
+      VBAR(gx_r, top_cy + ro, top_cy + ro + tail);
       VBAR(gx,   top_cy, b_bc);
       fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
-      VBAR(gx_r, b_tc, b_bc);                       // right bar: center-to-center
+      VBAR(gx_r, b_tc, b_bc);
       break;
 
     case 7: {
-      // Top HBAR + parallelogram diagonal (sw+2 wide, no offset, ends at bot_y)
+      // Right pts move -1px: gx_r+sw+1 instead of gx_r+sw+2
       HBAR(top_y);
       GPoint pts[4] = {
         {gx_r,          top_y + sw},
-        {gx_r + sw + 2, top_y + sw},
-        {gx  + sw + 2,  bot_y},
+        {gx_r + sw + 1, top_y + sw},
+        {gx  + sw + 1,  bot_y},
         {gx,            bot_y},
       };
       GPathInfo info = { .num_points = 4, .points = pts };
@@ -378,12 +409,11 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 9:
-      // Full top ring + right bar to bot_cy
-      // Left tail BELOW bottom of bottom cap arc: bot_cy+ro to bot_cy+ro+tail
+      // Left tail: bottom at bot_cy-ro (top of cap arc), hangs up by tail
       fill_arc(ctx, cap_cx, t_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, t_bc, ro, ri, 90, 270);
       VBAR(gx,   t_tc, t_bc);
-      VBAR(gx,   bot_cy + ro, bot_cy + ro + tail);  // tail below bottom of cap arc
+      VBAR(gx,   bot_cy - ro - tail, bot_cy - ro);
       VBAR(gx_r, t_tc, bot_cy);
       fill_arc(ctx, cap_cx, bot_cy, ro, ri, 90, 270);
       break;
@@ -465,6 +495,7 @@ static int build_info_lines_short(char lines[][32], int max_lines, struct tm *t)
     if (strcmp(i18n_get_system_locale(),"en_US")==0) { int mx=(s_distance_m*10)/1609; snprintf(lines[n++],32,"%d.%d mi",mx/10,mx%10); }
     else { int kx=(s_distance_m*10)/1000; snprintf(lines[n++],32,"%d.%d km",kx/10,kx%10); }
   }
+  if (n < max_lines && s_steps_avg > 0) snprintf(lines[n++], 32, "avg %d", s_steps_avg);
 #endif
   if (n < max_lines) snprintf(lines[n++], 32, "bat %d%%", s_battery_pct);
   return n;
@@ -499,7 +530,15 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   int ub_top   = ub.origin.y, ub_h = ub.size.h;
   int center_y = ub_top + ub_h / 2;
 
+  // Background: pace color on color platforms when health data available
+#if defined(PBL_COLOR) && defined(PBL_HEALTH)
+  GColor bg = prv_pace_color(s_steps, s_steps_avg);
+  // Keep bg dim so white digits remain readable:
+  // only use hue if meaningful, else black
+  graphics_context_set_fill_color(ctx, bg);
+#else
   graphics_context_set_fill_color(ctx, s_bg);
+#endif
   graphics_fill_rect(ctx, layer_get_bounds(layer), 0, GCornerNone);
 
   int h_tens, h_ones, m_tens, m_ones, size;
@@ -620,6 +659,9 @@ static void tick_handler(struct tm *t, TimeUnits units) {
   if(s_phase==PHASE_DONE&&sq){s_pending_hour=t->tm_hour;s_pending_minute=t->tm_min;s_digit_pending=true;s_phase=PHASE_SQUISH;s_going_down=true;schedule(ANIM_FAST_MS);}
   else if(s_phase==PHASE_SQUISH){s_pending_hour=t->tm_hour;s_pending_minute=t->tm_min;s_digit_pending=true;}
   else{s_hour=t->tm_hour;s_minute=t->tm_min;layer_mark_dirty(s_canvas_layer);}
+#if defined(PBL_HEALTH)
+  s_steps_avg = prv_calc_steps_avg();
+#endif
 }
 
 static void battery_handler(BatteryChargeState state){s_battery_pct=state.charge_percent;s_charging=state.is_charging;layer_mark_dirty(s_canvas_layer);}
@@ -680,6 +722,7 @@ static void init(void) {
   bluetooth_connection_service_subscribe(bt_handler); s_bt_connected=bluetooth_connection_service_peek();
 #if defined(PBL_HEALTH)
   health_service_events_subscribe(health_handler,NULL); health_handler(HealthEventSignificantUpdate,NULL);
+  s_steps_avg = prv_calc_steps_avg();
 #endif
   app_message_register_inbox_received(inbox_received); app_message_open(256,64);
 }
