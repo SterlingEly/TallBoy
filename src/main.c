@@ -1,22 +1,24 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.10
+// TallBoy -- main.c  v3.11
 //
 // RULE: circles ALWAYS fixed: ro=2u, ri=1u. Only straight spans stretch.
 //
 // Universal tail: tail = max(0, size-2) * UNIT
-//   sizes 1-2: 0u  size 3: 1u  size 4: 2u  size 5: 3u  size 6: 4u
 //
-// v3.10 fixes per tb-06 feedback:
-//   1: cap is a parallelogram with VERTICAL right edge at stem_x (left side of stem)
-//      going down-left. Both left and right edges vertical. Left clips at gx.
-//   2: diagonal back to sw wide (no +2), shifted 1px left (start gx_r-1, end gx-1)
-//   3: lower right bar fixed to b_tc+ro -> b_bc-ro (inner arc span only)
-//   5: lower right bar fixed to b_tc+ro -> b_bc-ro, plus right tail below b_bc-ro
-//   6: lower right bar fixed to b_tc+ro -> b_bc-ro
-//   7: back to sw wide (remove +1), shift left 1px (gx_r-1 to gx-1), end at bot_y-sw
-//   9: left tail flipped to hang ABOVE bot_cy-ro: VBAR(gx, bot_cy-ro-tail, bot_cy-ro)
+// KEY INSIGHT: for vertical bars between ring caps, use center-to-center
+// (same as 8) not arc-edge-to-arc-edge. This is consistent and correct.
+//   Lower ring right bar: VBAR(gx_r, b_tc, b_bc)  -- same as 8
+//
+// v3.11 fixes:
+//   1: cap right edge at stem_x+sw (overlaps stem), extends full diag_h to left
+//   2: diagonal sw+2 wide, no offset
+//   3: lower right bar = VBAR(gx_r, b_tc, b_bc); left tail anchored to b_bc-ro
+//   5: lower right bar = VBAR(gx_r, b_tc, b_bc); add left tail below b_bc+ro
+//   6: top-right bar starts at top_cy-ro (top of cap arc); lower right = VBAR(gx_r, b_tc, b_bc)
+//   7: sw+2 wide, no offset, ends at bot_y
+//   9: left tail below cap bottom edge: VBAR(gx, bot_cy+ro, bot_cy+ro+tail)
 // ============================================================
 
 #define LAYOUT_WIDE        0
@@ -258,21 +260,20 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 1: {
-      // Base bar + centered stem + cap parallelogram
-      // Cap: right edge = LEFT side of stem (stem_x), goes down-left to gx.
-      // Both left and right edges of cap are vertical. Diagonal top and bottom edges.
-      // Points: top-right=(stem_x, top_y), bottom-right=(stem_x, top_y+sw),
-      //         bottom-left=(gx, top_y+sw+(stem_x-gx)), top-left=(gx, top_y+(stem_x-gx))
+      // Base + centered stem + cap parallelogram
+      // Cap right edge at stem_x+sw (right side of stem), goes down-left to gx
+      // This makes the cap visually wider and properly 1u thick
       HBAR(bot_y - sw);
       int stem_x = gx + GLYPH_W / 2 - sw / 2;
       VBAR(stem_x, top_y, bot_y - sw);
-      int diag_h = stem_x - gx;
+      int cap_right = stem_x + sw;  // right edge of cap = right side of stem
+      int diag_h = cap_right - gx;  // horizontal span from right edge to left boundary
       if (diag_h > 0) {
         GPoint pts[4] = {
-          {stem_x, top_y},
-          {stem_x, top_y + sw},
-          {gx,     top_y + sw + diag_h},
-          {gx,     top_y + diag_h},
+          {cap_right,      top_y},
+          {cap_right,      top_y + sw},
+          {gx,             top_y + sw + diag_h},
+          {gx,             top_y + diag_h},
         };
         GPathInfo info = { .num_points = 4, .points = pts };
         GPath *path = gpath_create(&info);
@@ -283,17 +284,17 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
     }
 
     case 2: {
-      // Top semi + symmetric tail VBARs + diagonal (sw wide, shifted 1px left) + base
+      // Top semi + symmetric tail VBARs + diagonal (sw+2 wide) + base
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);
       VBAR(gx,   top_cy, top_cy + tail);
       VBAR(gx_r, top_cy, top_cy + tail);
       int dy = (bot_y - sw) - (top_cy + tail);
       if (dy > 0) {
         GPoint pts[4] = {
-          {gx_r - 1,      top_cy + tail},
-          {gx_r - 1 + sw, top_cy + tail},
-          {gx  - 1 + sw,  bot_y - sw},
-          {gx  - 1,       bot_y - sw},
+          {gx_r,          top_cy + tail},
+          {gx_r + sw + 2, top_cy + tail},
+          {gx  + sw + 2,  bot_y - sw},
+          {gx,            bot_y - sw},
         };
         GPathInfo info = { .num_points = 4, .points = pts };
         GPath *path = gpath_create(&info);
@@ -305,7 +306,7 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
     }
 
     case 3: {
-      // Top circle
+      // Top circle (same as before -- working)
       fill_arc(ctx, cap_cx, t_tc, ro, ri, 270, 450);
       VBAR(gx,   t_tc, t_tc + tail);
       VBAR(gx_r, t_tc, t_bc);
@@ -314,8 +315,8 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       // Bottom circle
       fill_arc(ctx, cap_cx, b_tc, ro, ri, 360, 450);
       NUB(gx + sw, cy - HALF_UNIT);
-      VBAR(gx,   b_tc - ro - tail, b_tc - ro);
-      VBAR(gx_r, b_tc + ro, b_bc - ro);            // inner arc span only
+      VBAR(gx,   b_bc - ro - tail, b_bc - ro);  // left tail anchored to top of bottom cap
+      VBAR(gx_r, b_tc, b_bc);                    // right bar: center-to-center same as 8
       fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
       break;
     }
@@ -327,33 +328,36 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 5:
-      // Top HBAR + left bar to b_tc+ro + bottom ring (inner arc span) + right tail
+      // Top HBAR + left bar to b_tc+ro
+      // Bottom ring: right bar center-to-center (same as 8)
+      // Left tail below bottom of bottom cap
       HBAR(top_y);
       VBAR(gx,   top_y + sw, b_tc + ro);
       fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
-      VBAR(gx_r, b_tc + ro, b_bc - ro);            // inner arc span
-      VBAR(gx_r, b_bc - ro, b_bc - ro + tail);     // tail below inner bottom arc edge
+      VBAR(gx_r, b_tc, b_bc);                    // right bar: center-to-center
+      VBAR(gx,   b_bc + ro, b_bc + ro + tail);   // left tail below bottom of bottom cap
       break;
 
     case 6:
-      // Top semi + short right tail from top_cy+ro + left full + bottom ring inner arc span
+      // Top semi + right tail from top of cap (top_cy-ro) down by tail
+      // Left full + bottom ring right bar center-to-center
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);
-      VBAR(gx_r, top_cy + ro, top_cy + ro + tail);
+      VBAR(gx_r, top_cy - ro, top_cy - ro + tail); // tail from TOP of cap arc
       VBAR(gx,   top_cy, b_bc);
       fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
-      VBAR(gx_r, b_tc + ro, b_bc - ro);            // inner arc span only
+      VBAR(gx_r, b_tc, b_bc);                       // right bar: center-to-center
       break;
 
     case 7: {
-      // Top HBAR + parallelogram diagonal (sw wide, shifted 1px left, ends at bot_y-sw)
+      // Top HBAR + parallelogram diagonal (sw+2 wide, no offset, ends at bot_y)
       HBAR(top_y);
       GPoint pts[4] = {
-        {gx_r - 1,      top_y + sw},
-        {gx_r - 1 + sw, top_y + sw},
-        {gx  - 1 + sw,  bot_y - sw},
-        {gx  - 1,       bot_y - sw},
+        {gx_r,          top_y + sw},
+        {gx_r + sw + 2, top_y + sw},
+        {gx  + sw + 2,  bot_y},
+        {gx,            bot_y},
       };
       GPathInfo info = { .num_points = 4, .points = pts };
       GPath *path = gpath_create(&info);
@@ -374,11 +378,12 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 9:
-      // Full top ring + right bar to bot_cy + left tail ABOVE bot_cy-ro + bottom semi
+      // Full top ring + right bar to bot_cy
+      // Left tail BELOW bottom of bottom cap arc: bot_cy+ro to bot_cy+ro+tail
       fill_arc(ctx, cap_cx, t_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, t_bc, ro, ri, 90, 270);
       VBAR(gx,   t_tc, t_bc);
-      VBAR(gx,   bot_cy - ro - tail, bot_cy - ro);  // tail hangs above top of lower cap
+      VBAR(gx,   bot_cy + ro, bot_cy + ro + tail);  // tail below bottom of cap arc
       VBAR(gx_r, t_tc, bot_cy);
       fill_arc(ctx, cap_cx, bot_cy, ro, ri, 90, 270);
       break;
