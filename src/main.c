@@ -1,20 +1,27 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v3.8
+// TallBoy -- main.c  v3.9
 //
 // RULE: circles ALWAYS fixed: ro=2u, ri=1u. Only straight spans stretch.
 //
 // Universal tail: tail = max(0, size-2) * UNIT
 //   sizes 1-2: 0u  size 3: 1u  size 4: 2u  size 5: 3u  size 6: 4u
 //
-// v3.8 fixes:
-//   1: stem at gx_r (right edge), diagonal spans full 3u glyph width
-//   3: bottom left bar anchored to top of bottom ring arc (b_tc-ro-tail to b_tc-ro)
-//      NUB at (gx+sw, cy-HALF_UNIT) -- 2nd slot, centered on cy
-//   5: add bottom-left bar (b_tc-ro-tail to b_tc-ro), matching right tail
-//   6: right bar from bottom of top cap arc (top_cy+ro) to top of bottom ring arc (b_tc-ro)
-//   9: left tail moves to anchor at top of bottom cap arc (bot_cy-ro-tail to bot_cy-ro)
+// Arc edge positions:
+//   cap top edge    = cap_cy - ro
+//   cap bottom edge = cap_cy + ro
+//   ring inner cap bottom edge = t_bc + ro
+//   ring inner cap top edge    = b_tc - ro
+//
+// v3.9 changes per tb-05 feedback:
+//   1: stem centered again; diagonal goes LEFT from stem top
+//   2: diagonal +2px wider (sw+2)
+//   3: remove lower NUB (gx, b_tc-sw); keep center nub
+//   5: remove top-right bar; extend left bar to b_tc+ro; bottom-right bar b_tc-ro to b_bc+ro
+//   6: top-right bar = tail-length anchored at top_cy+ro; bottom-right bar b_tc-ro to b_bc+ro
+//   7: diagonal +1px wider (sw+1)
+//   9: left tail top edge at bot_cy-ro (top of lower cap arc), extends down by tail
 // ============================================================
 
 #define LAYOUT_WIDE        0
@@ -256,16 +263,18 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 1: {
-      // Stem at RIGHT edge (gx_r), base bar, diagonal spans full 3u glyph width
+      // Base bar + CENTERED stem + diagonal from stem top going left+down
+      // Diagonal clips naturally at left boundary of glyph (gx)
       HBAR(bot_y - sw);
-      VBAR(gx_r, top_y, bot_y - sw);
-      int diag_h = GLYPH_W - sw;
+      int stem_x = gx + GLYPH_W / 2 - sw / 2;
+      VBAR(stem_x, top_y, bot_y - sw);
+      int diag_h = stem_x - gx;  // 45-deg: horizontal span = vertical span
       if (diag_h > 0) {
         GPoint pts[4] = {
-          {gx_r,      top_y},
-          {gx_r + sw, top_y},
-          {gx + sw,   top_y + diag_h},
-          {gx,        top_y + diag_h},
+          {stem_x,      top_y},
+          {stem_x + sw, top_y},
+          {gx + sw,     top_y + diag_h},
+          {gx,          top_y + diag_h},
         };
         GPathInfo info = { .num_points = 4, .points = pts };
         GPath *path = gpath_create(&info);
@@ -276,16 +285,17 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
     }
 
     case 2: {
+      // Top semi + symmetric tail VBARs + diagonal (sw+2 wide) + base
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);
       VBAR(gx,   top_cy, top_cy + tail);
       VBAR(gx_r, top_cy, top_cy + tail);
       int dy = (bot_y - sw) - (top_cy + tail);
       if (dy > 0) {
         GPoint pts[4] = {
-          {gx_r,      top_cy + tail},
-          {gx_r + sw, top_cy + tail},
-          {gx  + sw,  bot_y - sw},
-          {gx,        bot_y - sw},
+          {gx_r,          top_cy + tail},
+          {gx_r + sw + 2, top_cy + tail},
+          {gx  + sw + 2,  bot_y - sw},
+          {gx,            bot_y - sw},
         };
         GPathInfo info = { .num_points = 4, .points = pts };
         GPath *path = gpath_create(&info);
@@ -303,10 +313,9 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       VBAR(gx_r, t_tc, t_bc);
       fill_arc(ctx, cap_cx, t_bc, ro, ri, 90, 180);
       NUB(gx, t_bc);
-      // Bottom circle
+      // Bottom circle — removed NUB(gx, b_tc-sw), kept center nub
       fill_arc(ctx, cap_cx, b_tc, ro, ri, 360, 450);
-      NUB(gx, b_tc - sw);
-      NUB(gx + sw, cy - HALF_UNIT);
+      NUB(gx + sw, cy - HALF_UNIT);                 // center nub only
       VBAR(gx,   b_tc - ro - tail, b_tc - ro);
       VBAR(gx_r, b_tc, b_bc);
       fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
@@ -320,31 +329,38 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 5:
+      // Top HBAR
+      // Left bar extends to BOTTOM of top ring arc of lower circle (b_tc+ro)
+      // No top-right bar
+      // Bottom-right bar spans full distance between arc edges of lower circle
       HBAR(top_y);
-      VBAR(gx,   top_y + sw, b_tc - ro);
-      VBAR(gx_r, b_tc - ro - tail, b_tc - ro);
-      VBAR(gx,   b_tc - ro - tail, b_tc - ro);
+      VBAR(gx,   top_y + sw, b_tc + ro);           // left: to bottom of top arc edge of lower ring
       fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
-      VBAR(gx_r, b_tc + ro, b_bc - ro);
+      VBAR(gx_r, b_tc - ro, b_bc + ro);            // right: full span between arc edges
       break;
 
     case 6:
+      // Top semi cap
+      // Top-right bar: tail-length, anchored at bottom of top cap arc (top_cy+ro)
+      // Left bar: full height
+      // Bottom ring: right bar spans full between arc edges
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);
-      VBAR(gx_r, top_cy + ro, b_tc - ro);
-      VBAR(gx,   top_cy, b_bc);
+      VBAR(gx_r, top_cy + ro, top_cy + ro + tail); // short tail from bottom of top cap
+      VBAR(gx,   top_cy, b_bc);                    // left: full height
       fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
-      VBAR(gx_r, b_tc + ro, b_bc - ro);
+      VBAR(gx_r, b_tc - ro, b_bc + ro);            // bottom ring right: full arc-to-arc span
       break;
 
     case 7: {
+      // Top HBAR + parallelogram diagonal (sw+1 wide, reaches bot_y)
       HBAR(top_y);
       GPoint pts[4] = {
-        {gx_r,      top_y + sw},
-        {gx_r + sw, top_y + sw},
-        {gx  + sw,  bot_y},
-        {gx,        bot_y},
+        {gx_r,          top_y + sw},
+        {gx_r + sw + 1, top_y + sw},
+        {gx  + sw + 1,  bot_y},
+        {gx,            bot_y},
       };
       GPathInfo info = { .num_points = 4, .points = pts };
       GPath *path = gpath_create(&info);
@@ -365,12 +381,14 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 9:
+      // Full top ring + right bar to bot_cy
+      // Left tail: top edge at bot_cy-ro (top of lower cap arc), hangs down by tail
       fill_arc(ctx, cap_cx, t_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, t_bc, ro, ri, 90, 270);
-      VBAR(gx,   t_tc, t_bc);
-      VBAR(gx,   bot_cy - ro - tail, bot_cy - ro);
-      VBAR(gx_r, t_tc, bot_cy);
-      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 90, 270);
+      VBAR(gx,   t_tc, t_bc);                         // left: top ring only
+      VBAR(gx,   bot_cy - ro, bot_cy - ro + tail);     // left tail from top of lower cap arc
+      VBAR(gx_r, t_tc, bot_cy);                        // right: full height to cap center
+      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 90, 270);  // bottom semi cap
       break;
 
     default: break;
