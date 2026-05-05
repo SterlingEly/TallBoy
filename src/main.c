@@ -1,19 +1,10 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.12
-//
-// RULE: circles ALWAYS fixed: ro=2u, ri=1u. Only straight spans stretch.
-// Universal tail: tail = max(0, size-2) * UNIT
-//
-// v3.12 batch-8 fixes (surgical coordinate changes only):
-//   1: upper cap points up 1u, lower cap points up 0.5u
-//   2: left pts move -1px, right pts move -2px
-//   3: remove center NUB; left lower bar down 2u -> VBAR(gx, b_bc-tail, b_bc)
-//   5: left bar shortened -> VBAR(gx, top_y+sw, b_tc-ro)
-//   6: top right bar down -> VBAR(gx_r, top_cy+ro, top_cy+ro+tail)
-//   7: right pts move -1px -> gx_r+sw+1
-//   9: left tail moves up -> VBAR(gx, bot_cy-ro-tail, bot_cy-ro)
+// TallBoy -- main.c  v3.12a
+// Hotfix: replace VLA HealthMinuteData buf[elapsed_min] with static
+// global buffer capped at 120 min (360 bytes) to prevent stack overflow.
+// All digit geometry unchanged from v3.12.
 // ============================================================
 
 #define LAYOUT_WIDE        0
@@ -71,6 +62,10 @@ static int s_layout = LAYOUT_WIDE;
 #define ANIM_FAST_MS  80
 #define WIDE_FULL_SIZE 6
 
+// Cap minute history lookback to avoid stack overflow.
+// 120 min * 3 bytes = 360 bytes -- safe on all platforms.
+#define STEPS_AVG_MAX_MIN 120
+
 static const int SIZE_CYCLE[] = { 6, 5, 4, 3, 2, 1, 2, 3, 4, 5, 6 };
 #define SIZE_CYCLE_LEN 11
 
@@ -110,7 +105,7 @@ static int        s_pending_hour = 0, s_pending_minute = 0;
 static int        s_battery_pct = 100;
 static bool       s_charging = false, s_bt_connected = true;
 static int        s_steps = 0, s_distance_m = 0;
-static int        s_steps_avg = -1;  // historical avg steps to now (-1 = no data)
+static int        s_steps_avg = -1;
 static char       s_weather_temp[8] = "", s_weather_desc[32] = "";
 static GBitmap   *s_bitmaps[10][6];
 static GBitmap   *s_colon_bm[6];
@@ -208,16 +203,13 @@ static void draw_digits(GContext *ctx, int h_tens, int h_ones, int m_tens, int m
 // ============================================================
 // STEP PACE BACKGROUND COLOR (color platforms only)
 // ============================================================
-// Spectrum: no-data=black, far-behind=red, behind=yellow,
-//           on-pace=green, ahead=cyan, way-ahead=white
 #if defined(PBL_COLOR)
 static GColor prv_pace_color(int steps_today, int steps_avg) {
-  if (steps_avg <= 0) return GColorBlack;  // no history yet
-  // pct = (today / avg) * 100
+  if (steps_avg <= 0) return GColorBlack;
   int pct = (steps_today * 100) / steps_avg;
-  if (pct < 60)  return GColorRed;
-  if (pct < 80)  return GColorOrange;
-  if (pct < 90)  return GColorYellow;
+  if (pct < 60)   return GColorRed;
+  if (pct < 80)   return GColorOrange;
+  if (pct < 90)   return GColorYellow;
   if (pct <= 110) return GColorGreen;
   if (pct <= 130) return GColorCyan;
   if (pct <= 160) return GColorBlue;
@@ -225,25 +217,36 @@ static GColor prv_pace_color(int steps_today, int steps_avg) {
 }
 #endif
 
-// Calculate average steps accumulated to current minute-of-day over past 7 days.
-// Returns -1 if no history available.
+// Static buffer -- avoids VLA stack overflow.
+// Capped at STEPS_AVG_MAX_MIN minutes per day per call.
+// The comparison window is proportionally scaled when elapsed > cap.
 #if defined(PBL_HEALTH)
+static HealthMinuteData s_minute_buf[STEPS_AVG_MAX_MIN];
+
 static int prv_calc_steps_avg(void) {
   time_t now = time(NULL);
   struct tm *t = localtime(&now);
   int elapsed_min = t->tm_hour * 60 + t->tm_min;
-  if (elapsed_min < 2) return -1;  // grace period
+  if (elapsed_min < 2) return -1;
+
+  // Cap window; scale factor applied to result if capped
+  int window = elapsed_min < STEPS_AVG_MAX_MIN ? elapsed_min : STEPS_AVG_MAX_MIN;
 
   int total = 0, day_count = 0;
   for (int day = 1; day <= 7; day++) {
     time_t day_start = time_start_of_today() - (time_t)day * SECONDS_PER_DAY;
-    HealthMinuteData buf[elapsed_min];
-    uint32_t n = health_service_get_minute_history(buf, (uint32_t)elapsed_min, &day_start, NULL);
+    uint32_t n = health_service_get_minute_history(s_minute_buf, (uint32_t)window, &day_start, NULL);
     if (n == 0) continue;
     int day_steps = 0;
     for (uint32_t i = 0; i < n; i++)
-      if (!buf[i].is_invalid) day_steps += buf[i].steps;
-    if (day_steps > 0) { total += day_steps; day_count++; }
+      if (!s_minute_buf[i].is_invalid) day_steps += s_minute_buf[i].steps;
+    if (day_steps > 0) {
+      // Scale up if we only sampled a window of elapsed_min
+      if (elapsed_min > window)
+        day_steps = (day_steps * elapsed_min) / window;
+      total += day_steps;
+      day_count++;
+    }
   }
   return day_count > 0 ? total / day_count : -1;
 }
@@ -297,7 +300,6 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 1: {
-      // Upper cap pts move up 1u; lower cap pts move up HALF_UNIT
       HBAR(bot_y - sw);
       int stem_x = gx + GLYPH_W / 2 - sw / 2;
       VBAR(stem_x, top_y, bot_y - sw);
@@ -305,10 +307,10 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       int diag_h = cap_right - gx;
       if (diag_h > 0) {
         GPoint pts[4] = {
-          {cap_right, top_y - sw},                    // upper right: up 1u
-          {cap_right, top_y + sw - HALF_UNIT},         // lower right: up 0.5u
-          {gx,        top_y + sw + diag_h - HALF_UNIT},// lower left:  up 0.5u
-          {gx,        top_y + diag_h - sw},            // upper left:  up 1u
+          {cap_right, top_y - sw},
+          {cap_right, top_y + sw - HALF_UNIT},
+          {gx,        top_y + sw + diag_h - HALF_UNIT},
+          {gx,        top_y + diag_h - sw},
         };
         GPathInfo info = { .num_points = 4, .points = pts };
         GPath *path = gpath_create(&info);
@@ -319,7 +321,6 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
     }
 
     case 2: {
-      // Left pts -1px, right pts -2px
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);
       VBAR(gx,   top_cy, top_cy + tail);
       VBAR(gx_r, top_cy, top_cy + tail);
@@ -341,15 +342,13 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
     }
 
     case 3: {
-      // Top circle (unchanged)
       fill_arc(ctx, cap_cx, t_tc, ro, ri, 270, 450);
       VBAR(gx,   t_tc, t_tc + tail);
       VBAR(gx_r, t_tc, t_bc);
       fill_arc(ctx, cap_cx, t_bc, ro, ri, 90, 180);
       NUB(gx, t_bc);
-      // Bottom circle: removed center NUB; left bar moved down 2u
       fill_arc(ctx, cap_cx, b_tc, ro, ri, 360, 450);
-      VBAR(gx,   b_bc - tail, b_bc);    // left bar: down 2u from v3.11
+      VBAR(gx,   b_bc - tail, b_bc);
       VBAR(gx_r, b_tc, b_bc);
       fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
       break;
@@ -362,7 +361,6 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 5:
-      // Left bar ends at b_tc-ro (not b_tc+ro)
       HBAR(top_y);
       VBAR(gx,   top_y + sw, b_tc - ro);
       fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
@@ -372,7 +370,6 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 6:
-      // Top right bar: top now at top_cy+ro (bottom of cap arc)
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);
       VBAR(gx_r, top_cy + ro, top_cy + ro + tail);
       VBAR(gx,   top_cy, b_bc);
@@ -382,7 +379,6 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 7: {
-      // Right pts move -1px: gx_r+sw+1 instead of gx_r+sw+2
       HBAR(top_y);
       GPoint pts[4] = {
         {gx_r,          top_y + sw},
@@ -409,7 +405,6 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 9:
-      // Left tail: bottom at bot_cy-ro (top of cap arc), hangs up by tail
       fill_arc(ctx, cap_cx, t_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, t_bc, ro, ri, 90, 270);
       VBAR(gx,   t_tc, t_bc);
@@ -530,12 +525,8 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   int ub_top   = ub.origin.y, ub_h = ub.size.h;
   int center_y = ub_top + ub_h / 2;
 
-  // Background: pace color on color platforms when health data available
 #if defined(PBL_COLOR) && defined(PBL_HEALTH)
-  GColor bg = prv_pace_color(s_steps, s_steps_avg);
-  // Keep bg dim so white digits remain readable:
-  // only use hue if meaningful, else black
-  graphics_context_set_fill_color(ctx, bg);
+  graphics_context_set_fill_color(ctx, prv_pace_color(s_steps, s_steps_avg));
 #else
   graphics_context_set_fill_color(ctx, s_bg);
 #endif
