@@ -1,20 +1,15 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.13
+// TallBoy -- main.c  v3.14
 //
-// v3.13 changes:
-//   NON-DIGIT:
-//     - White/light bg -> black fg (readable digits on bright backgrounds)
-//     - Emery info font: INFO_FONT_H 18->19, INFO_LINE_H 20->22
-//   DIGITS (batch-9 surgical fixes):
-//     1: cap clipped flat at top_y (no pointy top above canvas)
-//     2: top-left diagonal pt shifts right 1px (gx-1 -> gx)
-//     3: NUB moves 1u down + 1u right -> NUB(gx+sw, t_bc+sw)
-//     5: left bar extended to b_tc+ro; bottom-left tail up to b_bc-ro
-//     6: top-right bar up 2u -> VBAR(gx_r, top_cy-ro, top_cy-ro+tail)
-//     7: top-right pts shift right 1px (gx_r->gx_r+1, gx_r+sw+1->gx_r+sw+2)
-//     9: left tail down 2u -> VBAR(gx, bot_cy+ro-tail, bot_cy+ro)
+// v3.14 batch-10 fixes (surgical only, 3 locked in):
+//   1: cap is pentagon clipped at top_y — proper shape with 5 pts
+//   2: top-left pt +1px right (gx_r-2->gx_r-1); bottom-left pt -1px left (gx->gx-1)
+//   5: left bar shortened back 2u -> VBAR(gx, top_y+sw, b_tc-ro)
+//   6: top-right bar down -> VBAR(gx_r, top_cy+ro, top_cy+ro+tail)
+//   7: top pts -> {gx_r, top_y+sw} and {gx_r+sw, top_y+sw} (right pt at canvas edge)
+//   9: left tail back to VBAR(gx, bot_cy-ro-tail, bot_cy-ro)
 // ============================================================
 
 #define LAYOUT_WIDE        0
@@ -210,7 +205,6 @@ static void draw_digits(GContext *ctx, int h_tens, int h_ones, int m_tens, int m
 
 // ============================================================
 // STEP PACE BACKGROUND COLOR (color platforms only)
-// White/light bg -> black fg for readability
 // ============================================================
 #if defined(PBL_COLOR)
 static GColor prv_pace_color(int steps_today, int steps_avg) {
@@ -225,7 +219,6 @@ static GColor prv_pace_color(int steps_today, int steps_avg) {
   return GColorWhite;
 }
 
-// Returns true if bg color needs black foreground text
 static bool prv_bg_needs_dark_fg(GColor bg) {
   return gcolor_equal(bg, GColorWhite)  ||
          gcolor_equal(bg, GColorYellow) ||
@@ -241,7 +234,6 @@ static int prv_calc_steps_avg(void) {
   struct tm *t = localtime(&now);
   int elapsed_min = t->tm_hour * 60 + t->tm_min;
   if (elapsed_min < 2) return -1;
-
   int window = elapsed_min < STEPS_AVG_MAX_MIN ? elapsed_min : STEPS_AVG_MAX_MIN;
   int total = 0, day_count = 0;
   for (int day = 1; day <= 7; day++) {
@@ -252,10 +244,8 @@ static int prv_calc_steps_avg(void) {
     for (uint32_t i = 0; i < n; i++)
       if (!s_minute_buf[i].is_invalid) day_steps += s_minute_buf[i].steps;
     if (day_steps > 0) {
-      if (elapsed_min > window)
-        day_steps = (day_steps * elapsed_min) / window;
-      total += day_steps;
-      day_count++;
+      if (elapsed_min > window) day_steps = (day_steps * elapsed_min) / window;
+      total += day_steps; day_count++;
     }
   }
   return day_count > 0 ? total / day_count : -1;
@@ -310,20 +300,23 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 1: {
-      // Cap clipped flat at top_y -- both upper pts at top_y
+      // Cap is a pentagon: v3.12 shape clipped at top_y canvas boundary.
+      // Top edge of parallelogram intersects top_y at x = stem_x (= cap_right - sw).
+      // 5 pts: right-clip, lower-right, lower-left, left-clip, connecting along top_y.
       HBAR(bot_y - sw);
       int stem_x = gx + GLYPH_W / 2 - sw / 2;
       VBAR(stem_x, top_y, bot_y - sw);
       int cap_right = stem_x + sw;
       int diag_h = cap_right - gx;
       if (diag_h > 0) {
-        GPoint pts[4] = {
-          {cap_right, top_y},                          // upper right: clipped at top_y
-          {cap_right, top_y + sw - HALF_UNIT},
-          {gx,        top_y + sw + diag_h - HALF_UNIT},
-          {gx,        top_y},                          // upper left: clipped at top_y
+        GPoint pts[5] = {
+          {cap_right, top_y},                           // right clip at canvas top
+          {cap_right, top_y + sw - HALF_UNIT},          // lower-right
+          {gx,        top_y + sw + diag_h - HALF_UNIT}, // lower-left
+          {gx,        top_y + diag_h - sw},             // left clip at canvas top
+          {stem_x,    top_y},                           // left clip at canvas top (= cap_right-sw)
         };
-        GPathInfo info = { .num_points = 4, .points = pts };
+        GPathInfo info = { .num_points = 5, .points = pts };
         GPath *path = gpath_create(&info);
         gpath_draw_filled(ctx, path);
         gpath_destroy(path);
@@ -332,17 +325,17 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
     }
 
     case 2: {
-      // Left pts shift right 1px: gx-1 -> gx
+      // top-left +1px right (gx_r-2->gx_r-1); bottom-left -1px left (gx->gx-1)
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);
       VBAR(gx,   top_cy, top_cy + tail);
       VBAR(gx_r, top_cy, top_cy + tail);
       int dy = (bot_y - sw) - (top_cy + tail);
       if (dy > 0) {
         GPoint pts[4] = {
-          {gx_r - 2,          top_cy + tail},
-          {gx_r - 2 + sw + 2, top_cy + tail},
-          {gx     + sw + 2,   bot_y - sw},
-          {gx,                bot_y - sw},
+          {gx_r - 1,          top_cy + tail},
+          {gx_r - 1 + sw + 2, top_cy + tail},
+          {gx  - 1 + sw + 2,  bot_y - sw},
+          {gx  - 1,           bot_y - sw},
         };
         GPathInfo info = { .num_points = 4, .points = pts };
         GPath *path = gpath_create(&info);
@@ -354,7 +347,7 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
     }
 
     case 3: {
-      // NUB moves 1u down + 1u right -> NUB(gx+sw, t_bc+sw)
+      // LOCKED IN -- do not change
       fill_arc(ctx, cap_cx, t_tc, ro, ri, 270, 450);
       VBAR(gx,   t_tc, t_tc + tail);
       VBAR(gx_r, t_tc, t_bc);
@@ -374,10 +367,9 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 5:
-      // Left bar to b_tc+ro (bottom of top ring arc)
-      // Bottom-left tail: top at b_bc-ro (top of bottom ring arc)
+      // Left bar shortened 2u back -> b_tc-ro
       HBAR(top_y);
-      VBAR(gx,   top_y + sw, b_tc + ro);
+      VBAR(gx,   top_y + sw, b_tc - ro);
       fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
       VBAR(gx_r, b_tc, b_bc);
@@ -385,9 +377,9 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 6:
-      // Top-right bar up 2u: top at top_cy-ro
+      // Top-right bar anchored at bottom of top cap arc: top_cy+ro
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);
-      VBAR(gx_r, top_cy - ro, top_cy - ro + tail);
+      VBAR(gx_r, top_cy + ro, top_cy + ro + tail);
       VBAR(gx,   top_cy, b_bc);
       fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
@@ -395,13 +387,14 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 7: {
-      // Top-right pts shift right 1px
+      // Top pts: left={gx_r, top_y+sw}, right={gx_r+sw, top_y+sw}
+      // Right canvas edge = gx_r+sw, 1u below top_y
       HBAR(top_y);
       GPoint pts[4] = {
-        {gx_r + 1,          top_y + sw},
-        {gx_r + sw + 2,     top_y + sw},
-        {gx   + sw + 1,     bot_y},
-        {gx,                bot_y},
+        {gx_r,      top_y + sw},
+        {gx_r + sw, top_y + sw},
+        {gx  + sw,  bot_y},
+        {gx,        bot_y},
       };
       GPathInfo info = { .num_points = 4, .points = pts };
       GPath *path = gpath_create(&info);
@@ -422,11 +415,11 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 9:
-      // Left tail down 2u: bot_cy-ro-tail -> bot_cy+ro-tail, bot_cy-ro -> bot_cy+ro
+      // Left tail anchored at TOP of bottom cap arc (bot_cy-ro), goes UP by tail
       fill_arc(ctx, cap_cx, t_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, t_bc, ro, ri, 90, 270);
       VBAR(gx,   t_tc, t_bc);
-      VBAR(gx,   bot_cy + ro - tail, bot_cy + ro);
+      VBAR(gx,   bot_cy - ro - tail, bot_cy - ro);
       VBAR(gx_r, t_tc, bot_cy);
       fill_arc(ctx, cap_cx, bot_cy, ro, ri, 90, 270);
       break;
@@ -543,7 +536,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   int ub_top   = ub.origin.y, ub_h = ub.size.h;
   int center_y = ub_top + ub_h / 2;
 
-  // Set bg and fg colors; on color+health platforms use step pace spectrum
 #if defined(PBL_COLOR) && defined(PBL_HEALTH)
   GColor bg = prv_pace_color(s_steps, s_steps_avg);
   s_fg = prv_bg_needs_dark_fg(bg) ? GColorBlack : GColorWhite;
