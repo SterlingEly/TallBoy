@@ -1,12 +1,12 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.16
+// TallBoy -- main.c  v3.17
 //
-// v3.16: single fix -- digit 5 lower-left vbar up 2u
-//   was: VBAR(gx, b_bc-ro,        b_bc-ro+tail)
-//   now: VBAR(gx, b_bc-ro-2*UNIT, b_bc-ro-2*UNIT+tail)
-// All other digits unchanged from v3.15.
+// v3.17:
+//   - digit 5: top-left vbar shortened 2u (b_tc+ro -> b_tc+ro-2*UNIT)
+//   - emery: INFO_FONT_H 19->20, INFO_LINE_H 22->24
+// All other digits unchanged from v3.16.
 // ============================================================
 
 #define LAYOUT_WIDE        0
@@ -31,8 +31,8 @@ static int s_layout = LAYOUT_WIDE;
   #define STACK_H_SZ1    56
   #define STACK_H_SZ2    88
   #define STACK_SZ2_MIN 190
-  #define INFO_FONT_H    19
-  #define INFO_LINE_H    22
+  #define INFO_FONT_H    20
+  #define INFO_LINE_H    24
   #define UNIT            8
 #else
   #define SCREEN_W      144
@@ -360,9 +360,9 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 5:
-      // lower-left vbar up 2u: b_bc-ro -> b_bc-ro-2*UNIT
+      // top-left vbar shortened 2u: b_tc+ro -> b_tc+ro-2*UNIT
       HBAR(top_y);
-      VBAR(gx,   top_y + sw, b_tc + ro);
+      VBAR(gx,   top_y + sw, b_tc + ro - 2*UNIT);
       fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
       VBAR(gx_r, b_tc, b_bc);
