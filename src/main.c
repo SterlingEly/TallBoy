@@ -1,15 +1,12 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.15
+// TallBoy -- main.c  v3.16
 //
-// v3.15 batch-11 fixes (surgical only, 3/4/8/0 untouched):
-//   1: cap pts all -1px in y (cap moves 1px up to start at top canvas bounds)
-//   2: top-right pt shifts left 1px -> {gx_r+sw, top_cy+tail}
-//   5: revert to v3.13 values: left bar to b_tc+ro, bottom tail at b_bc-ro
-//   6: top-right bar up 2u -> VBAR(gx_r, top_cy, top_cy+tail)
-//   7: top-left -1px left (gx_r->gx_r-1), bottom-right +1px right (gx+sw->gx+sw+1)
-//   9: left tail down 2u -> VBAR(gx, bot_cy-tail, bot_cy)
+// v3.16: single fix -- digit 5 lower-left vbar up 2u
+//   was: VBAR(gx, b_bc-ro,        b_bc-ro+tail)
+//   now: VBAR(gx, b_bc-ro-2*UNIT, b_bc-ro-2*UNIT+tail)
+// All other digits unchanged from v3.15.
 // ============================================================
 
 #define LAYOUT_WIDE        0
@@ -300,7 +297,6 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 1: {
-      // Pentagon cap, all pts -1px in y vs v3.14 (cap starts at canvas top)
       HBAR(bot_y - sw);
       int stem_x = gx + GLYPH_W / 2 - sw / 2;
       VBAR(stem_x, top_y, bot_y - sw);
@@ -323,15 +319,14 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
     }
 
     case 2: {
-      // top-right pt shifts left 1px: gx_r-1+sw+2 -> gx_r+sw (i.e. right edge at canvas bound)
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);
       VBAR(gx,   top_cy, top_cy + tail);
       VBAR(gx_r, top_cy, top_cy + tail);
       int dy = (bot_y - sw) - (top_cy + tail);
       if (dy > 0) {
         GPoint pts[4] = {
-          {gx_r - 1,      top_cy + tail},
-          {gx_r + sw,     top_cy + tail},
+          {gx_r - 1,         top_cy + tail},
+          {gx_r + sw,        top_cy + tail},
           {gx  - 1 + sw + 2, bot_y - sw},
           {gx  - 1,          bot_y - sw},
         };
@@ -365,17 +360,16 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 5:
-      // Reverted to v3.13: left bar to b_tc+ro, bottom tail at b_bc-ro
+      // lower-left vbar up 2u: b_bc-ro -> b_bc-ro-2*UNIT
       HBAR(top_y);
       VBAR(gx,   top_y + sw, b_tc + ro);
       fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
       VBAR(gx_r, b_tc, b_bc);
-      VBAR(gx,   b_bc - ro, b_bc - ro + tail);
+      VBAR(gx,   b_bc - ro - 2*UNIT, b_bc - ro - 2*UNIT + tail);
       break;
 
     case 6:
-      // Top-right bar up 2u from v3.14: top_cy+ro -> top_cy
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);
       VBAR(gx_r, top_cy, top_cy + tail);
       VBAR(gx,   top_cy, b_bc);
@@ -385,12 +379,10 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 7: {
-      // top-left -1px (gx_r->gx_r-1), top-right unchanged (gx_r+sw)
-      // bottom-right +1px (gx+sw->gx+sw+1), bottom-left unchanged (gx)
       HBAR(top_y);
       GPoint pts[4] = {
-        {gx_r - 1,  top_y + sw},
-        {gx_r + sw, top_y + sw},
+        {gx_r - 1,    top_y + sw},
+        {gx_r + sw,   top_y + sw},
         {gx + sw + 1, bot_y},
         {gx,          bot_y},
       };
@@ -413,7 +405,6 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
 
     case 9:
-      // Left tail down 2u from v3.14: bot_cy-ro -> bot_cy, bot_cy-ro-tail -> bot_cy-tail
       fill_arc(ctx, cap_cx, t_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, t_bc, ro, ri, 90, 270);
       VBAR(gx,   t_tc, t_bc);
