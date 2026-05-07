@@ -1,20 +1,31 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.17
+// TallBoy -- main.c  v3.18
 //
-// v3.17:
-//   - digit 5: top-left vbar shortened 2u (b_tc+ro -> b_tc+ro-2*UNIT)
-//   - emery: INFO_FONT_H 19->20, INFO_LINE_H 22->24
-// All other digits unchanged from v3.16.
+// v3.18 changes:
+//   LAYOUT CYCLE: 4 layouts (WIDE_COMPS removed from cycle)
+//     0: LAYOUT_WIDE    -- raster time, wink on minute change
+//     1: LAYOUT_VECTOR  -- vector time, wink on minute change
+//     2: LAYOUT_LEFT    -- stacked left, raster digits
+//     3: LAYOUT_RIGHT   -- stacked right, vector digits
+//
+//   COUNTDOWN WINK:
+//     Each digit: shrink to size 1 (ANIM_FAST_MS steps) ->
+//     hold 500ms -> switch digit -> expand to size 6 ->
+//     hold 500ms -> next digit
+//
+//   SHAKE TO DISMISS: tap during PHASE_COUNTDOWN skips to PHASE_BLINK
+//
+//   FONT: emery info lines use FONT_KEY_GOTHIC_24_BOLD (real size up)
+//         INFO_FONT_H emery: 24, INFO_LINE_H emery: 28
 // ============================================================
 
-#define LAYOUT_WIDE        0
-#define LAYOUT_WIDE_COMPS  1
-#define LAYOUT_LEFT        2
-#define LAYOUT_RIGHT       3
-#define LAYOUT_VECTOR      4
-#define LAYOUT_COUNT       5
+#define LAYOUT_WIDE      0
+#define LAYOUT_VECTOR    1
+#define LAYOUT_LEFT      2
+#define LAYOUT_RIGHT     3
+#define LAYOUT_COUNT     4
 static int s_layout = LAYOUT_WIDE;
 
 #if defined(PBL_PLATFORM_EMERY)
@@ -31,8 +42,9 @@ static int s_layout = LAYOUT_WIDE;
   #define STACK_H_SZ1    56
   #define STACK_H_SZ2    88
   #define STACK_SZ2_MIN 190
-  #define INFO_FONT_H    20
-  #define INFO_LINE_H    24
+  #define INFO_FONT_H    24
+  #define INFO_LINE_H    28
+  #define INFO_FONT_KEY  FONT_KEY_GOTHIC_24_BOLD
   #define UNIT            8
 #else
   #define SCREEN_W      144
@@ -50,24 +62,34 @@ static int s_layout = LAYOUT_WIDE;
   #define STACK_SZ2_MIN 146
   #define INFO_FONT_H    18
   #define INFO_LINE_H    20
+  #define INFO_FONT_KEY  FONT_KEY_GOTHIC_18_BOLD
   #define UNIT            6
 #endif
 
-#define HALF_SLOT_PAD  (UNIT / 2)
-#define GLYPH_W        (UNIT * 4)
-#define COMP_GAP  4
-#define COMP_LINES_ABOVE  2
-#define COMP_LINES_BELOW  2
+#define HALF_SLOT_PAD   (UNIT / 2)
+#define GLYPH_W         (UNIT * 4)
+#define COMP_GAP        4
+#define COMP_LINES_ABOVE 2
+#define COMP_LINES_BELOW 2
 
-#define COUNTDOWN_HOLD_MS  1500
-#define BLINK_REPS    2
-#define ANIM_FAST_MS  80
-#define WIDE_FULL_SIZE 6
+#define COUNTDOWN_EXPAND_HOLD_MS  500
+#define COUNTDOWN_SHRINK_HOLD_MS  500
+#define BLINK_REPS      2
+#define ANIM_FAST_MS    80
+#define WIDE_FULL_SIZE  6
 
 #define STEPS_AVG_MAX_MIN 120
 
 static const int SIZE_CYCLE[] = { 6, 5, 4, 3, 2, 1, 2, 3, 4, 5, 6 };
 #define SIZE_CYCLE_LEN 11
+
+// Countdown sub-phases
+typedef enum {
+  CD_SHRINK,    // animate down to size 1
+  CD_HOLD_MIN,  // hold at size 1 briefly (switch digit here)
+  CD_EXPAND,    // animate up to size 6
+  CD_HOLD_MAX,  // hold at size 6
+} CdSubPhase;
 
 static int s_stack_size = 2;
 static int pick_stack_size(int ub_h) { return (ub_h >= STACK_SZ2_MIN) ? 2 : 1; }
@@ -81,12 +103,6 @@ static int pick_size(int available_h) {
 
 static int digit_outer_h(int sz) { return UNIT * (3 + 4 * sz); }
 
-static int comp_time_space(int ub_h) {
-  int avail = ub_h - COMP_LINES_ABOVE * INFO_LINE_H - COMP_GAP
-                   - COMP_LINES_BELOW * INFO_LINE_H - COMP_GAP;
-  return avail > 0 ? avail : 0;
-}
-
 typedef enum { PHASE_COUNTDOWN, PHASE_BLINK, PHASE_DONE, PHASE_SQUISH, PHASE_SHAKE_CYCLE } Phase;
 
 static Window    *s_window;
@@ -97,6 +113,7 @@ static Phase      s_phase = PHASE_COUNTDOWN;
 static int        s_anim_step = 0, s_anim_rep = 0;
 static bool       s_going_down = true;
 static int        s_countdown_digit = 9;
+static CdSubPhase s_cd_sub = CD_EXPAND;
 static AppTimer  *s_timer = NULL;
 static bool       s_demo_override = false;
 static int        s_demo_digit = 9, s_demo_size = 6;
@@ -288,14 +305,12 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
 #define NUB(x,y) graphics_fill_rect(ctx,GRect((x),(y),sw,sw),0,GCornerNone)
 
   switch (digit) {
-
     case 0:
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, bot_cy, ro, ri, 90, 270);
       VBAR(gx,   top_cy, bot_cy);
       VBAR(gx_r, top_cy, bot_cy);
       break;
-
     case 1: {
       HBAR(bot_y - sw);
       int stem_x = gx + GLYPH_W / 2 - sw / 2;
@@ -317,7 +332,6 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       }
       break;
     }
-
     case 2: {
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);
       VBAR(gx,   top_cy, top_cy + tail);
@@ -338,9 +352,7 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       HBAR(bot_y - sw);
       break;
     }
-
     case 3: {
-      // LOCKED IN
       fill_arc(ctx, cap_cx, t_tc, ro, ri, 270, 450);
       VBAR(gx,   t_tc, t_tc + tail);
       VBAR(gx_r, t_tc, t_bc);
@@ -352,15 +364,12 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
       break;
     }
-
     case 4:
       VBAR(gx,   top_y, cy + sw);
       VBAR(gx_r, top_y, bot_y);
       graphics_fill_rect(ctx, GRect(gx, cy, GLYPH_W, sw), 0, GCornerNone);
       break;
-
     case 5:
-      // top-left vbar shortened 2u: b_tc+ro -> b_tc+ro-2*UNIT
       HBAR(top_y);
       VBAR(gx,   top_y + sw, b_tc + ro - 2*UNIT);
       fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
@@ -368,7 +377,6 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       VBAR(gx_r, b_tc, b_bc);
       VBAR(gx,   b_bc - ro - 2*UNIT, b_bc - ro - 2*UNIT + tail);
       break;
-
     case 6:
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);
       VBAR(gx_r, top_cy, top_cy + tail);
@@ -377,7 +385,6 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
       VBAR(gx_r, b_tc, b_bc);
       break;
-
     case 7: {
       HBAR(top_y);
       GPoint pts[4] = {
@@ -392,7 +399,6 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       gpath_destroy(path);
       break;
     }
-
     case 8:
       fill_arc(ctx, cap_cx, t_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, t_bc, ro, ri, 90, 270);
@@ -403,7 +409,6 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       VBAR(gx,   b_tc, b_bc);
       VBAR(gx_r, b_tc, b_bc);
       break;
-
     case 9:
       fill_arc(ctx, cap_cx, t_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, t_bc, ro, ri, 90, 270);
@@ -412,7 +417,6 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       VBAR(gx_r, t_tc, bot_cy);
       fill_arc(ctx, cap_cx, bot_cy, ro, ri, 90, 270);
       break;
-
     default: break;
   }
 #undef VBAR
@@ -438,13 +442,14 @@ static void draw_digits_vec(GContext *ctx, int h_tens, int h_ones,
   draw_digit_vec(ctx, m_ones, SLOT_M_ONES, cy, size);
 }
 
-static void draw_digits_countdown_split(GContext *ctx, int digit, int size, int cy) {
-  int y = cy - SCREEN_H / 2;
-  blit(ctx, get_bitmap(digit, size), SLOT_H_TENS, y);
-  blit(ctx, get_bitmap(digit, size), SLOT_M_ONES, y);
-  draw_digit_vec(ctx, digit, SLOT_H_ONES, cy, size);
-  draw_digit_vec(ctx, digit, SLOT_M_TENS, cy, size);
-  draw_colon_vec(ctx, COLON_SLOT_X, cy, size);
+// Stacked vector: draw 4 digits at stacked positions using vector renderer
+static void draw_stacked_vec(GContext *ctx, int h_tens, int h_ones,
+                              int m_tens, int m_ones, int sz,
+                              int tens_x, int ones_x, int h_cy, int m_cy) {
+  draw_digit_vec(ctx, h_tens, tens_x, h_cy, sz);
+  draw_digit_vec(ctx, h_ones, ones_x, h_cy, sz);
+  draw_digit_vec(ctx, m_tens, tens_x, m_cy, sz);
+  draw_digit_vec(ctx, m_ones, ones_x, m_cy, sz);
 }
 
 // ============================================================
@@ -453,29 +458,6 @@ static void draw_digits_countdown_split(GContext *ctx, int digit, int size, int 
 static const char *s_day_names[]   = {"SUN","MON","TUE","WED","THU","FRI","SAT"};
 static const char *s_day_full[]    = {"SUNDAY","MONDAY","TUESDAY","WEDNESDAY","THURSDAY","FRIDAY","SATURDAY"};
 static const char *s_month_abbrs[] = {"JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"};
-
-static int build_comp_above(char lines[][32], int max_lines, struct tm *t) {
-  int n = 0;
-  if (n < max_lines && t)
-    snprintf(lines[n++], 32, "%s  %s %d", s_day_full[t->tm_wday], s_month_abbrs[t->tm_mon], t->tm_mday);
-  return n;
-}
-
-static int build_comp_below(char lines[][32], int max_lines, struct tm *t) {
-  int n = 0;
-#if defined(PBL_HEALTH)
-  if (n < max_lines) {
-    if (s_steps >= 1000) snprintf(lines[n++], 32, "%d,%03d steps", s_steps/1000, s_steps%1000);
-    else snprintf(lines[n++], 32, "%d steps", s_steps);
-  }
-  if (n < max_lines && s_distance_m > 0) {
-    if (strcmp(i18n_get_system_locale(), "en_US") == 0) { int mx=(s_distance_m*10)/1609; snprintf(lines[n++],32,"%d.%d mi",mx/10,mx%10); }
-    else { int kx=(s_distance_m*10)/1000; snprintf(lines[n++],32,"%d.%d km",kx/10,kx%10); }
-  }
-#endif
-  if (n == 0 && n < max_lines) snprintf(lines[n++], 32, "bat %d%%%s", s_battery_pct, s_charging?"+":"");
-  return n;
-}
 
 static int build_info_lines_short(char lines[][32], int max_lines, struct tm *t) {
   int n = 0;
@@ -496,7 +478,7 @@ static int build_info_lines_short(char lines[][32], int max_lines, struct tm *t)
   return n;
 }
 
-static GFont prv_info_font(void) { return fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD); }
+static GFont prv_info_font(void) { return fonts_get_system_font(INFO_FONT_KEY); }
 
 static void draw_info_block(GContext *ctx, int x, int y, int width, char lines[][32], int n) {
   if (!n) return;
@@ -546,42 +528,42 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   time_t now_t = time(NULL);
   struct tm *tm = (s_phase == PHASE_DONE) ? localtime(&now_t) : NULL;
 
-  if (s_demo_override && s_phase == PHASE_COUNTDOWN) {
-    draw_digits_countdown_split(ctx, s_demo_digit, s_demo_size, center_y);
-  } else if (s_layout == LAYOUT_VECTOR) {
-    draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, size, center_y);
+  if (s_phase == PHASE_COUNTDOWN) {
+    // Countdown: all 4 slots show same digit, vector renderer, centered
+    int d = s_demo_digit;
+    int sz = s_size;
+    draw_digit_vec(ctx, d, SLOT_H_TENS, center_y, sz);
+    draw_digit_vec(ctx, d, SLOT_H_ONES, center_y, sz);
+    draw_colon_vec(ctx, COLON_SLOT_X, center_y, sz);
+    draw_digit_vec(ctx, d, SLOT_M_TENS, center_y, sz);
+    draw_digit_vec(ctx, d, SLOT_M_ONES, center_y, sz);
   } else if (s_layout == LAYOUT_WIDE) {
     draw_digits(ctx, h_tens, h_ones, m_tens, m_ones, size, center_y - SCREEN_H/2, true);
-  } else if (s_layout == LAYOUT_WIDE_COMPS) {
-    int above_h = COMP_LINES_ABOVE * INFO_LINE_H, below_h = COMP_LINES_BELOW * INFO_LINE_H;
-    int above_top = ub_top, below_top = ub_top + ub_h - below_h;
-    int tz_top = above_top + above_h + COMP_GAP, tz_bot = below_top - COMP_GAP;
-    int tz_h = tz_bot - tz_top, dsz = pick_size(tz_h);
-    int y = (tz_top + tz_h/2) - SCREEN_H/2;
-    draw_digits(ctx, h_tens, h_ones, m_tens, m_ones, dsz, y, true);
-    if (tm) {
-      char al[COMP_LINES_ABOVE][32], bl[COMP_LINES_BELOW][32];
-      int na = build_comp_above(al, COMP_LINES_ABOVE, tm);
-      int nb = build_comp_below(bl, COMP_LINES_BELOW, tm);
-      if (na) draw_info_block(ctx, 0, above_top, SCREEN_W, al, na);
-      if (nb) draw_info_block(ctx, 0, below_top, SCREEN_W, bl, nb);
-    }
+  } else if (s_layout == LAYOUT_VECTOR) {
+    draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, size, center_y);
   } else {
+    // Stacked layouts
     int sdh = stack_digit_h(s_stack_size);
-    int h_y = (center_y - sdh/2 - HALF_UNIT) - SCREEN_H/2;
-    int m_y = (center_y + sdh/2 + HALF_UNIT) - SCREEN_H/2;
+    int h_cy = center_y - sdh/2 - HALF_UNIT;
+    int m_cy = center_y + sdh/2 + HALF_UNIT;
+    int h_y = h_cy - SCREEN_H/2;
+    int m_y = m_cy - SCREEN_H/2;
     int tens_x, ones_x, info_x, info_w;
     if (s_layout == LAYOUT_LEFT) {
       tens_x = SIDE_MARGIN; ones_x = SIDE_MARGIN + SLOT_W;
       info_x = SIDE_MARGIN + SLOT_W*2 + SIDE_MARGIN; info_w = SCREEN_W - info_x - SIDE_MARGIN;
+      // LAYOUT_LEFT: raster digits
+      blit(ctx, get_bitmap(h_tens, s_stack_size), tens_x, h_y);
+      blit(ctx, get_bitmap(h_ones, s_stack_size), ones_x, h_y);
+      blit(ctx, get_bitmap(m_tens, s_stack_size), tens_x, m_y);
+      blit(ctx, get_bitmap(m_ones, s_stack_size), ones_x, m_y);
     } else {
       ones_x = SCREEN_W - SIDE_MARGIN - SLOT_W; tens_x = ones_x - SLOT_W;
       info_x = SIDE_MARGIN; info_w = tens_x - SIDE_MARGIN*2;
+      // LAYOUT_RIGHT: vector digits
+      draw_stacked_vec(ctx, h_tens, h_ones, m_tens, m_ones,
+                       s_stack_size, tens_x, ones_x, h_cy, m_cy);
     }
-    blit(ctx, get_bitmap(h_tens, s_stack_size), tens_x, h_y);
-    blit(ctx, get_bitmap(h_ones, s_stack_size), ones_x, h_y);
-    blit(ctx, get_bitmap(m_tens, s_stack_size), tens_x, m_y);
-    blit(ctx, get_bitmap(m_ones, s_stack_size), ones_x, m_y);
     if (tm && info_w > 20) draw_info_column(ctx, GRect(info_x, ub_top, info_w, ub_h), tm);
   }
 }
@@ -592,35 +574,74 @@ static void draw_layer(Layer *layer, GContext *ctx) {
 static void timer_cb(void *data);
 static void schedule(uint32_t ms) { if (s_timer) app_timer_cancel(s_timer); s_timer = app_timer_register(ms, timer_cb, NULL); }
 
+static void prv_start_blink(void) {
+  s_demo_override = false;
+  for (int s = 0; s < 6; s++) if (s_colon_bm[s]) { gbitmap_destroy(s_colon_bm[s]); s_colon_bm[s] = NULL; }
+  s_size=6; s_going_down=true; s_anim_rep=0; s_phase=PHASE_BLINK;
+  layer_mark_dirty(s_canvas_layer); schedule(ANIM_FAST_MS);
+}
+
 static void timer_cb(void *data) {
   s_timer = NULL;
   switch (s_phase) {
+
     case PHASE_COUNTDOWN:
-      free_digit_bitmaps(s_countdown_digit);
-      if (s_countdown_digit > 0) {
-        s_countdown_digit--; s_demo_digit = s_countdown_digit;
-        s_demo_size = WIDE_FULL_SIZE; s_demo_override = true;
-        layer_mark_dirty(s_canvas_layer); schedule(COUNTDOWN_HOLD_MS);
-      } else {
-        s_demo_override = false;
-        for (int s = 0; s < 6; s++) if (s_colon_bm[s]) { gbitmap_destroy(s_colon_bm[s]); s_colon_bm[s] = NULL; }
-        s_size=6; s_going_down=true; s_anim_rep=0; s_phase=PHASE_BLINK;
-        layer_mark_dirty(s_canvas_layer); schedule(ANIM_FAST_MS);
+      switch (s_cd_sub) {
+        case CD_SHRINK:
+          s_size--;
+          layer_mark_dirty(s_canvas_layer);
+          if (s_size <= 1) {
+            s_size = 1;
+            s_cd_sub = CD_HOLD_MIN;
+            schedule(COUNTDOWN_SHRINK_HOLD_MS);
+          } else {
+            schedule(ANIM_FAST_MS);
+          }
+          break;
+        case CD_HOLD_MIN:
+          // Switch to next digit
+          free_digit_bitmaps(s_countdown_digit);
+          if (s_countdown_digit == 0) { prv_start_blink(); break; }
+          s_countdown_digit--;
+          s_demo_digit = s_countdown_digit;
+          layer_mark_dirty(s_canvas_layer);
+          s_cd_sub = CD_EXPAND;
+          schedule(ANIM_FAST_MS);
+          break;
+        case CD_EXPAND:
+          s_size++;
+          layer_mark_dirty(s_canvas_layer);
+          if (s_size >= WIDE_FULL_SIZE) {
+            s_size = WIDE_FULL_SIZE;
+            s_cd_sub = CD_HOLD_MAX;
+            schedule(COUNTDOWN_EXPAND_HOLD_MS);
+          } else {
+            schedule(ANIM_FAST_MS);
+          }
+          break;
+        case CD_HOLD_MAX:
+          s_cd_sub = CD_SHRINK;
+          schedule(ANIM_FAST_MS);
+          break;
       }
       break;
+
     case PHASE_BLINK:
       if (s_going_down) { s_size--; layer_mark_dirty(s_canvas_layer); if(s_size<=1){s_size=1;s_going_down=false;} schedule(ANIM_FAST_MS); }
       else { s_size++; layer_mark_dirty(s_canvas_layer); if(s_size>=WIDE_FULL_SIZE){s_size=WIDE_FULL_SIZE;if(++s_anim_rep<BLINK_REPS){s_going_down=true;schedule(ANIM_FAST_MS);}else{s_target_size=WIDE_FULL_SIZE;s_phase=PHASE_DONE;layer_mark_dirty(s_canvas_layer);}}else schedule(ANIM_FAST_MS); }
       break;
+
     case PHASE_SQUISH:
       if (s_going_down) { s_size--; layer_mark_dirty(s_canvas_layer); if(s_size<=1){s_size=1;if(s_digit_pending){s_hour=s_pending_hour;s_minute=s_pending_minute;s_digit_pending=false;}s_going_down=false;} schedule(ANIM_FAST_MS); }
       else { s_size++; layer_mark_dirty(s_canvas_layer); if(s_size>=s_target_size){s_size=s_target_size;s_phase=PHASE_DONE;layer_mark_dirty(s_canvas_layer);}else schedule(ANIM_FAST_MS); }
       break;
+
     case PHASE_SHAKE_CYCLE:
       if(++s_anim_step<SIZE_CYCLE_LEN){s_size=SIZE_CYCLE[s_anim_step];layer_mark_dirty(s_canvas_layer);schedule(ANIM_FAST_MS);}
       else if(++s_anim_rep<2){s_anim_step=0;s_size=SIZE_CYCLE[0];layer_mark_dirty(s_canvas_layer);schedule(ANIM_FAST_MS);}
       else{s_phase=PHASE_DONE;s_size=s_target_size;layer_mark_dirty(s_canvas_layer);}
       break;
+
     case PHASE_DONE: break;
   }
 }
@@ -630,26 +651,35 @@ static void prv_update_targets(void) {
   GRect ub = layer_get_unobstructed_bounds(root);
   s_stack_size = pick_stack_size(ub.size.h);
   if (s_layout==LAYOUT_WIDE||s_layout==LAYOUT_VECTOR) s_target_size=WIDE_FULL_SIZE;
-  else if (s_layout==LAYOUT_WIDE_COMPS) s_target_size=pick_size(comp_time_space(ub.size.h));
 }
 
 static void unobstructed_change(AnimationProgress progress, void *ctx) {
   prv_update_targets();
-  if (s_phase==PHASE_DONE&&(s_layout==LAYOUT_WIDE||s_layout==LAYOUT_WIDE_COMPS||s_layout==LAYOUT_VECTOR))
+  if (s_phase==PHASE_DONE&&(s_layout==LAYOUT_WIDE||s_layout==LAYOUT_VECTOR))
     { s_size=s_target_size; layer_mark_dirty(s_canvas_layer); }
 }
 
 static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
+  // Shake during countdown: skip to blink immediately
+  if (s_phase == PHASE_COUNTDOWN) {
+    prv_start_blink();
+    return;
+  }
   if (s_phase != PHASE_DONE) return;
+
   s_layout = (s_layout + 1) % LAYOUT_COUNT;
   prv_update_targets();
-  if (s_layout==LAYOUT_WIDE){s_phase=PHASE_SHAKE_CYCLE;s_anim_step=0;s_anim_rep=0;s_size=SIZE_CYCLE[0];schedule(ANIM_FAST_MS);}
-  else{s_size=s_target_size;}
+  if (s_layout==LAYOUT_WIDE || s_layout==LAYOUT_VECTOR) {
+    s_phase=PHASE_SHAKE_CYCLE; s_anim_step=0; s_anim_rep=0;
+    s_size=SIZE_CYCLE[0]; schedule(ANIM_FAST_MS);
+  } else {
+    s_size=s_target_size;
+  }
   layer_mark_dirty(s_canvas_layer);
 }
 
 static void tick_handler(struct tm *t, TimeUnits units) {
-  bool sq=(s_layout==LAYOUT_WIDE||s_layout==LAYOUT_WIDE_COMPS||s_layout==LAYOUT_VECTOR);
+  bool sq=(s_layout==LAYOUT_WIDE||s_layout==LAYOUT_VECTOR);
   if(s_phase==PHASE_DONE&&sq){s_pending_hour=t->tm_hour;s_pending_minute=t->tm_min;s_digit_pending=true;s_phase=PHASE_SQUISH;s_going_down=true;schedule(ANIM_FAST_MS);}
   else if(s_phase==PHASE_SQUISH){s_pending_hour=t->tm_hour;s_pending_minute=t->tm_min;s_digit_pending=true;}
   else{s_hour=t->tm_hour;s_minute=t->tm_min;layer_mark_dirty(s_canvas_layer);}
@@ -689,13 +719,15 @@ static void window_load(Window *window) {
   layer_set_update_proc(s_canvas_layer, draw_layer);
   layer_add_child(root, s_canvas_layer);
   GRect ub = layer_get_unobstructed_bounds(root);
-  s_target_size=WIDE_FULL_SIZE; s_stack_size=pick_stack_size(ub.size.h); s_size=6;
+  s_target_size=WIDE_FULL_SIZE; s_stack_size=pick_stack_size(ub.size.h);
   UnobstructedAreaHandlers ua={.change=unobstructed_change};
   unobstructed_area_service_subscribe(ua,NULL);
   accel_tap_service_subscribe(accel_tap_handler);
+  // Start countdown: begin with digit 9 already expanded, in HOLD_MAX
   s_phase=PHASE_COUNTDOWN; s_countdown_digit=9;
-  s_demo_override=true; s_demo_digit=9; s_demo_size=WIDE_FULL_SIZE;
-  layer_mark_dirty(s_canvas_layer); schedule(COUNTDOWN_HOLD_MS);
+  s_demo_digit=9; s_demo_override=true;
+  s_size=WIDE_FULL_SIZE; s_cd_sub=CD_HOLD_MAX;
+  layer_mark_dirty(s_canvas_layer); schedule(COUNTDOWN_EXPAND_HOLD_MS);
 }
 
 static void window_unload(Window *window) {
