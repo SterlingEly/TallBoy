@@ -1,13 +1,12 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.19a
+// TallBoy -- main.c  v3.20
 //
-// v3.19a fixes:
-//   - GCompOpInvert -> GCompOpXOR (correct SDK constant for raster invert)
-//   - digit 5: bottom-left tail anchored to TOP of bottom cap arc
-//              VBAR(gx, b_bc-ro-tail, b_bc-ro) -- same as digit 3's lower left bar
-//   - WIDE_FULL_SIZE 6 -> 5 (less tight margins in wide mode)
+// v3.20: overextension wiggle in animations
+//   Expand phases overshoot to size 6 briefly, then snap to WIDE_FULL_SIZE (5).
+//   SIZE_CYCLE peaks at 6 then snaps to 5 at the end.
+//   Resting/display size remains WIDE_FULL_SIZE = 5.
 // ============================================================
 
 #define LAYOUT_WIDE      0
@@ -65,12 +64,15 @@ static int s_layout = LAYOUT_WIDE;
 #define COUNTDOWN_SHRINK_HOLD_MS  500
 #define BLINK_REPS      2
 #define ANIM_FAST_MS    80
+#define ANIM_SNAP_MS    120   // brief hold at overshoot size before snap
 #define WIDE_FULL_SIZE  5
+#define ANIM_PEAK_SIZE  6     // overshoot size during animations
 
 #define STEPS_AVG_MAX_MIN 120
 
-static const int SIZE_CYCLE[] = { 5, 4, 3, 2, 1, 2, 3, 4, 5 };
-#define SIZE_CYCLE_LEN 9
+// SIZE_CYCLE: ramp down 1, up past target to 6, snap to 5
+static const int SIZE_CYCLE[] = { 5, 4, 3, 2, 1, 2, 3, 4, 5, 6, 5 };
+#define SIZE_CYCLE_LEN 11
 
 typedef enum { CD_SHRINK, CD_HOLD_MIN, CD_EXPAND, CD_HOLD_MAX } CdSubPhase;
 
@@ -95,6 +97,7 @@ static GColor     s_fg, s_bg;
 static Phase      s_phase = PHASE_COUNTDOWN;
 static int        s_anim_step = 0, s_anim_rep = 0;
 static bool       s_going_down = true;
+static bool       s_overshot = false;   // true when at ANIM_PEAK_SIZE, about to snap
 static int        s_countdown_digit = 9;
 static CdSubPhase s_cd_sub = CD_HOLD_MAX;
 static AppTimer  *s_timer = NULL;
@@ -185,9 +188,6 @@ static void free_digit_bitmaps(int digit) {
     if (s_bitmaps[digit][s]) { gbitmap_destroy(s_bitmaps[digit][s]); s_bitmaps[digit][s] = NULL; }
 }
 
-// Raster blit. Dark bg: GCompOpSet (white pixels show white).
-// Light bg (s_fg==black): GCompOpXOR inverts destination pixels under
-// non-transparent bitmap areas, producing black digits on light backgrounds.
 static void blit(GContext *ctx, GBitmap *bm, int x, int y) {
   if (!bm) return;
 #if defined(PBL_COLOR)
@@ -209,7 +209,7 @@ static void draw_digits(GContext *ctx, int h_tens, int h_ones, int m_tens, int m
 }
 
 // ============================================================
-// STEP PACE BACKGROUND COLOR (color platforms only)
+// STEP PACE BACKGROUND COLOR
 // ============================================================
 #if defined(PBL_COLOR)
 static GColor prv_pace_color(int steps_today, int steps_avg) {
@@ -361,9 +361,6 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       graphics_fill_rect(ctx, GRect(gx, cy, GLYPH_W, sw), 0, GCornerNone);
       break;
     case 5:
-      // top-left bar + bottom ring + right bar
-      // bottom-left tail: anchored to TOP of bottom cap arc (b_bc-ro), grows up by tail
-      // same anchor logic as digit 3's lower left bar
       HBAR(top_y);
       VBAR(gx,   top_y + sw, b_tc + ro - 2*UNIT);
       fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
@@ -564,13 +561,36 @@ static void schedule(uint32_t ms) { if (s_timer) app_timer_cancel(s_timer); s_ti
 static void prv_start_blink(void) {
   s_demo_override = false;
   for (int s = 0; s < 6; s++) if (s_colon_bm[s]) { gbitmap_destroy(s_colon_bm[s]); s_colon_bm[s] = NULL; }
-  s_size=WIDE_FULL_SIZE; s_going_down=true; s_anim_rep=0; s_phase=PHASE_BLINK;
+  s_size=WIDE_FULL_SIZE; s_going_down=true; s_anim_rep=0; s_overshot=false; s_phase=PHASE_BLINK;
   layer_mark_dirty(s_canvas_layer); schedule(ANIM_FAST_MS);
+}
+
+// Shared expand-with-overshoot logic for BLINK and SQUISH.
+// Returns true when the expand is fully complete (settled at WIDE_FULL_SIZE).
+static bool prv_expand_step(void) {
+  if (s_overshot) {
+    // Snap back from peak to resting size
+    s_size = WIDE_FULL_SIZE;
+    s_overshot = false;
+    layer_mark_dirty(s_canvas_layer);
+    return true;
+  }
+  s_size++;
+  layer_mark_dirty(s_canvas_layer);
+  if (s_size >= ANIM_PEAK_SIZE) {
+    s_size = ANIM_PEAK_SIZE;
+    s_overshot = true;
+    schedule(ANIM_SNAP_MS);  // brief hold at peak before snap
+    return false;
+  }
+  schedule(ANIM_FAST_MS);
+  return false;
 }
 
 static void timer_cb(void *data) {
   s_timer = NULL;
   switch (s_phase) {
+
     case PHASE_COUNTDOWN:
       switch (s_cd_sub) {
         case CD_SHRINK:
@@ -586,13 +606,24 @@ static void timer_cb(void *data) {
           s_demo_digit = s_countdown_digit;
           layer_mark_dirty(s_canvas_layer);
           s_cd_sub = CD_EXPAND;
+          s_overshot = false;
           schedule(ANIM_FAST_MS);
           break;
         case CD_EXPAND:
-          s_size++;
-          layer_mark_dirty(s_canvas_layer);
-          if (s_size >= WIDE_FULL_SIZE) { s_size=WIDE_FULL_SIZE; s_cd_sub=CD_HOLD_MAX; schedule(COUNTDOWN_EXPAND_HOLD_MS); }
-          else { schedule(ANIM_FAST_MS); }
+          if (s_overshot) {
+            s_size = WIDE_FULL_SIZE; s_overshot = false;
+            layer_mark_dirty(s_canvas_layer);
+            s_cd_sub = CD_HOLD_MAX; schedule(COUNTDOWN_EXPAND_HOLD_MS);
+          } else {
+            s_size++;
+            layer_mark_dirty(s_canvas_layer);
+            if (s_size >= ANIM_PEAK_SIZE) {
+              s_size = ANIM_PEAK_SIZE; s_overshot = true;
+              schedule(ANIM_SNAP_MS);
+            } else {
+              schedule(ANIM_FAST_MS);
+            }
+          }
           break;
         case CD_HOLD_MAX:
           s_cd_sub = CD_SHRINK;
@@ -600,19 +631,55 @@ static void timer_cb(void *data) {
           break;
       }
       break;
+
     case PHASE_BLINK:
-      if (s_going_down) { s_size--; layer_mark_dirty(s_canvas_layer); if(s_size<=1){s_size=1;s_going_down=false;} schedule(ANIM_FAST_MS); }
-      else { s_size++; layer_mark_dirty(s_canvas_layer); if(s_size>=WIDE_FULL_SIZE){s_size=WIDE_FULL_SIZE;if(++s_anim_rep<BLINK_REPS){s_going_down=true;schedule(ANIM_FAST_MS);}else{s_target_size=WIDE_FULL_SIZE;s_phase=PHASE_DONE;layer_mark_dirty(s_canvas_layer);}}else schedule(ANIM_FAST_MS); }
+      if (s_going_down) {
+        s_size--; layer_mark_dirty(s_canvas_layer);
+        if (s_size <= 1) { s_size=1; s_going_down=false; s_overshot=false; }
+        schedule(ANIM_FAST_MS);
+      } else {
+        bool done = prv_expand_step();
+        if (done) {
+          if (++s_anim_rep < BLINK_REPS) {
+            s_going_down = true; s_overshot = false; schedule(ANIM_FAST_MS);
+          } else {
+            s_target_size = WIDE_FULL_SIZE; s_phase = PHASE_DONE;
+            layer_mark_dirty(s_canvas_layer);
+          }
+        }
+      }
       break;
+
     case PHASE_SQUISH:
-      if (s_going_down) { s_size--; layer_mark_dirty(s_canvas_layer); if(s_size<=1){s_size=1;if(s_digit_pending){s_hour=s_pending_hour;s_minute=s_pending_minute;s_digit_pending=false;}s_going_down=false;} schedule(ANIM_FAST_MS); }
-      else { s_size++; layer_mark_dirty(s_canvas_layer); if(s_size>=s_target_size){s_size=s_target_size;s_phase=PHASE_DONE;layer_mark_dirty(s_canvas_layer);}else schedule(ANIM_FAST_MS); }
+      if (s_going_down) {
+        s_size--; layer_mark_dirty(s_canvas_layer);
+        if (s_size <= 1) {
+          s_size=1;
+          if (s_digit_pending) { s_hour=s_pending_hour; s_minute=s_pending_minute; s_digit_pending=false; }
+          s_going_down=false; s_overshot=false;
+        }
+        schedule(ANIM_FAST_MS);
+      } else {
+        bool done = prv_expand_step();
+        if (done) { s_phase=PHASE_DONE; layer_mark_dirty(s_canvas_layer); }
+      }
       break;
+
     case PHASE_SHAKE_CYCLE:
-      if(++s_anim_step<SIZE_CYCLE_LEN){s_size=SIZE_CYCLE[s_anim_step];layer_mark_dirty(s_canvas_layer);schedule(ANIM_FAST_MS);}
-      else if(++s_anim_rep<2){s_anim_step=0;s_size=SIZE_CYCLE[0];layer_mark_dirty(s_canvas_layer);schedule(ANIM_FAST_MS);}
-      else{s_phase=PHASE_DONE;s_size=s_target_size;layer_mark_dirty(s_canvas_layer);}
+      if (++s_anim_step < SIZE_CYCLE_LEN) {
+        s_size = SIZE_CYCLE[s_anim_step];
+        layer_mark_dirty(s_canvas_layer);
+        // Use snap delay for the peak→resting transition (last two steps: 6→5)
+        bool at_snap = (s_anim_step == SIZE_CYCLE_LEN - 2); // step landing on 6
+        schedule(at_snap ? ANIM_SNAP_MS : ANIM_FAST_MS);
+      } else if (++s_anim_rep < 2) {
+        s_anim_step = 0; s_size = SIZE_CYCLE[0];
+        layer_mark_dirty(s_canvas_layer); schedule(ANIM_FAST_MS);
+      } else {
+        s_phase=PHASE_DONE; s_size=s_target_size; layer_mark_dirty(s_canvas_layer);
+      }
       break;
+
     case PHASE_DONE: break;
   }
 }
@@ -646,7 +713,7 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
 
 static void tick_handler(struct tm *t, TimeUnits units) {
   bool sq=(s_layout==LAYOUT_WIDE||s_layout==LAYOUT_VECTOR);
-  if(s_phase==PHASE_DONE&&sq){s_pending_hour=t->tm_hour;s_pending_minute=t->tm_min;s_digit_pending=true;s_phase=PHASE_SQUISH;s_going_down=true;schedule(ANIM_FAST_MS);}
+  if(s_phase==PHASE_DONE&&sq){s_pending_hour=t->tm_hour;s_pending_minute=t->tm_min;s_digit_pending=true;s_phase=PHASE_SQUISH;s_going_down=true;s_overshot=false;schedule(ANIM_FAST_MS);}
   else if(s_phase==PHASE_SQUISH){s_pending_hour=t->tm_hour;s_pending_minute=t->tm_min;s_digit_pending=true;}
   else{s_hour=t->tm_hour;s_minute=t->tm_min;layer_mark_dirty(s_canvas_layer);}
 #if defined(PBL_HEALTH)
@@ -690,7 +757,7 @@ static void window_load(Window *window) {
   unobstructed_area_service_subscribe(ua,NULL);
   accel_tap_service_subscribe(accel_tap_handler);
   s_phase=PHASE_COUNTDOWN; s_countdown_digit=9;
-  s_demo_digit=9; s_demo_override=true;
+  s_demo_digit=9; s_demo_override=true; s_overshot=false;
   s_size=WIDE_FULL_SIZE; s_cd_sub=CD_HOLD_MAX;
   layer_mark_dirty(s_canvas_layer); schedule(COUNTDOWN_EXPAND_HOLD_MS);
 }
