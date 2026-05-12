@@ -1,13 +1,13 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.19
+// TallBoy -- main.c  v3.19a
 //
-// v3.19 changes:
-//   digit 5: bottom-left tail re-anchored to bottom of ring arc
-//             VBAR(gx, b_bc+ro-tail, b_bc+ro) -- grows upward from bottom
-//   raster blit: uses GCompOpInvert on light backgrounds (s_fg==black)
-//                so white PNGs invert to black digits on light bg
+// v3.19a fixes:
+//   - GCompOpInvert -> GCompOpXOR (correct SDK constant for raster invert)
+//   - digit 5: bottom-left tail anchored to TOP of bottom cap arc
+//              VBAR(gx, b_bc-ro-tail, b_bc-ro) -- same as digit 3's lower left bar
+//   - WIDE_FULL_SIZE 6 -> 5 (less tight margins in wide mode)
 // ============================================================
 
 #define LAYOUT_WIDE      0
@@ -65,12 +65,12 @@ static int s_layout = LAYOUT_WIDE;
 #define COUNTDOWN_SHRINK_HOLD_MS  500
 #define BLINK_REPS      2
 #define ANIM_FAST_MS    80
-#define WIDE_FULL_SIZE  6
+#define WIDE_FULL_SIZE  5
 
 #define STEPS_AVG_MAX_MIN 120
 
-static const int SIZE_CYCLE[] = { 6, 5, 4, 3, 2, 1, 2, 3, 4, 5, 6 };
-#define SIZE_CYCLE_LEN 11
+static const int SIZE_CYCLE[] = { 5, 4, 3, 2, 1, 2, 3, 4, 5 };
+#define SIZE_CYCLE_LEN 9
 
 typedef enum { CD_SHRINK, CD_HOLD_MIN, CD_EXPAND, CD_HOLD_MAX } CdSubPhase;
 
@@ -185,13 +185,13 @@ static void free_digit_bitmaps(int digit) {
     if (s_bitmaps[digit][s]) { gbitmap_destroy(s_bitmaps[digit][s]); s_bitmaps[digit][s] = NULL; }
 }
 
-// Blit raster bitmap. On dark bg: GCompOpSet (white pixels show white).
-// On light bg (s_fg==black): GCompOpInvert -- inverts destination where
-// bitmap pixels are non-transparent, producing black digits on light bg.
+// Raster blit. Dark bg: GCompOpSet (white pixels show white).
+// Light bg (s_fg==black): GCompOpXOR inverts destination pixels under
+// non-transparent bitmap areas, producing black digits on light backgrounds.
 static void blit(GContext *ctx, GBitmap *bm, int x, int y) {
   if (!bm) return;
 #if defined(PBL_COLOR)
-  GCompOp op = gcolor_equal(s_fg, GColorBlack) ? GCompOpInvert : GCompOpSet;
+  GCompOp op = gcolor_equal(s_fg, GColorBlack) ? GCompOpXOR : GCompOpSet;
 #else
   GCompOp op = GCompOpSet;
 #endif
@@ -361,14 +361,15 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       graphics_fill_rect(ctx, GRect(gx, cy, GLYPH_W, sw), 0, GCornerNone);
       break;
     case 5:
-      // top-left bar to b_tc+ro-2u (middle section)
-      // bottom-left tail: anchored at BOTTOM of ring arc (b_bc+ro), grows UP by tail
+      // top-left bar + bottom ring + right bar
+      // bottom-left tail: anchored to TOP of bottom cap arc (b_bc-ro), grows up by tail
+      // same anchor logic as digit 3's lower left bar
       HBAR(top_y);
       VBAR(gx,   top_y + sw, b_tc + ro - 2*UNIT);
       fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
       VBAR(gx_r, b_tc, b_bc);
-      VBAR(gx,   b_bc + ro - tail, b_bc + ro);
+      VBAR(gx,   b_bc - ro - tail, b_bc - ro);
       break;
     case 6:
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);
@@ -563,7 +564,7 @@ static void schedule(uint32_t ms) { if (s_timer) app_timer_cancel(s_timer); s_ti
 static void prv_start_blink(void) {
   s_demo_override = false;
   for (int s = 0; s < 6; s++) if (s_colon_bm[s]) { gbitmap_destroy(s_colon_bm[s]); s_colon_bm[s] = NULL; }
-  s_size=6; s_going_down=true; s_anim_rep=0; s_phase=PHASE_BLINK;
+  s_size=WIDE_FULL_SIZE; s_going_down=true; s_anim_rep=0; s_phase=PHASE_BLINK;
   layer_mark_dirty(s_canvas_layer); schedule(ANIM_FAST_MS);
 }
 
