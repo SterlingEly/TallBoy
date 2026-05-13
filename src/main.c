@@ -1,9 +1,11 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.20b
-// Fix digit 5 lower-left tail: VBAR(gx, b_bc-tail, b_bc)
-// Identical anchor to digit 3's lower-left bar.
+// TallBoy -- main.c  v3.20c
+// Fix digit 5: top-left bar ends at b_tc-ro (top edge of bottom ring arc)
+// instead of b_tc+ro-2*UNIT (= b_tc). This prevents the mouth from closing
+// at small sizes while keeping a clear gap at all sizes.
+// At size 6 the bar is 2u shorter than v3.20b -- may need visual recheck.
 // ============================================================
 
 #define LAYOUT_WIDE      0
@@ -350,9 +352,11 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       graphics_fill_rect(ctx, GRect(gx, cy, GLYPH_W, sw), 0, GCornerNone);
       break;
     case 5:
-      // Lower-left tail: VBAR(gx, b_bc-tail, b_bc) -- identical to digit 3's lower-left bar
+      // Top-left bar ends at b_tc-ro (top edge of bottom ring arc).
+      // Keeps the mouth open at all sizes -- arc never overlaps bar.
+      // Bottom-left tail: identical to digit 3's lower-left bar.
       HBAR(top_y);
-      VBAR(gx,   top_y + sw, b_tc + ro - 2*UNIT);
+      VBAR(gx,   top_y + sw, b_tc - ro);
       fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
       VBAR(gx_r, b_tc, b_bc);
