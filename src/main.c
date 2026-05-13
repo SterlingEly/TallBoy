@@ -1,12 +1,11 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.20
-//
-// v3.20: overextension wiggle in animations
-//   Expand phases overshoot to size 6 briefly, then snap to WIDE_FULL_SIZE (5).
-//   SIZE_CYCLE peaks at 6 then snaps to 5 at the end.
-//   Resting/display size remains WIDE_FULL_SIZE = 5.
+// TallBoy -- main.c  v3.20a
+// Hotfix: GCompOpXOR -> GCompOpAssignInverted for light-bg raster digits.
+// GCompOpAssignInverted inverts source pixels before assigning, producing
+// black digits from white 1-bit PNGs on light backgrounds.
+// All other code identical to v3.20.
 // ============================================================
 
 #define LAYOUT_WIDE      0
@@ -64,13 +63,12 @@ static int s_layout = LAYOUT_WIDE;
 #define COUNTDOWN_SHRINK_HOLD_MS  500
 #define BLINK_REPS      2
 #define ANIM_FAST_MS    80
-#define ANIM_SNAP_MS    120   // brief hold at overshoot size before snap
+#define ANIM_SNAP_MS    120
 #define WIDE_FULL_SIZE  5
-#define ANIM_PEAK_SIZE  6     // overshoot size during animations
+#define ANIM_PEAK_SIZE  6
 
 #define STEPS_AVG_MAX_MIN 120
 
-// SIZE_CYCLE: ramp down 1, up past target to 6, snap to 5
 static const int SIZE_CYCLE[] = { 5, 4, 3, 2, 1, 2, 3, 4, 5, 6, 5 };
 #define SIZE_CYCLE_LEN 11
 
@@ -97,7 +95,7 @@ static GColor     s_fg, s_bg;
 static Phase      s_phase = PHASE_COUNTDOWN;
 static int        s_anim_step = 0, s_anim_rep = 0;
 static bool       s_going_down = true;
-static bool       s_overshot = false;   // true when at ANIM_PEAK_SIZE, about to snap
+static bool       s_overshot = false;
 static int        s_countdown_digit = 9;
 static CdSubPhase s_cd_sub = CD_HOLD_MAX;
 static AppTimer  *s_timer = NULL;
@@ -188,10 +186,13 @@ static void free_digit_bitmaps(int digit) {
     if (s_bitmaps[digit][s]) { gbitmap_destroy(s_bitmaps[digit][s]); s_bitmaps[digit][s] = NULL; }
 }
 
+// Raster blit. Normal: GCompOpSet (white pixels on transparent = white digits).
+// Light bg (s_fg==black): GCompOpAssignInverted inverts the 1-bit source,
+// rendering white PNG pixels as black, giving readable dark digits on light bg.
 static void blit(GContext *ctx, GBitmap *bm, int x, int y) {
   if (!bm) return;
 #if defined(PBL_COLOR)
-  GCompOp op = gcolor_equal(s_fg, GColorBlack) ? GCompOpXOR : GCompOpSet;
+  GCompOp op = gcolor_equal(s_fg, GColorBlack) ? GCompOpAssignInverted : GCompOpSet;
 #else
   GCompOp op = GCompOpSet;
 #endif
@@ -565,11 +566,8 @@ static void prv_start_blink(void) {
   layer_mark_dirty(s_canvas_layer); schedule(ANIM_FAST_MS);
 }
 
-// Shared expand-with-overshoot logic for BLINK and SQUISH.
-// Returns true when the expand is fully complete (settled at WIDE_FULL_SIZE).
 static bool prv_expand_step(void) {
   if (s_overshot) {
-    // Snap back from peak to resting size
     s_size = WIDE_FULL_SIZE;
     s_overshot = false;
     layer_mark_dirty(s_canvas_layer);
@@ -580,7 +578,7 @@ static bool prv_expand_step(void) {
   if (s_size >= ANIM_PEAK_SIZE) {
     s_size = ANIM_PEAK_SIZE;
     s_overshot = true;
-    schedule(ANIM_SNAP_MS);  // brief hold at peak before snap
+    schedule(ANIM_SNAP_MS);
     return false;
   }
   schedule(ANIM_FAST_MS);
@@ -669,8 +667,7 @@ static void timer_cb(void *data) {
       if (++s_anim_step < SIZE_CYCLE_LEN) {
         s_size = SIZE_CYCLE[s_anim_step];
         layer_mark_dirty(s_canvas_layer);
-        // Use snap delay for the peak→resting transition (last two steps: 6→5)
-        bool at_snap = (s_anim_step == SIZE_CYCLE_LEN - 2); // step landing on 6
+        bool at_snap = (s_anim_step == SIZE_CYCLE_LEN - 2);
         schedule(at_snap ? ANIM_SNAP_MS : ANIM_FAST_MS);
       } else if (++s_anim_rep < 2) {
         s_anim_step = 0; s_size = SIZE_CYCLE[0];
