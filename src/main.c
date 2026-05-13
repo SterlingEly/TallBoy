@@ -1,11 +1,9 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.20a
-// Hotfix: GCompOpXOR -> GCompOpAssignInverted for light-bg raster digits.
-// GCompOpAssignInverted inverts source pixels before assigning, producing
-// black digits from white 1-bit PNGs on light backgrounds.
-// All other code identical to v3.20.
+// TallBoy -- main.c  v3.20b
+// Fix digit 5 lower-left tail: VBAR(gx, b_bc-tail, b_bc)
+// Identical anchor to digit 3's lower-left bar.
 // ============================================================
 
 #define LAYOUT_WIDE      0
@@ -186,9 +184,6 @@ static void free_digit_bitmaps(int digit) {
     if (s_bitmaps[digit][s]) { gbitmap_destroy(s_bitmaps[digit][s]); s_bitmaps[digit][s] = NULL; }
 }
 
-// Raster blit. Normal: GCompOpSet (white pixels on transparent = white digits).
-// Light bg (s_fg==black): GCompOpAssignInverted inverts the 1-bit source,
-// rendering white PNG pixels as black, giving readable dark digits on light bg.
 static void blit(GContext *ctx, GBitmap *bm, int x, int y) {
   if (!bm) return;
 #if defined(PBL_COLOR)
@@ -209,9 +204,6 @@ static void draw_digits(GContext *ctx, int h_tens, int h_ones, int m_tens, int m
   blit(ctx, get_bitmap(m_ones, size), SLOT_M_ONES, y);
 }
 
-// ============================================================
-// STEP PACE BACKGROUND COLOR
-// ============================================================
 #if defined(PBL_COLOR)
 static GColor prv_pace_color(int steps_today, int steps_avg) {
   if (steps_avg <= 0) return GColorBlack;
@@ -257,10 +249,6 @@ static int prv_calc_steps_avg(void) {
   return day_count > 0 ? total / day_count : -1;
 }
 #endif
-
-// ============================================================
-// VECTOR DIGIT DRAWING
-// ============================================================
 
 static void fill_arc(GContext *ctx, int cx, int cy, int ro, int ri, int a0, int a1) {
   GRect b = GRect(cx - ro, cy - ro, ro * 2, ro * 2);
@@ -362,12 +350,13 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       graphics_fill_rect(ctx, GRect(gx, cy, GLYPH_W, sw), 0, GCornerNone);
       break;
     case 5:
+      // Lower-left tail: VBAR(gx, b_bc-tail, b_bc) -- identical to digit 3's lower-left bar
       HBAR(top_y);
       VBAR(gx,   top_y + sw, b_tc + ro - 2*UNIT);
       fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
       VBAR(gx_r, b_tc, b_bc);
-      VBAR(gx,   b_bc - ro - tail, b_bc - ro);
+      VBAR(gx,   b_bc - tail, b_bc);
       break;
     case 6:
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);
@@ -443,9 +432,6 @@ static void draw_stacked_vec(GContext *ctx, int h_tens, int h_ones,
   draw_digit_vec(ctx, m_ones, ones_x, m_cy, sz);
 }
 
-// ============================================================
-// INFO LINES
-// ============================================================
 static const char *s_day_names[]   = {"SUN","MON","TUE","WED","THU","FRI","SAT"};
 static const char *s_month_abbrs[] = {"JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"};
 
@@ -488,9 +474,6 @@ static void draw_info_column(GContext *ctx, GRect area, struct tm *t) {
   draw_info_block(ctx, area.origin.x, start_y, area.size.w, lines, n);
 }
 
-// ============================================================
-// DRAW LAYER
-// ============================================================
 static void draw_layer(Layer *layer, GContext *ctx) {
   Layer *root  = window_get_root_layer(s_window);
   GRect ub     = layer_get_unobstructed_bounds(root);
@@ -553,9 +536,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   }
 }
 
-// ============================================================
-// TIMER
-// ============================================================
 static void timer_cb(void *data);
 static void schedule(uint32_t ms) { if (s_timer) app_timer_cancel(s_timer); s_timer = app_timer_register(ms, timer_cb, NULL); }
 
