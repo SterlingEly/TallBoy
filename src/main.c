@@ -1,14 +1,14 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.21
+// TallBoy -- main.c  v3.21a
 //
-// v3.21: Restore split countdown — raster outer slots, vector inner slots.
-//   Outer (H_TENS, M_ONES): raster bitmaps at same integer size
-//   Inner (H_ONES, M_TENS): vector centered on screen
-//   Colon: vector
-// This allows direct side-by-side raster vs vector comparison at each size.
-// Both step through same discrete integer sizes (1-6) so comparison is valid.
+// v3.21a changes:
+//   digit 5: top-left bar ends at b_tc (sizes 2+) or b_tc-ro (size 1 only)
+//            restores correct mouth opening at usable sizes; size 1 gets
+//            a special-case floor to stay legible during squish minimum
+//   DEBUG: raster digits always drawn red (fill slot red, GCompOpAnd)
+//          makes raster vs vector comparison unambiguous regardless of bg
 // ============================================================
 
 #define LAYOUT_WIDE      0
@@ -189,14 +189,18 @@ static void free_digit_bitmaps(int digit) {
     if (s_bitmaps[digit][s]) { gbitmap_destroy(s_bitmaps[digit][s]); s_bitmaps[digit][s] = NULL; }
 }
 
+// DEBUG: raster digits always drawn red.
+// Fill slot rect with red, then GCompOpAnd: white PNG pixels AND red = red,
+// transparent pixels AND red = black. Result: red digit on black, always visible.
 static void blit(GContext *ctx, GBitmap *bm, int x, int y) {
   if (!bm) return;
 #if defined(PBL_COLOR)
-  GCompOp op = gcolor_equal(s_fg, GColorBlack) ? GCompOpAssignInverted : GCompOpSet;
+  graphics_context_set_fill_color(ctx, GColorRed);
+  graphics_fill_rect(ctx, GRect(x, y, SLOT_W, SCREEN_H), 0, GCornerNone);
+  graphics_context_set_compositing_mode(ctx, GCompOpAnd);
 #else
-  GCompOp op = GCompOpSet;
+  graphics_context_set_compositing_mode(ctx, GCompOpSet);
 #endif
-  graphics_context_set_compositing_mode(ctx, op);
   graphics_draw_bitmap_in_rect(ctx, bm, GRect(x, y, SLOT_W, SCREEN_H));
 }
 
@@ -354,14 +358,18 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       VBAR(gx_r, top_y, bot_y);
       graphics_fill_rect(ctx, GRect(gx, cy, GLYPH_W, sw), 0, GCornerNone);
       break;
-    case 5:
+    case 5: {
+      // Top-left bar: ends at b_tc (size 2+) for correct mouth opening,
+      // or b_tc-ro (size 1 only) to prevent full loop closure at squish minimum.
+      int bar5_end = (size <= 1) ? (b_tc - ro) : b_tc;
       HBAR(top_y);
-      VBAR(gx,   top_y + sw, b_tc - ro);
+      VBAR(gx,   top_y + sw, bar5_end);
       fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
       VBAR(gx_r, b_tc, b_bc);
       VBAR(gx,   b_bc - tail, b_bc);
       break;
+    }
     case 6:
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);
       VBAR(gx_r, top_cy, top_cy + tail);
@@ -427,8 +435,8 @@ static void draw_digits_vec(GContext *ctx, int h_tens, int h_ones,
   draw_digit_vec(ctx, m_ones, SLOT_M_ONES, cy, size);
 }
 
-// Split countdown: raster outer slots (H_TENS, M_ONES), vector inner slots (H_ONES, M_TENS).
-// Both at same s_size — direct side-by-side comparison at every animation frame.
+// Split countdown: raster outer slots (H_TENS, M_ONES) in red,
+// vector inner slots (H_ONES, M_TENS) in s_fg. Same size, direct comparison.
 static void draw_digits_countdown_split(GContext *ctx, int digit, int size, int center_y) {
   int raster_y = center_y - SCREEN_H / 2;
   blit(ctx, get_bitmap(digit, size), SLOT_H_TENS, raster_y);
@@ -517,7 +525,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   struct tm *tm = (s_phase == PHASE_DONE) ? localtime(&now_t) : NULL;
 
   if (s_phase == PHASE_COUNTDOWN) {
-    // Split: raster outer, vector inner — same size, side-by-side comparison
     draw_digits_countdown_split(ctx, s_demo_digit, s_size, center_y);
   } else if (s_layout == LAYOUT_WIDE) {
     draw_digits(ctx, h_tens, h_ones, m_tens, m_ones, size, center_y - SCREEN_H/2, true);
