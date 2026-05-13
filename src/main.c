@@ -1,11 +1,14 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.20c
-// Fix digit 5: top-left bar ends at b_tc-ro (top edge of bottom ring arc)
-// instead of b_tc+ro-2*UNIT (= b_tc). This prevents the mouth from closing
-// at small sizes while keeping a clear gap at all sizes.
-// At size 6 the bar is 2u shorter than v3.20b -- may need visual recheck.
+// TallBoy -- main.c  v3.21
+//
+// v3.21: Restore split countdown — raster outer slots, vector inner slots.
+//   Outer (H_TENS, M_ONES): raster bitmaps at same integer size
+//   Inner (H_ONES, M_TENS): vector centered on screen
+//   Colon: vector
+// This allows direct side-by-side raster vs vector comparison at each size.
+// Both step through same discrete integer sizes (1-6) so comparison is valid.
 // ============================================================
 
 #define LAYOUT_WIDE      0
@@ -352,9 +355,6 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       graphics_fill_rect(ctx, GRect(gx, cy, GLYPH_W, sw), 0, GCornerNone);
       break;
     case 5:
-      // Top-left bar ends at b_tc-ro (top edge of bottom ring arc).
-      // Keeps the mouth open at all sizes -- arc never overlaps bar.
-      // Bottom-left tail: identical to digit 3's lower-left bar.
       HBAR(top_y);
       VBAR(gx,   top_y + sw, b_tc - ro);
       fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
@@ -425,6 +425,17 @@ static void draw_digits_vec(GContext *ctx, int h_tens, int h_ones,
   draw_colon_vec(ctx, COLON_SLOT_X, cy, size);
   draw_digit_vec(ctx, m_tens, SLOT_M_TENS, cy, size);
   draw_digit_vec(ctx, m_ones, SLOT_M_ONES, cy, size);
+}
+
+// Split countdown: raster outer slots (H_TENS, M_ONES), vector inner slots (H_ONES, M_TENS).
+// Both at same s_size — direct side-by-side comparison at every animation frame.
+static void draw_digits_countdown_split(GContext *ctx, int digit, int size, int center_y) {
+  int raster_y = center_y - SCREEN_H / 2;
+  blit(ctx, get_bitmap(digit, size), SLOT_H_TENS, raster_y);
+  blit(ctx, get_bitmap(digit, size), SLOT_M_ONES, raster_y);
+  draw_digit_vec(ctx, digit, SLOT_H_ONES, center_y, size);
+  draw_digit_vec(ctx, digit, SLOT_M_TENS, center_y, size);
+  draw_colon_vec(ctx, COLON_SLOT_X, center_y, size);
 }
 
 static void draw_stacked_vec(GContext *ctx, int h_tens, int h_ones,
@@ -506,12 +517,8 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   struct tm *tm = (s_phase == PHASE_DONE) ? localtime(&now_t) : NULL;
 
   if (s_phase == PHASE_COUNTDOWN) {
-    int d = s_demo_digit, sz = s_size;
-    draw_digit_vec(ctx, d, SLOT_H_TENS, center_y, sz);
-    draw_digit_vec(ctx, d, SLOT_H_ONES, center_y, sz);
-    draw_colon_vec(ctx, COLON_SLOT_X, center_y, sz);
-    draw_digit_vec(ctx, d, SLOT_M_TENS, center_y, sz);
-    draw_digit_vec(ctx, d, SLOT_M_ONES, center_y, sz);
+    // Split: raster outer, vector inner — same size, side-by-side comparison
+    draw_digits_countdown_split(ctx, s_demo_digit, s_size, center_y);
   } else if (s_layout == LAYOUT_WIDE) {
     draw_digits(ctx, h_tens, h_ones, m_tens, m_ones, size, center_y - SCREEN_H/2, true);
   } else if (s_layout == LAYOUT_VECTOR) {
