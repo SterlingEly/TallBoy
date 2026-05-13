@@ -1,13 +1,9 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.21b
-//
-// v3.21b:
-//   blit(): GCompOpAnd -> fill red + GCompOpAssignInverted
-//           gives black digit on red bg (works on color displays)
-//   digit 5: lower-left tail minimum 1u (tail5 = max(tail, UNIT))
-//             prevents zero-height VBAR at sizes 1-2
+// TallBoy -- main.c  v3.21c
+// Hotfix: stray literal \n removed from free_digit_bitmaps (line 187 in v3.21b)
+// All other changes from v3.21b preserved.
 // ============================================================
 
 #define LAYOUT_WIDE      0
@@ -184,7 +180,8 @@ static void free_bitmaps(void) {
 }
 
 static void free_digit_bitmaps(int digit) {
-  for (int s = 0; s < 6; s++)\n    if (s_bitmaps[digit][s]) { gbitmap_destroy(s_bitmaps[digit][s]); s_bitmaps[digit][s] = NULL; }
+  for (int s = 0; s < 6; s++)
+    if (s_bitmaps[digit][s]) { gbitmap_destroy(s_bitmaps[digit][s]); s_bitmaps[digit][s] = NULL; }
 }
 
 // DEBUG: raster digits always shown as black on red background.
@@ -359,7 +356,7 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
     case 5: {
       // top-left bar: b_tc at sizes 2+, b_tc-ro at size 1
-      // lower-left tail: minimum 1u (UNIT) so it's always visible
+      // lower-left tail: minimum 1u so it's always visible (tail=0 at sizes 1-2)
       int bar5_end = (size <= 1) ? (b_tc - ro) : b_tc;
       int tail5    = (tail > 0)  ? tail : UNIT;
       HBAR(top_y);
