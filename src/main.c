@@ -1,14 +1,13 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.21a
+// TallBoy -- main.c  v3.21b
 //
-// v3.21a changes:
-//   digit 5: top-left bar ends at b_tc (sizes 2+) or b_tc-ro (size 1 only)
-//            restores correct mouth opening at usable sizes; size 1 gets
-//            a special-case floor to stay legible during squish minimum
-//   DEBUG: raster digits always drawn red (fill slot red, GCompOpAnd)
-//          makes raster vs vector comparison unambiguous regardless of bg
+// v3.21b:
+//   blit(): GCompOpAnd -> fill red + GCompOpAssignInverted
+//           gives black digit on red bg (works on color displays)
+//   digit 5: lower-left tail minimum 1u (tail5 = max(tail, UNIT))
+//             prevents zero-height VBAR at sizes 1-2
 // ============================================================
 
 #define LAYOUT_WIDE      0
@@ -185,19 +184,19 @@ static void free_bitmaps(void) {
 }
 
 static void free_digit_bitmaps(int digit) {
-  for (int s = 0; s < 6; s++)
-    if (s_bitmaps[digit][s]) { gbitmap_destroy(s_bitmaps[digit][s]); s_bitmaps[digit][s] = NULL; }
+  for (int s = 0; s < 6; s++)\n    if (s_bitmaps[digit][s]) { gbitmap_destroy(s_bitmaps[digit][s]); s_bitmaps[digit][s] = NULL; }
 }
 
-// DEBUG: raster digits always drawn red.
-// Fill slot rect with red, then GCompOpAnd: white PNG pixels AND red = red,
-// transparent pixels AND red = black. Result: red digit on black, always visible.
+// DEBUG: raster digits always shown as black on red background.
+// Fill slot red first, then GCompOpAssignInverted inverts the 1-bit bitmap
+// (white pixels become black) and assigns over the red fill.
+// Result: black digit shape on red slot bg — always visible regardless of bg color.
 static void blit(GContext *ctx, GBitmap *bm, int x, int y) {
   if (!bm) return;
 #if defined(PBL_COLOR)
   graphics_context_set_fill_color(ctx, GColorRed);
   graphics_fill_rect(ctx, GRect(x, y, SLOT_W, SCREEN_H), 0, GCornerNone);
-  graphics_context_set_compositing_mode(ctx, GCompOpAnd);
+  graphics_context_set_compositing_mode(ctx, GCompOpAssignInverted);
 #else
   graphics_context_set_compositing_mode(ctx, GCompOpSet);
 #endif
@@ -359,15 +358,16 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       graphics_fill_rect(ctx, GRect(gx, cy, GLYPH_W, sw), 0, GCornerNone);
       break;
     case 5: {
-      // Top-left bar: ends at b_tc (size 2+) for correct mouth opening,
-      // or b_tc-ro (size 1 only) to prevent full loop closure at squish minimum.
+      // top-left bar: b_tc at sizes 2+, b_tc-ro at size 1
+      // lower-left tail: minimum 1u (UNIT) so it's always visible
       int bar5_end = (size <= 1) ? (b_tc - ro) : b_tc;
+      int tail5    = (tail > 0)  ? tail : UNIT;
       HBAR(top_y);
       VBAR(gx,   top_y + sw, bar5_end);
       fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
       VBAR(gx_r, b_tc, b_bc);
-      VBAR(gx,   b_bc - tail, b_bc);
+      VBAR(gx,   b_bc - tail5, b_bc);
       break;
     }
     case 6:
@@ -435,8 +435,6 @@ static void draw_digits_vec(GContext *ctx, int h_tens, int h_ones,
   draw_digit_vec(ctx, m_ones, SLOT_M_ONES, cy, size);
 }
 
-// Split countdown: raster outer slots (H_TENS, M_ONES) in red,
-// vector inner slots (H_ONES, M_TENS) in s_fg. Same size, direct comparison.
 static void draw_digits_countdown_split(GContext *ctx, int digit, int size, int center_y) {
   int raster_y = center_y - SCREEN_H / 2;
   blit(ctx, get_bitmap(digit, size), SLOT_H_TENS, raster_y);
