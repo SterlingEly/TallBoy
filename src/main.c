@@ -1,16 +1,12 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.21d
+// TallBoy -- main.c  v3.21e
 //
-// Fixes:
-//   raster debug: blit normally (GCompOpSet), then draw red marker
-//     stripe at top of each raster slot — simple, always works
-//   digit 5 size 1: only draw HBAR + single right arc + VBAR(gx_r)
-//     the two bottom arcs overlap completely at size 1, no gap possible;
-//     accept the squish frame looks minimal rather than broken
-//   digit 5 size 2: no lower-left tail (tail=0, min was adding UNIT
-//     which caused the overlap issue); only sizes 3+ get a tail
+// v3.21e: revert digit 5 to simple unified path (no size-1 special case).
+//   At size 1 the ring is a blob and the 5 looks a bit wrong, but
+//   that's acceptable as an animation-only squish frame.
+//   Red stripe raster marker kept from v3.21d.
 // ============================================================
 
 #define LAYOUT_WIDE      0
@@ -191,14 +187,13 @@ static void free_digit_bitmaps(int digit) {
     if (s_bitmaps[digit][s]) { gbitmap_destroy(s_bitmaps[digit][s]); s_bitmaps[digit][s] = NULL; }
 }
 
-// DEBUG: blit normally, then draw a red marker stripe at top of slot.
-// The stripe is clearly visible regardless of bg color or bitmap format.
+// DEBUG: blit normally, then draw a 3px red stripe at top of slot.
+// Always visible regardless of bg color or bitmap format.
 static void blit(GContext *ctx, GBitmap *bm, int x, int y) {
   if (!bm) return;
   graphics_context_set_compositing_mode(ctx, GCompOpSet);
   graphics_draw_bitmap_in_rect(ctx, bm, GRect(x, y, SLOT_W, SCREEN_H));
 #if defined(PBL_COLOR)
-  // Red marker stripe at top of slot — 3px tall, full slot width
   graphics_context_set_fill_color(ctx, GColorRed);
   graphics_fill_rect(ctx, GRect(x, y, SLOT_W, 3), 0, GCornerNone);
 #endif
@@ -358,24 +353,17 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       VBAR(gx_r, top_y, bot_y);
       graphics_fill_rect(ctx, GRect(gx, cy, GLYPH_W, sw), 0, GCornerNone);
       break;
-    case 5: {
-      // Size 1: b_tc==b_bc, arcs overlap into a blob — draw minimal version:
-      //   HBAR + single arc at b_tc + right VBAR only. No tail (overlaps blob).
-      // Size 2+: normal 5 geometry, top-left bar to b_tc, tail from sizes 3+.
-      if (size <= 1) {
-        HBAR(top_y);
-        fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
-        VBAR(gx_r, top_y + sw, b_tc + ro);
-      } else {
-        HBAR(top_y);
-        VBAR(gx,   top_y + sw, b_tc);
-        fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
-        fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
-        VBAR(gx_r, b_tc, b_bc);
-        if (tail > 0) VBAR(gx, b_bc - tail, b_bc);
-      }
+    case 5:
+      // Unified path all sizes. At size 1 the two arcs overlap (b_tc==b_bc)
+      // and the ring becomes a blob -- acceptable for squish animation only.
+      // Tail only at sizes 3+ (tail=0 at sizes 1-2).
+      HBAR(top_y);
+      VBAR(gx,   top_y + sw, b_tc);
+      fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
+      fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
+      VBAR(gx_r, b_tc, b_bc);
+      if (tail > 0) VBAR(gx, b_bc - tail, b_bc);
       break;
-    }
     case 6:
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);
       VBAR(gx_r, top_cy, top_cy + tail);
