@@ -1,12 +1,17 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.21e
+// TallBoy -- main.c  v3.21f
 //
-// v3.21e: revert digit 5 to simple unified path (no size-1 special case).
-//   At size 1 the ring is a blob and the 5 looks a bit wrong, but
-//   that's acceptable as an animation-only squish frame.
-//   Red stripe raster marker kept from v3.21d.
+// v3.21f: size 2 is the animation floor (was size 1).
+//   ANIM_MIN_SIZE = 2. All squish/blink/countdown animations
+//   stop shrinking at size 2, never reach size 1.
+//   SIZE_CYCLE updated accordingly: {5,4,3,2,3,4,5,6,5}
+//   Size 1 is retired -- digits (especially 5) don't hold up at
+//   that scale and it's only 11px taller than size 2 anyway.
+//
+//   Full-vector future note: min display size will be computed from
+//   available height; ANIM_MIN_SIZE becomes a unit floor (~3-4px).
 // ============================================================
 
 #define LAYOUT_WIDE      0
@@ -67,11 +72,11 @@ static int s_layout = LAYOUT_WIDE;
 #define ANIM_SNAP_MS    120
 #define WIDE_FULL_SIZE  5
 #define ANIM_PEAK_SIZE  6
+#define ANIM_MIN_SIZE   2   // smallest size used in animations
 
-#define STEPS_AVG_MAX_MIN 120
-
-static const int SIZE_CYCLE[] = { 5, 4, 3, 2, 1, 2, 3, 4, 5, 6, 5 };
-#define SIZE_CYCLE_LEN 11
+// SIZE_CYCLE: ramp down to ANIM_MIN_SIZE (2), back up with overshoot to 6, snap to 5
+static const int SIZE_CYCLE[] = { 5, 4, 3, 2, 3, 4, 5, 6, 5 };
+#define SIZE_CYCLE_LEN 9
 
 typedef enum { CD_SHRINK, CD_HOLD_MIN, CD_EXPAND, CD_HOLD_MAX } CdSubPhase;
 
@@ -188,7 +193,6 @@ static void free_digit_bitmaps(int digit) {
 }
 
 // DEBUG: blit normally, then draw a 3px red stripe at top of slot.
-// Always visible regardless of bg color or bitmap format.
 static void blit(GContext *ctx, GBitmap *bm, int x, int y) {
   if (!bm) return;
   graphics_context_set_compositing_mode(ctx, GCompOpSet);
@@ -354,9 +358,7 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       graphics_fill_rect(ctx, GRect(gx, cy, GLYPH_W, sw), 0, GCornerNone);
       break;
     case 5:
-      // Unified path all sizes. At size 1 the two arcs overlap (b_tc==b_bc)
-      // and the ring becomes a blob -- acceptable for squish animation only.
-      // Tail only at sizes 3+ (tail=0 at sizes 1-2).
+      // Unified path. tail=0 at size 2 (smallest used), so no lower-left stub.
       HBAR(top_y);
       VBAR(gx,   top_y + sw, b_tc);
       fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
@@ -584,7 +586,7 @@ static void timer_cb(void *data) {
         case CD_SHRINK:
           s_size--;
           layer_mark_dirty(s_canvas_layer);
-          if (s_size <= 1) { s_size=1; s_cd_sub=CD_HOLD_MIN; schedule(COUNTDOWN_SHRINK_HOLD_MS); }
+          if (s_size <= ANIM_MIN_SIZE) { s_size=ANIM_MIN_SIZE; s_cd_sub=CD_HOLD_MIN; schedule(COUNTDOWN_SHRINK_HOLD_MS); }
           else { schedule(ANIM_FAST_MS); }
           break;
         case CD_HOLD_MIN:
@@ -623,7 +625,7 @@ static void timer_cb(void *data) {
     case PHASE_BLINK:
       if (s_going_down) {
         s_size--; layer_mark_dirty(s_canvas_layer);
-        if (s_size <= 1) { s_size=1; s_going_down=false; s_overshot=false; }
+        if (s_size <= ANIM_MIN_SIZE) { s_size=ANIM_MIN_SIZE; s_going_down=false; s_overshot=false; }
         schedule(ANIM_FAST_MS);
       } else {
         bool done = prv_expand_step();
@@ -641,8 +643,8 @@ static void timer_cb(void *data) {
     case PHASE_SQUISH:
       if (s_going_down) {
         s_size--; layer_mark_dirty(s_canvas_layer);
-        if (s_size <= 1) {
-          s_size=1;
+        if (s_size <= ANIM_MIN_SIZE) {
+          s_size=ANIM_MIN_SIZE;
           if (s_digit_pending) { s_hour=s_pending_hour; s_minute=s_pending_minute; s_digit_pending=false; }
           s_going_down=false; s_overshot=false;
         }
