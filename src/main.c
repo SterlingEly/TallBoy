@@ -1,17 +1,15 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.21f
+// TallBoy -- main.c  v3.22
 //
-// v3.21f: size 2 is the animation floor (was size 1).
-//   ANIM_MIN_SIZE = 2. All squish/blink/countdown animations
-//   stop shrinking at size 2, never reach size 1.
-//   SIZE_CYCLE updated accordingly: {5,4,3,2,3,4,5,6,5}
-//   Size 1 is retired -- digits (especially 5) don't hold up at
-//   that scale and it's only 11px taller than size 2 anyway.
+// v3.22: slow countdown for pixel-level screenshot verification
+//   COUNTDOWN_STEP_MS = 160 (2x normal ANIM_FAST_MS=80)
+//   COUNTDOWN_EXPAND_HOLD_MS = 1000 (was 500)
+//   COUNTDOWN_SHRINK_HOLD_MS = 1000 (was 500)
+//   After verification, revert these three to normal speed.
 //
-//   Full-vector future note: min display size will be computed from
-//   available height; ANIM_MIN_SIZE becomes a unit floor (~3-4px).
+// Also: ANIM_MIN_SIZE=2 (size 1 retired), SIZE_CYCLE floors at 2.
 // ============================================================
 
 #define LAYOUT_WIDE      0
@@ -65,16 +63,24 @@ static int s_layout = LAYOUT_WIDE;
 #define COMP_LINES_ABOVE 2
 #define COMP_LINES_BELOW 2
 
-#define COUNTDOWN_EXPAND_HOLD_MS  500
-#define COUNTDOWN_SHRINK_HOLD_MS  500
-#define BLINK_REPS      2
+// Normal animation speed
 #define ANIM_FAST_MS    80
 #define ANIM_SNAP_MS    120
+
+// Countdown timing — slowed 2x for verification screenshots
+// REVERT after pixel check: COUNTDOWN_STEP_MS->80, holds->500
+#define COUNTDOWN_STEP_MS         160
+#define COUNTDOWN_EXPAND_HOLD_MS  1000
+#define COUNTDOWN_SHRINK_HOLD_MS  1000
+
+#define BLINK_REPS      2
 #define WIDE_FULL_SIZE  5
 #define ANIM_PEAK_SIZE  6
-#define ANIM_MIN_SIZE   2   // smallest size used in animations
+#define ANIM_MIN_SIZE   2
 
-// SIZE_CYCLE: ramp down to ANIM_MIN_SIZE (2), back up with overshoot to 6, snap to 5
+#define STEPS_AVG_MAX_MIN 120
+
+// SIZE_CYCLE: floors at ANIM_MIN_SIZE=2, climbs with overshoot to 6, snaps to 5
 static const int SIZE_CYCLE[] = { 5, 4, 3, 2, 3, 4, 5, 6, 5 };
 #define SIZE_CYCLE_LEN 9
 
@@ -192,7 +198,7 @@ static void free_digit_bitmaps(int digit) {
     if (s_bitmaps[digit][s]) { gbitmap_destroy(s_bitmaps[digit][s]); s_bitmaps[digit][s] = NULL; }
 }
 
-// DEBUG: blit normally, then draw a 3px red stripe at top of slot.
+// DEBUG: blit normally + 3px red stripe at top of slot for raster identification
 static void blit(GContext *ctx, GBitmap *bm, int x, int y) {
   if (!bm) return;
   graphics_context_set_compositing_mode(ctx, GCompOpSet);
@@ -358,7 +364,6 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       graphics_fill_rect(ctx, GRect(gx, cy, GLYPH_W, sw), 0, GCornerNone);
       break;
     case 5:
-      // Unified path. tail=0 at size 2 (smallest used), so no lower-left stub.
       HBAR(top_y);
       VBAR(gx,   top_y + sw, b_tc);
       fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
@@ -587,7 +592,7 @@ static void timer_cb(void *data) {
           s_size--;
           layer_mark_dirty(s_canvas_layer);
           if (s_size <= ANIM_MIN_SIZE) { s_size=ANIM_MIN_SIZE; s_cd_sub=CD_HOLD_MIN; schedule(COUNTDOWN_SHRINK_HOLD_MS); }
-          else { schedule(ANIM_FAST_MS); }
+          else { schedule(COUNTDOWN_STEP_MS); }
           break;
         case CD_HOLD_MIN:
           free_digit_bitmaps(s_countdown_digit);
@@ -597,7 +602,7 @@ static void timer_cb(void *data) {
           layer_mark_dirty(s_canvas_layer);
           s_cd_sub = CD_EXPAND;
           s_overshot = false;
-          schedule(ANIM_FAST_MS);
+          schedule(COUNTDOWN_STEP_MS);
           break;
         case CD_EXPAND:
           if (s_overshot) {
@@ -611,13 +616,13 @@ static void timer_cb(void *data) {
               s_size = ANIM_PEAK_SIZE; s_overshot = true;
               schedule(ANIM_SNAP_MS);
             } else {
-              schedule(ANIM_FAST_MS);
+              schedule(COUNTDOWN_STEP_MS);
             }
           }
           break;
         case CD_HOLD_MAX:
           s_cd_sub = CD_SHRINK;
-          schedule(ANIM_FAST_MS);
+          schedule(COUNTDOWN_STEP_MS);
           break;
       }
       break;
