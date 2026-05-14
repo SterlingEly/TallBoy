@@ -1,9 +1,16 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.21c
-// Hotfix: stray literal \n removed from free_digit_bitmaps (line 187 in v3.21b)
-// All other changes from v3.21b preserved.
+// TallBoy -- main.c  v3.21d
+//
+// Fixes:
+//   raster debug: blit normally (GCompOpSet), then draw red marker
+//     stripe at top of each raster slot — simple, always works
+//   digit 5 size 1: only draw HBAR + single right arc + VBAR(gx_r)
+//     the two bottom arcs overlap completely at size 1, no gap possible;
+//     accept the squish frame looks minimal rather than broken
+//   digit 5 size 2: no lower-left tail (tail=0, min was adding UNIT
+//     which caused the overlap issue); only sizes 3+ get a tail
 // ============================================================
 
 #define LAYOUT_WIDE      0
@@ -184,20 +191,17 @@ static void free_digit_bitmaps(int digit) {
     if (s_bitmaps[digit][s]) { gbitmap_destroy(s_bitmaps[digit][s]); s_bitmaps[digit][s] = NULL; }
 }
 
-// DEBUG: raster digits always shown as black on red background.
-// Fill slot red first, then GCompOpAssignInverted inverts the 1-bit bitmap
-// (white pixels become black) and assigns over the red fill.
-// Result: black digit shape on red slot bg — always visible regardless of bg color.
+// DEBUG: blit normally, then draw a red marker stripe at top of slot.
+// The stripe is clearly visible regardless of bg color or bitmap format.
 static void blit(GContext *ctx, GBitmap *bm, int x, int y) {
   if (!bm) return;
-#if defined(PBL_COLOR)
-  graphics_context_set_fill_color(ctx, GColorRed);
-  graphics_fill_rect(ctx, GRect(x, y, SLOT_W, SCREEN_H), 0, GCornerNone);
-  graphics_context_set_compositing_mode(ctx, GCompOpAssignInverted);
-#else
   graphics_context_set_compositing_mode(ctx, GCompOpSet);
-#endif
   graphics_draw_bitmap_in_rect(ctx, bm, GRect(x, y, SLOT_W, SCREEN_H));
+#if defined(PBL_COLOR)
+  // Red marker stripe at top of slot — 3px tall, full slot width
+  graphics_context_set_fill_color(ctx, GColorRed);
+  graphics_fill_rect(ctx, GRect(x, y, SLOT_W, 3), 0, GCornerNone);
+#endif
 }
 
 static void draw_digits(GContext *ctx, int h_tens, int h_ones, int m_tens, int m_ones,
@@ -355,16 +359,21 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       graphics_fill_rect(ctx, GRect(gx, cy, GLYPH_W, sw), 0, GCornerNone);
       break;
     case 5: {
-      // top-left bar: b_tc at sizes 2+, b_tc-ro at size 1
-      // lower-left tail: minimum 1u so it's always visible (tail=0 at sizes 1-2)
-      int bar5_end = (size <= 1) ? (b_tc - ro) : b_tc;
-      int tail5    = (tail > 0)  ? tail : UNIT;
-      HBAR(top_y);
-      VBAR(gx,   top_y + sw, bar5_end);
-      fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
-      fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
-      VBAR(gx_r, b_tc, b_bc);
-      VBAR(gx,   b_bc - tail5, b_bc);
+      // Size 1: b_tc==b_bc, arcs overlap into a blob — draw minimal version:
+      //   HBAR + single arc at b_tc + right VBAR only. No tail (overlaps blob).
+      // Size 2+: normal 5 geometry, top-left bar to b_tc, tail from sizes 3+.
+      if (size <= 1) {
+        HBAR(top_y);
+        fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
+        VBAR(gx_r, top_y + sw, b_tc + ro);
+      } else {
+        HBAR(top_y);
+        VBAR(gx,   top_y + sw, b_tc);
+        fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
+        fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
+        VBAR(gx_r, b_tc, b_bc);
+        if (tail > 0) VBAR(gx, b_bc - tail, b_bc);
+      }
       break;
     }
     case 6:
