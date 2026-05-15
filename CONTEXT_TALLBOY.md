@@ -16,186 +16,227 @@
 
 ```
 SterlingEly/TallBoy (branch: main)
-└── src/main.c       ← entire watchface, currently v3.22
+└── src/main.c       ← entire watchface, currently v3.24
 ```
 
 ---
 
 ## 3. PLATFORM TARGETS
 
-| Platform | Watch | Screen | Notes |
-|----------|-------|--------|-------|
-| aplite | Pebble Classic | 144×168 rect | B&W |
-| basalt | Pebble Time | 144×168 rect | Color |
-| chalk | Pebble Time Round | 180×180 round | Color |
-| diorite | Pebble 2 SE | 144×168 rect | B&W, HR |
-| emery | Pebble Time 2 | 200×228 rect | Color, HR, touch — Sterling's primary device |
-| flint | Pebble 2 | 144×168 rect | B&W, HR |
+| Platform | Watch | Screen | UNIT | Notes |
+|----------|-------|--------|------|-------|
+| emery | Pebble Time 2 | 200×228 rect | 8px | Color, HR, touch — **primary dev device** |
+| flint | Pebble 2 | 144×168 rect | 6px | B&W, HR |
+| basalt | Pebble Time | 144×168 rect | 6px | Color |
+| diorite | Pebble 2 SE | 144×168 rect | 6px | B&W, HR |
+| aplite | Pebble Classic | 144×168 rect | 6px | B&W |
 
-Primary dev: **emery** (UNIT=8) and **flint** (UNIT=6).
-
----
-
-## 4. LAYOUT SYSTEM (v3.22 — 4 layouts)
-
-Cycle via shake (accel tap). Shake during countdown skips to blink-in.
-
-| # | Name | Description |
-|---|------|-------------|
-| 0 | `LAYOUT_WIDE` | Full-screen raster digits, winks on minute change |
-| 1 | `LAYOUT_VECTOR` | Full-screen vector digits, winks on minute change |
-| 2 | `LAYOUT_LEFT` | Stacked left raster + info column right |
-| 3 | `LAYOUT_RIGHT` | Stacked right vector + info column left |
-
-`LAYOUT_WIDE_COMPS` is in code but removed from cycle.
+Emery has 25 units (200px / 8px = 25u exactly). All others have 24u (144px / 6px = 24u).
+Pixel verification: emery first, then low-res pass after emery geometry is locked.
 
 ---
 
-## 5. ANIMATION SYSTEM (v3.22) — LOCKED
+## 4. HORIZONTAL LAYOUT — THE UNIT SYSTEM
 
-### Size constants
+Every digit is **4u wide** (GLYPH_W) within a **5u slot** (SLOT_W).
+The half-unit padding on each side creates the 1u visual gap between adjacent digits.
+
 ```
-WIDE_FULL_SIZE  = 5   // resting/display size
-ANIM_PEAK_SIZE  = 6   // overshoot only, never resting
-ANIM_MIN_SIZE   = 2   // squish floor — size 1 RETIRED
+[margin] [½u pad | 4u digit | ½u pad] ×4 + [½u pad | 1u colon | ½u pad] + [margin]
+       = margin + 5u×4 + 2u + 5u + margin = 23u content
 ```
 
-**Size 1 is permanently retired.** All animations floor at size 2.
+- **Emery:** 25u total → 1u margin each side (8px each)
+- **Flint/others:** 24u total → ½u margin each side (3px each)
+- All strokes are exactly **1u** wide (`sw = UNIT`)
+- Arc radius is always **2u** outer, **1u** inner (`ro = 2*UNIT, ri = UNIT`)
 
-### Size range
-- **Size 2:** `11u` = 88px emery / 66px flint ≈ 40% screen height — squish minimum
-- **Size 5:** resting display, good margins
-- **Size 6:** animation overshoot only (120ms snap back to 5)
+---
 
-### SIZE_CYCLE
+## 5. VERTICAL DIGIT STRUCTURE
+
+Each digit is built from up to 4 layers. **Arc sizes never change** — only vertical spans stretch.
+
+### Layer 1: Arc Cap (top)
+Fixed size, moves with top boundary.
+| Type | Description | Used by |
+|------|-------------|---------|
+| **Arc cap** | Top half of 2u-radius ring (2u tall, 4u wide) | 0, 2, 3, 6, 8, 9 |
+| **HBAR cap** | Full-width 1u rectangle at top | 5, 7 |
+| **Diagonal cap** | Bespoke 5-point pentagon path (45° serif) | 1 only |
+| **None** | No top cap | 4 only |
+
+### Layer 2: Spans
+| Type | Description | Used by |
+|------|-------------|---------|
+| **Full span** | Runs full digit height; does not resize | 0 (sides), 1 (stem), 4 (right), 6 (left), 9 (right) |
+| **Bridge span** | Connects inner ring centers; resizes as `bar = (size-1)*2u` | 3, 5, 6, 8, 9 |
+| **Diagonal span** | GPath parallelogram | 2, 7 |
+| **Tail span** | Stub from outer ring center toward canvas edge; `tail = (size>2)?(size-2)*u:0` | 3 (×2), 5, 6, 9 |
+
+The **tail** variable is the key to consistent scaling: zero at size 2 (minimum), grows 1u per size step. All tail spans across all digits use the same formula.
+
+### Layer 3: Center Elements
+Anchored to `cy`; never move or resize.
+| Element | Description | Used by |
+|---------|-------------|---------|
+| **Crossbar** | HBAR at `cy - HALF_UNIT` | 4 |
+| **Ring pair** | 8's two rings centered via `t_tc/t_bc + b_tc/b_bc` | 8 |
+| **Center arc** | Bottom of top ring / top of bottom ring | 6, 9 |
+
+### Layer 4: Arc Base (bottom)
+Mirror of arc cap; fixed size, moves with bottom boundary.
+| Type | Description | Used by |
+|------|-------------|---------|
+| **Arc base** | Bottom half of 2u-radius ring | 0, 3, 5, 6, 8, 9 |
+| **Flat base** | Full-width 1u HBAR | 2 only |
+| **None** | Reaches canvas floor directly | 1, 4, 7 |
+
+---
+
+## 6. KEY GEOMETRY VARIABLES
+
+All derived from `cy` (vertical center of digit slot):
+
 ```c
-static const int SIZE_CYCLE[] = { 5, 4, 3, 2, 3, 4, 5, 6, 5 };
+const int ro = UNIT * 2;       // arc outer radius — NEVER changes with size
+const int ri = UNIT * 1;       // arc inner radius — NEVER changes with size
+const int sw = UNIT;           // stroke width    — NEVER changes with size
+
+int gx     = slot_x + HALF_SLOT_PAD;  // left stroke left edge
+int gx_r   = gx + GLYPH_W - sw;       // right stroke left edge
+int cap_cx = gx + ro;                 // arc center x (always gx + 2u)
+
+int h     = (3 + 4*size) * UNIT;     // total digit height
+int top_y = cy - h / 2;             // canvas top
+int bot_y = cy + h / 2;             // canvas bottom
+
+// Ring system (3, 5, 6, 8, 9):
+int bar  = (size - 1) * 2 * UNIT;   // ring gap between inner cap centers
+int t_bc = cy - (ro - HALF_UNIT);   // top ring inner cap center
+int t_tc = t_bc - bar;              // top ring outer cap center
+int b_tc = cy + (ro - HALF_UNIT);   // bottom ring inner cap center
+int b_bc = b_tc + bar;              // bottom ring outer cap center
+
+// Tail span (3, 5, 6, 9):
+int tail = (size > 2) ? (size - 2) * UNIT : 0;
+// size 2 (min): 0u  size 3: 1u  size 4: 2u  size 5: 3u  size 6: 4u
+```
+
+Note: `top_cy = cy - (h - ro*2)/2` and `bot_cy = cy + (h - ro*2)/2` are used only by digit 0 (the simple oval). The ring system variables (`t_tc` etc.) are used by all other multi-arc digits.
+
+---
+
+## 7. ANIMATION SYSTEM — LOCKED CONSTANTS
+
+```
+WIDE_FULL_SIZE  = 5   // resting display size — good margins on all platforms
+ANIM_PEAK_SIZE  = 6   // overshoot only (120ms snap back to 5)
+ANIM_MIN_SIZE   = 2   // squish floor — size 1 PERMANENTLY RETIRED
+```
+
+**Size 2 = 11u = 88px/66px ≈ 40% screen height** — minimum legible at all sizes.
+**Size 6 = 27u = 216px/162px** — too large to rest but great for the overshoot pop.
+
+```c
+static const int SIZE_CYCLE[] = { 5, 4, 3, 2, 3, 4, 5, 6, 5 };  // shake animation
 #define SIZE_CYCLE_LEN 9
 ```
 
-### Animation timing constants
+### Timing constants
 ```
-ANIM_FAST_MS              = 80    // normal step speed
-COUNTDOWN_STEP_MS         = 160   // countdown step speed (2× slow for verification)
-COUNTDOWN_EXPAND_HOLD_MS  = 1000  // hold at full size during countdown
-COUNTDOWN_SHRINK_HOLD_MS  = 1000  // hold at min size during countdown
-ANIM_SNAP_MS              = 120   // overshoot hold before snap to WIDE_FULL_SIZE
-```
-**Note:** COUNTDOWN_STEP_MS and hold times are doubled for pixel-level screenshot verification. Revert to normal (160→80, 1000→500) after verification pass.
-
----
-
-## 6. VECTOR DIGIT GEOMETRY (v3.22 — LOCKED)
-
-**Fundamental rule:** Circles NEVER change size. `ro = UNIT*2`, `ri = UNIT*1`, `sw = UNIT`. Only VBARs stretch.
-
-### Key variables
-```c
-const int ro = UNIT * 2;
-const int ri = UNIT * 1;
-const int sw = UNIT;
-int h      = (3 + 4*size) * UNIT;
-int gx     = slot_x + HALF_SLOT_PAD;
-int gx_r   = gx + GLYPH_W - sw;
-int cap_cx = gx + ro;
-int top_cy = cy - (h - ro*2) / 2;
-int bot_cy = cy + (h - ro*2) / 2;
-int top_y  = cy - h / 2;
-int bot_y  = cy + h / 2;
-int bar  = (size - 1) * 2 * UNIT;
-int t_bc = cy - (ro - HALF_UNIT);
-int t_tc = t_bc - bar;
-int b_tc = cy + (ro - HALF_UNIT);
-int b_bc = b_tc + bar;
-int tail = (size > 2) ? (size - 2) * UNIT : 0;
-// tail: sizes 1-2=0u, 3=1u, 4=2u, 5=3u, 6=4u
+ANIM_FAST_MS             = 80    // normal step interval
+ANIM_SNAP_MS             = 120   // hold at overshoot peak before snap to size 5
+COUNTDOWN_STEP_MS        = 160   // ← 2× SLOW for verification; revert to 80
+COUNTDOWN_EXPAND_HOLD_MS = 1000  // ← 2× SLOW for verification; revert to 500
+COUNTDOWN_SHRINK_HOLD_MS = 500   // normal
 ```
 
-### Digit constructions
-
-**0:** top/bottom caps + left/right VBARs center-to-center
-
-**1:** Base HBAR + centered stem + 5-point pentagon cap
-
-**2:** Top semi + tail VBARs + GPath diagonal + base HBAR
-
-**3:** Two rings, NUB at `(gx+sw, t_bc+sw)`, lower-left tail `VBAR(gx, b_bc-tail, b_bc)`
-
-**4:** Left short VBAR to `cy+sw` + right full VBAR + crossbar at `cy`
-
-**5:**
-```c
-HBAR(top_y);
-VBAR(gx,   top_y + sw, b_tc);        // top-left bar to ring center
-fill_arc(b_tc, 270, 450);            // top of bottom ring
-fill_arc(b_bc, 90, 270);             // bottom of bottom ring
-VBAR(gx_r, b_tc, b_bc);
-if (tail > 0) VBAR(gx, b_bc-tail, b_bc);  // lower-left tail (sizes 3+ only)
-```
-
-**6:** Top semi + right arm tail from `top_cy` + left full VBAR + bottom ring
-
-**7:** HBAR + GPath parallelogram
-
-**8:** Two stacked rings, all bars center-to-center
-
-**9:** Full top ring + right bar to `bot_cy` + left tail `VBAR(gx, bot_cy-tail, bot_cy)` + bottom semi
+### Animation phases
+- **COUNTDOWN:** 9→0 wink sequence at startup; outer slots raster (red stripe), inner slots vector
+- **BLINK:** 2× squish blinks after countdown before settling at size 5
+- **SQUISH:** minute-change animation in WIDE/VECTOR layouts; swaps time at minimum size
+- **SHAKE_CYCLE:** accel-tap triggered; runs SIZE_CYCLE twice
+- All expand phases overshoot to ANIM_PEAK_SIZE, snap back after ANIM_SNAP_MS
 
 ---
 
-## 7. STEP PACE BACKGROUND COLOR (emery only)
+## 8. LAYOUT SYSTEM (4 layouts, shake to cycle)
 
-`PBL_COLOR && PBL_HEALTH` only.
-
-Spectrum: no-history→black, <60%→red, <80%→orange, <90%→yellow, ≤110%→green, ≤130%→cyan, ≤160%→blue, >160%→white.
-
-White/Yellow/Cyan → `s_fg = GColorBlack`; others → `s_fg = GColorWhite`.
-
----
-
-## 8. RASTER SYSTEM (to be retired after pixel verification)
-
-- 10 digits × 6 sizes = 60 bitmaps per platform
-- **DEBUG active:** `blit()` draws 3px red stripe at top of each raster slot for raster/vector comparison
-- **Retirement plan:** after pixel-level verification in Photoshop, raster removed entirely
+| # | Name | Description |
+|---|------|-------------|
+| 0 | `LAYOUT_WIDE` | Full-screen raster digits |
+| 1 | `LAYOUT_VECTOR` | Full-screen vector digits |
+| 2 | `LAYOUT_LEFT` | Stacked left raster + info column right |
+| 3 | `LAYOUT_RIGHT` | Stacked right vector + info column left |
 
 ---
 
-## 9. NEXT UP: PIXEL VERIFICATION & RASTER RETIREMENT
+## 9. STEP PACE BACKGROUND COLOR (emery only)
 
-1. Screenshot all digits at all sizes using slow countdown
-2. Compare raster (red-tagged outer slots) vs vector (inner slots) in Photoshop
-3. Make any pixel-level geometry corrections
-4. Remove raster system, debug stripe, `LAYOUT_WIDE`, cleanup
-5. Revert countdown timing to normal speed
+`PBL_COLOR && PBL_HEALTH`. Compares today's steps to 7-day historical average.
 
----
-
-## 10. PENDING FEATURES (post-cleanup)
-
-- Full Radium 2 info line field system (FIELD_NONE…FIELD_STEPS_PROJ=17)
-- Shake-to-reveal info overlay (~1min auto-dismiss)
-- Weather/solar JS fetch
-- Hourly step pace comparison mode
-- Config page
-- Full-vector dynamic sizing: `unit = floor((available_h - 2*margin) / digit_h_formula)`
+| % of avg | Color | fg |
+|----------|-------|----|
+| no history | Black | White |
+| < 60% | Red | White |
+| < 80% | Orange | White |
+| < 90% | Yellow | **Black** |
+| ≤ 110% | Green | White |
+| ≤ 130% | Cyan | **Black** |
+| ≤ 160% | Blue | White |
+| > 160% | White | **Black** |
 
 ---
 
-## 11. DESIGN TENET
+## 10. RASTER SYSTEM — PENDING RETIREMENT
+
+- 10 digits × 6 sizes = 60 bitmaps per platform (emery color + flint/low-res B&W)
+- Split countdown: outer slots raster (H_TENS, M_ONES), inner slots vector (H_ONES, M_TENS)
+- **DEBUG:** `blit()` draws 3px red stripe at top of each raster slot
+- **Retirement trigger:** after pixel-level verification confirms vector geometry is correct
+
+---
+
+## 11. PIXEL VERIFICATION STATUS
+
+- ✅ Emery size 2 and size 5 verified in Photoshop
+- ✅ v3.23 geometry fixes applied (colon, 1, 2, 4, 7)
+- ⏳ Final emery verification pass (v3.24 build)
+- ⏳ Low-res (flint) verification pass
+- ⏳ Raster retirement
+
+---
+
+## 12. PENDING FEATURES (post-raster-cleanup)
+
+1. Revert countdown timing: `COUNTDOWN_STEP_MS→80`, `COUNTDOWN_EXPAND_HOLD_MS→500`
+2. Remove raster system, red stripe debug, `LAYOUT_WIDE`, `s_demo_override` cleanup
+3. Port full Radium 2 info line field system (FIELD_NONE…FIELD_STEPS_PROJ=17)
+4. Shake-to-reveal info overlay in wide/vector layouts (~1min auto-dismiss)
+5. Weather/solar JS fetch (port from Radium 2 index.js)
+6. Hourly step pace comparison mode
+7. Config page
+8. Full-vector dynamic sizing: `unit = floor((available_h - 2u) / digit_h_formula)`
+
+---
+
+## 13. DESIGN TENET
 
 *Watchfaces display data as atmosphere, not content. Artfully vague > precisely readable.*
 
+Color, arc fill, dot position = mood/direction in a 2-sec glance. Cognitive friction ("why is it blue?") beats ignored stats. The watch is the barometer; the phone is the app.
+
 ---
 
-## 12. CLOUDPEBBLE / BUILD RULES
+## 14. CLOUDPEBBLE / BUILD RULES
 
-1. Remove `resources/media` from appinfo.json
-2. `src/main.c` flat path
+1. Remove `resources/media` from appinfo.json (CloudPebble handles resources via UI)
+2. `src/main.c` flat path (not `src/c/main.c`)
 3. Full files only — never partial diffs
 4. `create_or_update_file` with current SHA; **never use `push_files`** (sends empty content)
-5. No tilde in resource filenames
+5. No tilde (`~`) in resource filenames
 
 ---
 
-*End of context seed. Last updated: v3.22, May 2026.*
+*End of context seed. Last updated: v3.24, May 2026.*
