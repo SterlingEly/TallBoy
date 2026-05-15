@@ -1,15 +1,9 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.23
-//
-// v3.23: pixel-level geometry adjustments (emery verification pass)
-//   colon: dots moved 2px toward center (upper down 2, lower up 2)
-//   1: cap shifted down 1px, left 1px
-//   2: bottom-right diagonal point moved left 1px
-//   4: crossbar moved up HALF_UNIT (4px emery); left VBAR endpoint matched
-//   7: bottom 2 diagonal points moved up 1px, left 1px
-// Same feedback applied at size 2 and size 5 — confirms scaling is correct.
+// TallBoy -- main.c  v3.23a
+// Hotfix: literal \n in deinit() PBL_HEALTH block (v3.23 typo)
+// All geometry changes from v3.23 preserved.
 // ============================================================
 
 #define LAYOUT_WIDE      0
@@ -380,7 +374,7 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       VBAR(gx_r, b_tc, b_bc);
       break;
     case 7: {
-      // Bottom 2 points of diagonal moved up 1px, left 1px
+      // Bottom 2 points moved up 1px, left 1px
       HBAR(top_y);
       GPoint pts[4] = {
         {gx_r - 1,  top_y + sw},
@@ -783,7 +777,9 @@ static void init(void) {
 
 static void deinit(void) {
   tick_timer_service_unsubscribe(); battery_state_service_unsubscribe(); bluetooth_connection_service_unsubscribe();
-#if defined(PBL_HEALTH)\n  health_service_events_unsubscribe();\n#endif
+#if defined(PBL_HEALTH)
+  health_service_events_unsubscribe();
+#endif
   window_destroy(s_window);
 }
 
