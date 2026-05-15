@@ -1,15 +1,15 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.22
+// TallBoy -- main.c  v3.23
 //
-// v3.22: slow countdown for pixel-level screenshot verification
-//   COUNTDOWN_STEP_MS = 160 (2x normal ANIM_FAST_MS=80)
-//   COUNTDOWN_EXPAND_HOLD_MS = 1000 (was 500)
-//   COUNTDOWN_SHRINK_HOLD_MS = 1000 (was 500)
-//   After verification, revert these three to normal speed.
-//
-// Also: ANIM_MIN_SIZE=2 (size 1 retired), SIZE_CYCLE floors at 2.
+// v3.23: pixel-level geometry adjustments (emery verification pass)
+//   colon: dots moved 2px toward center (upper down 2, lower up 2)
+//   1: cap shifted down 1px, left 1px
+//   2: bottom-right diagonal point moved left 1px
+//   4: crossbar moved up HALF_UNIT (4px emery); left VBAR endpoint matched
+//   7: bottom 2 diagonal points moved up 1px, left 1px
+// Same feedback applied at size 2 and size 5 — confirms scaling is correct.
 // ============================================================
 
 #define LAYOUT_WIDE      0
@@ -63,7 +63,6 @@ static int s_layout = LAYOUT_WIDE;
 #define COMP_LINES_ABOVE 2
 #define COMP_LINES_BELOW 2
 
-// Normal animation speed
 #define ANIM_FAST_MS    80
 #define ANIM_SNAP_MS    120
 
@@ -80,7 +79,6 @@ static int s_layout = LAYOUT_WIDE;
 
 #define STEPS_AVG_MAX_MIN 120
 
-// SIZE_CYCLE: floors at ANIM_MIN_SIZE=2, climbs with overshoot to 6, snaps to 5
 static const int SIZE_CYCLE[] = { 5, 4, 3, 2, 3, 4, 5, 6, 5 };
 #define SIZE_CYCLE_LEN 9
 
@@ -198,7 +196,6 @@ static void free_digit_bitmaps(int digit) {
     if (s_bitmaps[digit][s]) { gbitmap_destroy(s_bitmaps[digit][s]); s_bitmaps[digit][s] = NULL; }
 }
 
-// DEBUG: blit normally + 3px red stripe at top of slot for raster identification
 static void blit(GContext *ctx, GBitmap *bm, int x, int y) {
   if (!bm) return;
   graphics_context_set_compositing_mode(ctx, GCompOpSet);
@@ -306,6 +303,7 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       VBAR(gx_r, top_cy, bot_cy);
       break;
     case 1: {
+      // Cap shifted down 1px, left 1px
       HBAR(bot_y - sw);
       int stem_x = gx + GLYPH_W / 2 - sw / 2;
       VBAR(stem_x, top_y, bot_y - sw);
@@ -313,11 +311,11 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       int diag_h = cap_right - gx;
       if (diag_h > 0) {
         GPoint pts[5] = {
-          {cap_right, top_y - 1},
-          {cap_right, top_y + sw - HALF_UNIT - 1},
-          {gx,        top_y + sw + diag_h - HALF_UNIT - 1},
-          {gx,        top_y + diag_h - sw - 1},
-          {stem_x,    top_y - 1},
+          {cap_right - 1, top_y},
+          {cap_right - 1, top_y + sw - HALF_UNIT},
+          {gx        - 1, top_y + sw + diag_h - HALF_UNIT},
+          {gx        - 1, top_y + diag_h - sw},
+          {stem_x    - 1, top_y},
         };
         GPathInfo info = { .num_points = 5, .points = pts };
         GPath *path = gpath_create(&info);
@@ -327,6 +325,7 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
     }
     case 2: {
+      // Bottom-right diagonal point moved left 1px: +2 -> +1
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);
       VBAR(gx,   top_cy, top_cy + tail);
       VBAR(gx_r, top_cy, top_cy + tail);
@@ -335,7 +334,7 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
         GPoint pts[4] = {
           {gx_r - 1,         top_cy + tail},
           {gx_r + sw,        top_cy + tail},
-          {gx  - 1 + sw + 2, bot_y - sw},
+          {gx  - 1 + sw + 1, bot_y - sw},
           {gx  - 1,          bot_y - sw},
         };
         GPathInfo info = { .num_points = 4, .points = pts };
@@ -359,9 +358,10 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       break;
     }
     case 4:
-      VBAR(gx,   top_y, cy + sw);
+      // Crossbar moved up HALF_UNIT; left VBAR endpoint matched
+      VBAR(gx,   top_y, cy - HALF_UNIT + sw);
       VBAR(gx_r, top_y, bot_y);
-      graphics_fill_rect(ctx, GRect(gx, cy, GLYPH_W, sw), 0, GCornerNone);
+      graphics_fill_rect(ctx, GRect(gx, cy - HALF_UNIT, GLYPH_W, sw), 0, GCornerNone);
       break;
     case 5:
       HBAR(top_y);
@@ -380,12 +380,13 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       VBAR(gx_r, b_tc, b_bc);
       break;
     case 7: {
+      // Bottom 2 points of diagonal moved up 1px, left 1px
       HBAR(top_y);
       GPoint pts[4] = {
-        {gx_r - 1,    top_y + sw},
-        {gx_r + sw,   top_y + sw},
-        {gx + sw + 1, bot_y},
-        {gx,          bot_y},
+        {gx_r - 1,  top_y + sw},
+        {gx_r + sw, top_y + sw},
+        {gx + sw,   bot_y - 1},
+        {gx - 1,    bot_y - 1},
       };
       GPathInfo info = { .num_points = 4, .points = pts };
       GPath *path = gpath_create(&info);
@@ -419,10 +420,11 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
 }
 
 static void draw_colon_vec(GContext *ctx, int slot_x, int cy, int size) {
+  // Dots moved 2px toward center: upper +2, lower -2
   graphics_context_set_fill_color(ctx, s_fg);
   int h = digit_outer_h(size), r = UNIT / 2, dx = slot_x + SLOT_W / 2;
-  GRect b1 = GRect(dx-r, cy-h/4-r, r*2, r*2);
-  GRect b2 = GRect(dx-r, cy+h/4-r, r*2, r*2);
+  GRect b1 = GRect(dx-r, cy-h/4-r+2, r*2, r*2);
+  GRect b2 = GRect(dx-r, cy+h/4-r-2, r*2, r*2);
   graphics_fill_radial(ctx, b1, GOvalScaleModeFitCircle, (uint16_t)r, 0, DEG_TO_TRIGANGLE(360));
   graphics_fill_radial(ctx, b2, GOvalScaleModeFitCircle, (uint16_t)r, 0, DEG_TO_TRIGANGLE(360));
 }
@@ -781,9 +783,7 @@ static void init(void) {
 
 static void deinit(void) {
   tick_timer_service_unsubscribe(); battery_state_service_unsubscribe(); bluetooth_connection_service_unsubscribe();
-#if defined(PBL_HEALTH)
-  health_service_events_unsubscribe();
-#endif
+#if defined(PBL_HEALTH)\n  health_service_events_unsubscribe();\n#endif
   window_destroy(s_window);
 }
 
