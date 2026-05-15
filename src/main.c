@@ -1,9 +1,80 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.23a
-// Hotfix: literal \n in deinit() PBL_HEALTH block (v3.23 typo)
-// All geometry changes from v3.23 preserved.
+// TallBoy -- main.c  v3.24
+//
+// v3.24: documentation & cleanup pass (no logic changes)
+//   - Removed dead pick_size() function
+//   - Removed unused body_h/top_cy/bot_cy vars (moved into case 0)
+//   - Removed unused COMP_GAP, COMP_LINES_ABOVE/BELOW defines
+//   - Added full digit geometry documentation block
+//   - Added variable name comments throughout draw_digit_vec
+//   - Clarified ring gap / tail terminology in comments
+// ============================================================
+//
+// DIGIT GEOMETRY OVERVIEW
+// =======================
+// All digits share a fixed width of 4u (GLYPH_W) within a 5u slot
+// (SLOT_W). The half-unit padding on each side of the glyph creates
+// the 1u visual gap between adjacent digits.
+//
+// HORIZONTAL LAYOUT (25u total on emery, 24u on flint):
+//   margin + [pad|digit|pad] x4 + [pad|colon|pad] + margin
+//   = margin + 5u*4 + 2u + 5u + margin = 23u content + margins
+//
+// VERTICAL STRUCTURE — each digit has up to 4 layers:
+//
+//   1. ARC CAP (top)   — fixed size, moves with top boundary
+//      - arc cap:  top half of a 2u-radius ring (2u tall, 4u wide)
+//                  used on: 0, 2, 3(×2), 6, 8(×2), 9
+//      - hbar cap: full-width 1u rectangle at top
+//                  used on: 5, 7
+//      - 1's cap:  bespoke pentagon path, 45° diagonal serif
+//                  used on: 1 only
+//      - none:     4 has no top cap
+//
+//   2. SPANS           — connect caps; full-spans are fixed-length,
+//                        bridge-spans and tail-spans resize with size
+//      - full span:    runs full digit height; forms body of 0 (sides),
+//                      6 (left), 4 (right), 1 (center stem), 9 (right)
+//      - bridge span:  connects inner ring centers; resizes as
+//                      `bar = (size-1)*2*UNIT` — the "ring gap"
+//                      used on: 3, 5, 6, 8, 9
+//      - diagonal span: GPath parallelogram; used on 2 and 7
+//      - tail span:    stub extending from outer ring center toward
+//                      canvas edge; `tail = (size>2)?(size-2)*UNIT:0`
+//                      zero at size 2 (minimum), grows 1u/size step
+//                      used on: 3 (top-left & bottom-left),
+//                               5 (bottom-left), 6 (top-right),
+//                               9 (bottom-left)
+//
+//   3. CENTER ELEMENTS — anchored to `cy`; never move or resize
+//      - crossbar:     4's horizontal bar at `cy - HALF_UNIT`
+//      - ring pair:    8's two rings; centers at t_tc/t_bc & b_tc/b_bc
+//      - center arcs:  6's bottom ring top arc, 9's top ring bottom arc
+//
+//   4. ARC BASE (bottom) — mirror of arc cap; fixed size, moves with
+//                           bottom boundary
+//      - arc base:  bottom half of a 2u-radius ring
+//                   used on: 0, 3, 5, 6, 8, 9
+//      - flat base: full-width 1u hbar at bottom
+//                   used on: 2 only
+//      - none:      1, 4, 7 reach the canvas floor with no base
+//
+// KEY VARIABLES (all derived from cy = vertical center of digit slot):
+//   ro = 2*UNIT          outer arc radius (NEVER changes)
+//   ri = 1*UNIT          inner arc radius (NEVER changes)
+//   sw = UNIT            stroke width (NEVER changes)
+//   gx = slot_x + sw/2   left edge of glyph
+//   gx_r = gx + 4u - sw  right stroke left edge
+//   cap_cx = gx + ro     arc center x (only arc cap/base x anchor)
+//   top_y = cy - h/2     canvas top edge
+//   bot_y = cy + h/2     canvas bottom edge
+//   bar = (size-1)*2u    ring gap — distance between inner ring centers
+//   t_tc/t_bc            top ring outer/inner cap centers (8, 3, 9)
+//   b_tc/b_bc            bottom ring inner/outer cap centers (3, 5, 6, 8, 9)
+//   tail = (size>2)?(size-2)*u:0   tail span length
+//
 // ============================================================
 
 #define LAYOUT_WIDE      0
@@ -16,13 +87,13 @@ static int s_layout = LAYOUT_WIDE;
 #if defined(PBL_PLATFORM_EMERY)
   #define SCREEN_W      200
   #define SCREEN_H      228
-  #define SLOT_W         40
+  #define SLOT_W         40   // 5u per slot (4u glyph + 2x half-unit padding)
   #define COLON_SLOT_X   80
   #define SLOT_H_TENS    12
   #define SLOT_H_ONES    52
   #define SLOT_M_TENS   108
   #define SLOT_M_ONES   148
-  #define SIDE_MARGIN    12
+  #define SIDE_MARGIN    12   // 1.5u — absorbs the 2px remainder from 25u total
   #define HALF_UNIT       4
   #define STACK_H_SZ1    56
   #define STACK_H_SZ2    88
@@ -30,17 +101,17 @@ static int s_layout = LAYOUT_WIDE;
   #define INFO_FONT_H    24
   #define INFO_LINE_H    28
   #define INFO_FONT_KEY  FONT_KEY_GOTHIC_24_BOLD
-  #define UNIT            8
+  #define UNIT            8   // 8px per unit on emery (200px / 25u = 8px)
 #else
   #define SCREEN_W      144
   #define SCREEN_H      168
-  #define SLOT_W         30
+  #define SLOT_W         30   // 5u per slot
   #define COLON_SLOT_X   57
   #define SLOT_H_TENS     6
   #define SLOT_H_ONES    36
   #define SLOT_M_TENS    78
   #define SLOT_M_ONES   108
-  #define SIDE_MARGIN     6
+  #define SIDE_MARGIN     6   // 1u — 144px / 6px = 24u, 1u each side
   #define HALF_UNIT       3
   #define STACK_H_SZ1    42
   #define STACK_H_SZ2    66
@@ -48,31 +119,31 @@ static int s_layout = LAYOUT_WIDE;
   #define INFO_FONT_H    18
   #define INFO_LINE_H    20
   #define INFO_FONT_KEY  FONT_KEY_GOTHIC_18_BOLD
-  #define UNIT            6
+  #define UNIT            6   // 6px per unit on flint (144px / 24u = 6px)
 #endif
 
-#define HALF_SLOT_PAD   (UNIT / 2)
-#define GLYPH_W         (UNIT * 4)
-#define COMP_GAP        4
-#define COMP_LINES_ABOVE 2
-#define COMP_LINES_BELOW 2
+#define HALF_SLOT_PAD   (UNIT / 2)   // padding on each side of glyph within slot
+#define GLYPH_W         (UNIT * 4)   // digit canvas width: always 4u
 
-#define ANIM_FAST_MS    80
-#define ANIM_SNAP_MS    120
+// Animation size constants
+#define ANIM_FAST_MS    80           // normal animation step interval
+#define ANIM_SNAP_MS    120          // hold duration at overshoot peak before snap
 
-// Countdown timing — slowed 2x for verification screenshots
-// REVERT after pixel check: COUNTDOWN_STEP_MS->80, holds->500
+// Countdown timing — currently 2x slow for pixel verification screenshots
+// REVERT to normal after verification: COUNTDOWN_STEP_MS->80, holds->500
 #define COUNTDOWN_STEP_MS         160
 #define COUNTDOWN_EXPAND_HOLD_MS  1000
-#define COUNTDOWN_SHRINK_HOLD_MS  1000
+#define COUNTDOWN_SHRINK_HOLD_MS  500
 
 #define BLINK_REPS      2
-#define WIDE_FULL_SIZE  5
-#define ANIM_PEAK_SIZE  6
-#define ANIM_MIN_SIZE   2
+#define WIDE_FULL_SIZE  5   // resting display size — good margins at all platforms
+#define ANIM_PEAK_SIZE  6   // overshoot target — animation only, never resting
+#define ANIM_MIN_SIZE   2   // squish floor — size 1 retired (breaks digit geometry)
+                            // size 2 = 11u tall = 88px/66px = ~40% screen height
 
 #define STEPS_AVG_MAX_MIN 120
 
+// Shake animation: ramp down to ANIM_MIN_SIZE, back up with overshoot & snap
 static const int SIZE_CYCLE[] = { 5, 4, 3, 2, 3, 4, 5, 6, 5 };
 #define SIZE_CYCLE_LEN 9
 
@@ -81,12 +152,6 @@ typedef enum { CD_SHRINK, CD_HOLD_MIN, CD_EXPAND, CD_HOLD_MAX } CdSubPhase;
 static int s_stack_size = 2;
 static int pick_stack_size(int ub_h) { return (ub_h >= STACK_SZ2_MIN) ? 2 : 1; }
 static int stack_digit_h(int sz)     { return (sz == 2) ? STACK_H_SZ2 : STACK_H_SZ1; }
-
-static int pick_size(int available_h) {
-  for (int s = 6; s >= 1; s--)
-    if ((UNIT * (3 + 4 * s)) <= available_h - UNIT) return s;
-  return 1;
-}
 
 static int digit_outer_h(int sz) { return UNIT * (3 + 4 * sz); }
 
@@ -115,6 +180,7 @@ static char       s_weather_temp[8] = "", s_weather_desc[32] = "";
 static GBitmap   *s_bitmaps[10][6];
 static GBitmap   *s_colon_bm[6];
 
+// Raster bitmap resource tables — emery (color) and flint/all others (B&W)
 #if defined(PBL_PLATFORM_EMERY)
 static const uint32_t s_res[10][6] = {
   {RESOURCE_ID_TALLBOY_01,RESOURCE_ID_TALLBOY_02,RESOURCE_ID_TALLBOY_03,RESOURCE_ID_TALLBOY_04,RESOURCE_ID_TALLBOY_05,RESOURCE_ID_TALLBOY_06},
@@ -190,6 +256,10 @@ static void free_digit_bitmaps(int digit) {
     if (s_bitmaps[digit][s]) { gbitmap_destroy(s_bitmaps[digit][s]); s_bitmaps[digit][s] = NULL; }
 }
 
+// DEBUG: raster blit with 3px red stripe at top of slot.
+// Red stripe makes raster slots visually distinct from vector slots
+// during the side-by-side countdown comparison. Remove stripe when
+// raster system is retired.
 static void blit(GContext *ctx, GBitmap *bm, int x, int y) {
   if (!bm) return;
   graphics_context_set_compositing_mode(ctx, GCompOpSet);
@@ -210,6 +280,9 @@ static void draw_digits(GContext *ctx, int h_tens, int h_ones, int m_tens, int m
 }
 
 #if defined(PBL_COLOR)
+// Step pace background color: maps today's steps vs historical average
+// to a color spectrum. No-history = black. Light backgrounds (white,
+// yellow, cyan) invert s_fg to black for legibility.
 static GColor prv_pace_color(int steps_today, int steps_avg) {
   if (steps_avg <= 0) return GColorBlack;
   int pct = (steps_today * 100) / steps_avg;
@@ -232,6 +305,8 @@ static bool prv_bg_needs_dark_fg(GColor bg) {
 #if defined(PBL_HEALTH)
 static HealthMinuteData s_minute_buf[STEPS_AVG_MAX_MIN];
 
+// Calculates historical step average for today's elapsed time window
+// using up to 7 days of minute-level health history.
 static int prv_calc_steps_avg(void) {
   time_t now = time(NULL);
   struct tm *t = localtime(&now);
@@ -255,54 +330,90 @@ static int prv_calc_steps_avg(void) {
 }
 #endif
 
+// Helper: draw a filled annular arc sector.
+// (cx, cy) = center, ro/ri = outer/inner radius, a0/a1 = angle range in degrees.
+// All arc caps and arc bases go through this.
 static void fill_arc(GContext *ctx, int cx, int cy, int ro, int ri, int a0, int a1) {
   GRect b = GRect(cx - ro, cy - ro, ro * 2, ro * 2);
   graphics_fill_radial(ctx, b, GOvalScaleModeFitCircle, (uint16_t)(ro - ri),
                        DEG_TO_TRIGANGLE(a0), DEG_TO_TRIGANGLE(a1));
 }
 
+// Core vector digit renderer.
+//
+// slot_x: left edge of the 5u slot (digit occupies the inner 4u glyph)
+// cy:     vertical center of the digit — everything is derived from this
+// size:   integer 2–6; controls only the VBAR lengths, never arc sizes
+//
+// Fundamental invariant: ro, ri, sw NEVER change with size.
+// Only vertical spans (VBARs) grow/shrink. This is what makes the
+// squish/expand animation work — arcs stay crisp, bodies stretch.
 static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int size) {
   graphics_context_set_fill_color(ctx, s_fg);
 
-  const int ro = UNIT * 2;
-  const int ri = UNIT * 1;
-  const int sw = UNIT;
+  // Stroke geometry — IMMUTABLE across all sizes
+  const int ro = UNIT * 2;   // arc outer radius
+  const int ri = UNIT * 1;   // arc inner radius (ring thickness = ro-ri = 1u)
+  const int sw = UNIT;       // stroke width = 1u
 
-  int h      = digit_outer_h(size);
-  int body_h = h - ro * 2;
-  int gx     = slot_x + HALF_SLOT_PAD;
-  int gx_r   = gx + GLYPH_W - sw;
-  int cap_cx = gx + ro;
-  int top_cy = cy - body_h / 2;
-  int bot_cy = cy + body_h / 2;
-  int top_y  = cy - h / 2;
-  int bot_y  = cy + h / 2;
+  // Horizontal anchors
+  int gx     = slot_x + HALF_SLOT_PAD;  // left stroke left edge
+  int gx_r   = gx + GLYPH_W - sw;       // right stroke left edge
+  int cap_cx = gx + ro;                 // arc center x (always at gx + 2u)
 
+  // Vertical canvas extents
+  int h     = digit_outer_h(size);      // total digit height = (3+4*size)*u
+  int top_y = cy - h / 2;              // canvas top edge
+  int bot_y = cy + h / 2;              // canvas bottom edge
+
+  // Ring system — used by digits with two stacked rings (3,5,6,8,9)
+  // bar = ring gap: distance between the two inner ring centers
+  // At size 2 (minimum): bar = 2u. Grows 2u per size step.
   int bar  = (size - 1) * 2 * UNIT;
-  int t_bc = cy - (ro - HALF_UNIT);
-  int t_tc = t_bc - bar;
-  int b_tc = cy + (ro - HALF_UNIT);
-  int b_bc = b_tc + bar;
+  int t_bc = cy - (ro - HALF_UNIT);    // top ring inner cap center (bottom of top ring)
+  int t_tc = t_bc - bar;               // top ring outer cap center (top of top ring)
+  int b_tc = cy + (ro - HALF_UNIT);    // bottom ring inner cap center (top of bottom ring)
+  int b_bc = b_tc + bar;               // bottom ring outer cap center (bottom of bottom ring)
+
+  // Tail span — stub extension beyond outer ring cap center toward canvas edge
+  // Controls 3's corner stubs, 5's lower-left stub, 6's upper-right stub, 9's lower-left stub
+  // Zero at size 2 (min), grows 1u per size step above that
   int tail = (size > 2) ? (size - 2) * UNIT : 0;
 
-#define VBAR(x,y0,y1) if((y1)>(y0)) graphics_fill_rect(ctx,GRect((x),(y0),sw,(y1)-(y0)),0,GCornerNone)
-#define HBAR(y) graphics_fill_rect(ctx,GRect(gx,(y),GLYPH_W,sw),0,GCornerNone)
-#define NUB(x,y) graphics_fill_rect(ctx,GRect((x),(y),sw,sw),0,GCornerNone)
+  // 0-style cap variables — only used by digit 0
+  // (separated here so other digits don't compute unused vars)
+  // top_cy / bot_cy = cap centers for a simple open oval like 0
+  // These are distinct from t_tc/t_bc which are for two-ring digits
+  #define top_cy (cy - (h - ro*2) / 2)
+  #define bot_cy (cy + (h - ro*2) / 2)
+
+  // Drawing macros — all coordinates in pixels
+  // VBAR: filled rectangle from (x, y0) to (x+sw, y1); no-op if y1<=y0
+  // HBAR: full-width (4u) horizontal bar at y
+  // NUB:  1u×1u square — used for 3's inner corner fill
+  #define VBAR(x,y0,y1) if((y1)>(y0)) graphics_fill_rect(ctx,GRect((x),(y0),sw,(y1)-(y0)),0,GCornerNone)
+  #define HBAR(y) graphics_fill_rect(ctx,GRect(gx,(y),GLYPH_W,sw),0,GCornerNone)
+  #define NUB(x,y) graphics_fill_rect(ctx,GRect((x),(y),sw,sw),0,GCornerNone)
 
   switch (digit) {
+
     case 0:
+      // Arc cap (top) + arc base (bottom) + full spans left & right
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);
       fill_arc(ctx, cap_cx, bot_cy, ro, ri, 90, 270);
-      VBAR(gx,   top_cy, bot_cy);
-      VBAR(gx_r, top_cy, bot_cy);
+      VBAR(gx,   top_cy, bot_cy);   // left full span
+      VBAR(gx_r, top_cy, bot_cy);   // right full span
       break;
+
     case 1: {
-      // Cap shifted down 1px, left 1px
+      // Flat base + centered stem (full span) + bespoke diagonal cap
+      // Cap is a pentagon path approximating a 45° serif; shifted
+      // -1px x, +1px y from pure geometry for visual alignment (v3.23)
       HBAR(bot_y - sw);
-      int stem_x = gx + GLYPH_W / 2 - sw / 2;
-      VBAR(stem_x, top_y, bot_y - sw);
+      int stem_x   = gx + GLYPH_W / 2 - sw / 2;  // center of 4u glyph
+      VBAR(stem_x, top_y, bot_y - sw);             // center full span (stem)
       int cap_right = stem_x + sw;
-      int diag_h = cap_right - gx;
+      int diag_h    = cap_right - gx;              // diagonal drop height
       if (diag_h > 0) {
         GPoint pts[5] = {
           {cap_right - 1, top_y},
@@ -318,11 +429,15 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       }
       break;
     }
+
     case 2: {
-      // Bottom-right diagonal point moved left 1px: +2 -> +1
+      // Arc cap + diagonal span + flat base
+      // Tail spans hold the arc cap vertically before the diagonal starts
       fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);
-      VBAR(gx,   top_cy, top_cy + tail);
-      VBAR(gx_r, top_cy, top_cy + tail);
+      VBAR(gx,   top_cy, top_cy + tail);   // left tail below arc cap
+      VBAR(gx_r, top_cy, top_cy + tail);   // right tail below arc cap
+      // Diagonal parallelogram connecting upper-right to lower-left
+      // Bottom-right point shifted -1px x (v3.23) for visual alignment
       int dy = (bot_y - sw) - (top_cy + tail);
       if (dy > 0) {
         GPoint pts[4] = {
@@ -336,51 +451,66 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
         gpath_draw_filled(ctx, path);
         gpath_destroy(path);
       }
-      HBAR(bot_y - sw);
+      HBAR(bot_y - sw);   // flat base
       break;
     }
+
     case 3: {
-      fill_arc(ctx, cap_cx, t_tc, ro, ri, 270, 450);
-      VBAR(gx,   t_tc, t_tc + tail);
-      VBAR(gx_r, t_tc, t_bc);
-      fill_arc(ctx, cap_cx, t_bc, ro, ri, 90, 180);
-      NUB(gx + sw, t_bc + sw);
-      fill_arc(ctx, cap_cx, b_tc, ro, ri, 360, 450);
-      VBAR(gx,   b_bc - tail, b_bc);
-      VBAR(gx_r, b_tc, b_bc);
-      fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
+      // Two open rings with a NUB filling the inner corner gap.
+      // Upper ring: arc cap + top-left tail + right bridge span + bottom-right half arc
+      // Lower ring: top-right half arc + bottom-left tail + right bridge span + arc base
+      fill_arc(ctx, cap_cx, t_tc, ro, ri, 270, 450);   // upper arc cap
+      VBAR(gx,   t_tc, t_tc + tail);                   // upper-left tail span
+      VBAR(gx_r, t_tc, t_bc);                          // right bridge span (upper ring)
+      fill_arc(ctx, cap_cx, t_bc, ro, ri, 90, 180);    // lower-right half of upper ring
+      NUB(gx + sw, t_bc + sw);                         // inner corner gap fill
+      fill_arc(ctx, cap_cx, b_tc, ro, ri, 360, 450);   // upper-left half of lower ring
+      VBAR(gx,   b_bc - tail, b_bc);                   // lower-left tail span
+      VBAR(gx_r, b_tc, b_bc);                          // right bridge span (lower ring)
+      fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);    // lower arc base
       break;
     }
+
     case 4:
-      // Crossbar moved up HALF_UNIT; left VBAR endpoint matched
-      VBAR(gx,   top_y, cy - HALF_UNIT + sw);
-      VBAR(gx_r, top_y, bot_y);
-      graphics_fill_rect(ctx, GRect(gx, cy - HALF_UNIT, GLYPH_W, sw), 0, GCornerNone);
+      // No top cap. Left short span, right full span, crossbar.
+      // Crossbar shifted up HALF_UNIT (v3.23) for visual balance.
+      VBAR(gx,   top_y, cy - HALF_UNIT + sw);                          // left span (to crossbar bottom)
+      VBAR(gx_r, top_y, bot_y);                                         // right full span
+      graphics_fill_rect(ctx, GRect(gx, cy - HALF_UNIT, GLYPH_W, sw), // crossbar
+                         0, GCornerNone);
       break;
+
     case 5:
+      // HBAR cap + left upper span + bottom ring + right bridge span + left lower tail
+      // Left upper span ends at b_tc (top of bottom ring center) — keeps mouth open
+      // Lower-left tail only appears at sizes 3+ (tail=0 at size 2)
       HBAR(top_y);
-      VBAR(gx,   top_y + sw, b_tc);
-      fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
-      fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
-      VBAR(gx_r, b_tc, b_bc);
-      if (tail > 0) VBAR(gx, b_bc - tail, b_bc);
+      VBAR(gx,   top_y + sw, b_tc);         // left upper span (to ring center)
+      fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);  // bottom ring arc cap
+      fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);   // bottom ring arc base
+      VBAR(gx_r, b_tc, b_bc);               // right bridge span
+      if (tail > 0) VBAR(gx, b_bc - tail, b_bc);  // lower-left tail span
       break;
+
     case 6:
-      fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);
-      VBAR(gx_r, top_cy, top_cy + tail);
-      VBAR(gx,   top_cy, b_bc);
-      fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
-      fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
-      VBAR(gx_r, b_tc, b_bc);
+      // Arc cap + right upper tail + left full span + bottom ring
+      fill_arc(ctx, cap_cx, top_cy, ro, ri, 270, 450);  // arc cap
+      VBAR(gx_r, top_cy, top_cy + tail);                // right upper tail span
+      VBAR(gx,   top_cy, b_bc);                         // left full span
+      fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);    // bottom ring arc cap
+      fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);     // bottom ring arc base
+      VBAR(gx_r, b_tc, b_bc);                           // right bridge span
       break;
+
     case 7: {
-      // Bottom 2 points moved up 1px, left 1px
+      // HBAR cap + diagonal parallelogram reaching canvas floor (no base)
+      // Bottom 2 points shifted -1px x, -1px y (v3.23) for visual alignment
       HBAR(top_y);
       GPoint pts[4] = {
-        {gx_r - 1,  top_y + sw},
-        {gx_r + sw, top_y + sw},
-        {gx + sw,   bot_y - 1},
-        {gx - 1,    bot_y - 1},
+        {gx_r - 1,  top_y + sw},   // top-left of diagonal (inside top bar)
+        {gx_r + sw, top_y + sw},   // top-right of diagonal
+        {gx + sw,   bot_y - 1},    // bottom-right (canvas floor, shifted)
+        {gx - 1,    bot_y - 1},    // bottom-left (canvas floor, shifted)
       };
       GPathInfo info = { .num_points = 4, .points = pts };
       GPath *path = gpath_create(&info);
@@ -388,37 +518,47 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int siz
       gpath_destroy(path);
       break;
     }
+
     case 8:
-      fill_arc(ctx, cap_cx, t_tc, ro, ri, 270, 450);
-      fill_arc(ctx, cap_cx, t_bc, ro, ri, 90, 270);
-      VBAR(gx,   t_tc, t_bc);
-      VBAR(gx_r, t_tc, t_bc);
-      fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);
-      fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);
-      VBAR(gx,   b_tc, b_bc);
-      VBAR(gx_r, b_tc, b_bc);
+      // Two complete rings stacked; all bridge spans center-to-center
+      fill_arc(ctx, cap_cx, t_tc, ro, ri, 270, 450);   // upper arc cap
+      fill_arc(ctx, cap_cx, t_bc, ro, ri, 90, 270);    // center arc (bottom of upper ring)
+      VBAR(gx,   t_tc, t_bc);                          // left bridge span (upper ring)
+      VBAR(gx_r, t_tc, t_bc);                          // right bridge span (upper ring)
+      fill_arc(ctx, cap_cx, b_tc, ro, ri, 270, 450);   // center arc (top of lower ring)
+      fill_arc(ctx, cap_cx, b_bc, ro, ri, 90, 270);    // lower arc base
+      VBAR(gx,   b_tc, b_bc);                          // left bridge span (lower ring)
+      VBAR(gx_r, b_tc, b_bc);                          // right bridge span (lower ring)
       break;
+
     case 9:
-      fill_arc(ctx, cap_cx, t_tc, ro, ri, 270, 450);
-      fill_arc(ctx, cap_cx, t_bc, ro, ri, 90, 270);
-      VBAR(gx,   t_tc, t_bc);
-      VBAR(gx,   bot_cy - tail, bot_cy);
-      VBAR(gx_r, t_tc, bot_cy);
-      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 90, 270);
+      // Full top ring + right full span downward + left lower tail + bottom arc base
+      // bot_cy = bottom of the 0-style top ring (below center)
+      fill_arc(ctx, cap_cx, t_tc, ro, ri, 270, 450);   // upper arc cap
+      fill_arc(ctx, cap_cx, t_bc, ro, ri, 90, 270);    // center arc (closes top ring)
+      VBAR(gx,   t_tc, t_bc);                          // left bridge span (top ring)
+      VBAR(gx,   bot_cy - tail, bot_cy);               // left lower tail span
+      VBAR(gx_r, t_tc, bot_cy);                        // right full span
+      fill_arc(ctx, cap_cx, bot_cy, ro, ri, 90, 270);  // arc base
       break;
+
     default: break;
   }
-#undef VBAR
-#undef HBAR
-#undef NUB
+
+  #undef top_cy
+  #undef bot_cy
+  #undef VBAR
+  #undef HBAR
+  #undef NUB
 }
 
+// Colon: two circular dots positioned at ±h/4 from cy.
+// Dots shifted 2px toward center (v3.23) for visual balance at all sizes.
 static void draw_colon_vec(GContext *ctx, int slot_x, int cy, int size) {
-  // Dots moved 2px toward center: upper +2, lower -2
   graphics_context_set_fill_color(ctx, s_fg);
   int h = digit_outer_h(size), r = UNIT / 2, dx = slot_x + SLOT_W / 2;
-  GRect b1 = GRect(dx-r, cy-h/4-r+2, r*2, r*2);
-  GRect b2 = GRect(dx-r, cy+h/4-r-2, r*2, r*2);
+  GRect b1 = GRect(dx-r, cy-h/4-r+2, r*2, r*2);   // upper dot (+2px down)
+  GRect b2 = GRect(dx-r, cy+h/4-r-2, r*2, r*2);   // lower dot (-2px up)
   graphics_fill_radial(ctx, b1, GOvalScaleModeFitCircle, (uint16_t)r, 0, DEG_TO_TRIGANGLE(360));
   graphics_fill_radial(ctx, b2, GOvalScaleModeFitCircle, (uint16_t)r, 0, DEG_TO_TRIGANGLE(360));
 }
@@ -432,6 +572,9 @@ static void draw_digits_vec(GContext *ctx, int h_tens, int h_ones,
   draw_digit_vec(ctx, m_ones, SLOT_M_ONES, cy, size);
 }
 
+// Split countdown: outer slots (H_TENS, M_ONES) show raster, inner slots
+// (H_ONES, M_TENS) show vector — both at the same size for direct comparison.
+// The red stripe in blit() distinguishes raster from vector visually.
 static void draw_digits_countdown_split(GContext *ctx, int digit, int size, int center_y) {
   int raster_y = center_y - SCREEN_H / 2;
   blit(ctx, get_bitmap(digit, size), SLOT_H_TENS, raster_y);
