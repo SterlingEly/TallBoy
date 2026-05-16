@@ -1,44 +1,41 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.25
+// TallBoy -- main.c  v3.26
 //
-// v3.25: RASTER SYSTEM REMOVED + feature updates
-//   - All raster bitmap code eliminated (resources, bitmaps, blit,
-//     draw_digits, countdown split, LAYOUT_WIDE, LAYOUT_LEFT)
-//   - LAYOUT_VECTOR is now the only full-screen layout (index 0)
-//   - LAYOUT_RIGHT (stacked vector + info) is now layout index 1
-//   - Countdown now all-vector (no split)
-//   - s_demo_override / s_demo_digit cleanup
-//   - Step pace color spectrum redesigned (10 bands, wraps to black)
-//   - Full day names in info column (Sunday, Monday, etc.)
-//   - Countdown timing reverted to normal speed
+// v3.26: dynamic vertical sizing — digits fill available height
+//   with exactly 1u margin above and below at all times.
+//
+//   WIDE_FULL_SIZE (hardcoded 5) retired. Replaced by:
+//     prv_compute_size(ub_h) = clamp((ub_h/UNIT - 3) / 4 - 1,
+//                                    ANIM_MIN_SIZE, ANIM_PEAK_SIZE-1)
+//   Formula: usable = ub_h - 2*UNIT (1u top + 1u bottom margin)
+//            size   = floor((usable/UNIT - 3) / 4)
+//
+//   On emery unobstructed (228px): size = (212/8 - 3) / 4 = 5 ✓
+//   On flint unobstructed (168px): size = (156/6 - 3) / 4 = 5 ✓
+//
+//   Quick look: unobstructed_bounds fires → prv_compute_size() →
+//   digits shrink to maintain 1u margin. Natural, no special casing.
+//
+//   ANIM_PEAK_SIZE = prv_compute_size() + 1 for overshoot.
+//   SIZE_CYCLE adapts to computed resting size at shake time.
 // ============================================================
 //
 // DIGIT GEOMETRY OVERVIEW
 // =======================
-// All digits share a fixed width of 4u (GLYPH_W) within a 5u slot
-// (SLOT_W). The half-unit padding on each side creates 1u visual gap.
+// All digits share a fixed width of 4u (GLYPH_W) within a 5u slot.
+// ro=2u, ri=1u, sw=1u — IMMUTABLE across all sizes.
+// Only VBARs grow/shrink. Arcs are always the same size.
 //
-// HORIZONTAL LAYOUT (25u emery, 24u flint):
-//   margin + [pad|digit|pad]x4 + [pad|colon|pad] + margin = 23u + margins
-//
-// VERTICAL STRUCTURE — up to 4 layers per digit:
-//   1. ARC CAP (top): arc cap (0,2,3,6,8,9), hbar cap (5,7),
-//      diagonal cap (1 only), none (4)
-//   2. SPANS: full span (body), bridge span (ring-to-ring, resizes),
-//      diagonal span (2,7), tail span (stub, sizes 3+ only)
-//   3. CENTER ELEMENTS: crossbar (4), ring pair (8), center arc (6,9)
-//   4. ARC BASE (bottom): arc base (0,3,5,6,8,9), flat base (2), none (1,4,7)
-//
-// KEY VARIABLES (derived from cy = vertical center of slot):
-//   ro=2u, ri=1u, sw=1u — IMMUTABLE across all sizes
-//   bar = (size-1)*2u   — ring gap, grows with size
-//   tail = (size>2)?(size-2)*u:0 — tail span, zero at min size
+// MARGIN MODEL:
+//   1u outer margin — sacred time padding, always maintained
+//   ~0.5-1u canvas margin — leftover horizontal pixels per platform
+//   Total vertical black space at resting size: ~2u emery, ~1.5u flint
 // ============================================================
 
-#define LAYOUT_VECTOR    0   // full-screen vector digits
-#define LAYOUT_RIGHT     1   // stacked vector right + info left
+#define LAYOUT_VECTOR    0
+#define LAYOUT_RIGHT     1
 #define LAYOUT_COUNT     2
 static int s_layout = LAYOUT_VECTOR;
 
@@ -90,14 +87,10 @@ static int s_layout = LAYOUT_VECTOR;
 #define COUNTDOWN_SHRINK_HOLD_MS  500
 
 #define BLINK_REPS      2
-#define WIDE_FULL_SIZE  5
-#define ANIM_PEAK_SIZE  6
-#define ANIM_MIN_SIZE   2
+#define ANIM_PEAK_SIZE  6   // absolute cap — animation overshoot only
+#define ANIM_MIN_SIZE   2   // squish floor — size 1 retired
 
 #define STEPS_AVG_MAX_MIN 120
-
-static const int SIZE_CYCLE[] = { 5, 4, 3, 2, 3, 4, 5, 6, 5 };
-#define SIZE_CYCLE_LEN 9
 
 typedef enum { CD_SHRINK, CD_HOLD_MIN, CD_EXPAND, CD_HOLD_MAX } CdSubPhase;
 
@@ -107,11 +100,22 @@ static int stack_digit_h(int sz)     { return (sz == 2) ? STACK_H_SZ2 : STACK_H_
 
 static int digit_outer_h(int sz) { return UNIT * (3 + 4 * sz); }
 
+// Compute the resting digit size that fills available height with 1u margin top+bottom.
+// usable = ub_h - 2*UNIT; size = usable/UNIT - 3) / 4
+// Clamped to [ANIM_MIN_SIZE, ANIM_PEAK_SIZE-1].
+static int prv_compute_size(int ub_h) {
+  int usable_units = (ub_h - 2 * UNIT) / UNIT;   // ub_h in units, minus 2u margin
+  int sz = (usable_units - 3) / 4;                // invert digit_outer_h formula
+  if (sz >= ANIM_PEAK_SIZE) sz = ANIM_PEAK_SIZE - 1;
+  if (sz < ANIM_MIN_SIZE)   sz = ANIM_MIN_SIZE;
+  return sz;
+}
+
 typedef enum { PHASE_COUNTDOWN, PHASE_BLINK, PHASE_DONE, PHASE_SQUISH, PHASE_SHAKE_CYCLE } Phase;
 
 static Window    *s_window;
 static Layer     *s_canvas_layer;
-static int        s_hour = 0, s_minute = 0, s_size = 6, s_target_size = 6;
+static int        s_hour = 0, s_minute = 0, s_size = 5, s_target_size = 5;
 static GColor     s_fg, s_bg;
 static Phase      s_phase = PHASE_COUNTDOWN;
 static int        s_anim_step = 0, s_anim_rep = 0;
@@ -130,22 +134,18 @@ static char       s_weather_temp[8] = "", s_weather_desc[32] = "";
 
 #if defined(PBL_COLOR)
 // Step pace background color spectrum.
-// Maps today's steps as % of historical average to a color.
-// Designed to be readable as ambient mood: cold->warm->cool->hot->wrap.
-//
-// % of avg  | color       | fg
-// ----------|-------------|------
-// 0 / none  | Black       | White  (default, no data)
-// 1-30%     | Red         | White  (very behind)
-// 31-60%    | Orange      | White
-// 61-90%    | Yellow      | Black
-// 91-200%   | Green       | White  (on pace)
-// 201-300%  | Blue        | White
-// 301-400%  | Light Blue* | White  (* GColorPictonBlue — closest available)
-// 401-500%  | White       | Black
-// 501-600%  | Lavender*   | Black  (* GColorBabyBlueEyes — closest available)
-// 601-1000% | Purple      | White
-// 1001%+    | Black       | White  (you broke the watch. nice.)
+// % of avg  | color             | fg
+// 0 / none  | Black             | White  (no data)
+// 1-30%     | Red               | White
+// 31-60%    | Orange            | White
+// 61-90%    | Yellow            | Black
+// 91-200%   | Green             | White  (on pace)
+// 201-300%  | Blue              | White
+// 301-400%  | PictonBlue        | White  (closest to light blue)
+// 401-500%  | White             | Black
+// 501-600%  | BabyBlueEyes      | Black  (closest to lavender)
+// 601-1000% | Purple            | White
+// 1001%+    | Black             | White  (you're unhinged)
 static GColor prv_pace_color(int steps_today, int steps_avg) {
   if (steps_avg <= 0 || steps_today <= 0) return GColorBlack;
   int pct = (steps_today * 100) / steps_avg;
@@ -159,7 +159,7 @@ static GColor prv_pace_color(int steps_today, int steps_avg) {
   if (pct <= 500)  return GColorWhite;
   if (pct <= 600)  return GColorBabyBlueEyes;
   if (pct <= 1000) return GColorPurple;
-  return GColorBlack;  // 1001%+: you're unhinged. black again.
+  return GColorBlack;
 }
 
 static bool prv_bg_needs_dark_fg(GColor bg) {
@@ -380,7 +380,6 @@ static void draw_stacked_vec(GContext *ctx, int h_tens, int h_ones,
   draw_digit_vec(ctx, m_ones, ones_x, m_cy, sz);
 }
 
-// Full day names for info column
 static const char *s_day_names_full[] = {
   "Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"
 };
@@ -445,7 +444,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   int h_tens = h/10, h_ones = h%10, m_tens = s_minute/10, m_ones = s_minute%10;
   int size = s_size;
 
-  // During countdown: show the countdown digit at current animation size
   if (s_phase == PHASE_COUNTDOWN) {
     int d = s_countdown_digit;
     draw_digits_vec(ctx, d, d, d, d, size, center_y);
@@ -458,7 +456,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   if (s_layout == LAYOUT_VECTOR) {
     draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, size, center_y);
   } else {
-    // LAYOUT_RIGHT: stacked vector digits right, info column left
     int sdh = stack_digit_h(s_stack_size);
     int h_cy = center_y - sdh/2 - HALF_UNIT;
     int m_cy = center_y + sdh/2 + HALF_UNIT;
@@ -476,20 +473,22 @@ static void timer_cb(void *data);
 static void schedule(uint32_t ms) { if (s_timer) app_timer_cancel(s_timer); s_timer = app_timer_register(ms, timer_cb, NULL); }
 
 static void prv_start_blink(void) {
-  s_size=WIDE_FULL_SIZE; s_going_down=true; s_anim_rep=0; s_overshot=false; s_phase=PHASE_BLINK;
+  s_size=s_target_size; s_going_down=true; s_anim_rep=0; s_overshot=false; s_phase=PHASE_BLINK;
   layer_mark_dirty(s_canvas_layer); schedule(ANIM_FAST_MS);
 }
 
 static bool prv_expand_step(void) {
   if (s_overshot) {
-    s_size = WIDE_FULL_SIZE; s_overshot = false;
+    s_size = s_target_size; s_overshot = false;
     layer_mark_dirty(s_canvas_layer);
     return true;
   }
   s_size++;
   layer_mark_dirty(s_canvas_layer);
-  if (s_size >= ANIM_PEAK_SIZE) {
-    s_size = ANIM_PEAK_SIZE; s_overshot = true;
+  int peak = s_target_size + 1;  // overshoot is 1 above resting
+  if (peak > ANIM_PEAK_SIZE) peak = ANIM_PEAK_SIZE;
+  if (s_size >= peak) {
+    s_size = peak; s_overshot = true;
     schedule(ANIM_SNAP_MS);
     return false;
   }
@@ -519,14 +518,16 @@ static void timer_cb(void *data) {
           break;
         case CD_EXPAND:
           if (s_overshot) {
-            s_size = WIDE_FULL_SIZE; s_overshot = false;
+            s_size = s_target_size; s_overshot = false;
             layer_mark_dirty(s_canvas_layer);
             s_cd_sub = CD_HOLD_MAX; schedule(COUNTDOWN_EXPAND_HOLD_MS);
           } else {
             s_size++;
             layer_mark_dirty(s_canvas_layer);
-            if (s_size >= ANIM_PEAK_SIZE) {
-              s_size = ANIM_PEAK_SIZE; s_overshot = true;
+            int peak = s_target_size + 1;
+            if (peak > ANIM_PEAK_SIZE) peak = ANIM_PEAK_SIZE;
+            if (s_size >= peak) {
+              s_size = peak; s_overshot = true;
               schedule(ANIM_SNAP_MS);
             } else {
               schedule(COUNTDOWN_STEP_MS);
@@ -551,7 +552,7 @@ static void timer_cb(void *data) {
           if (++s_anim_rep < BLINK_REPS) {
             s_going_down = true; s_overshot = false; schedule(ANIM_FAST_MS);
           } else {
-            s_target_size = WIDE_FULL_SIZE; s_phase = PHASE_DONE;
+            s_phase = PHASE_DONE;
             layer_mark_dirty(s_canvas_layer);
           }
         }
@@ -573,19 +574,27 @@ static void timer_cb(void *data) {
       }
       break;
 
-    case PHASE_SHAKE_CYCLE:
-      if (++s_anim_step < SIZE_CYCLE_LEN) {
-        s_size = SIZE_CYCLE[s_anim_step];
+    case PHASE_SHAKE_CYCLE: {
+      // SIZE_CYCLE is relative offsets from ANIM_MIN_SIZE up to target+1.
+      // We replay a fixed-shape cycle anchored to current s_target_size.
+      static const int SHAKE_OFFSETS[] = { 0, -1, -2, -3, -2, -1, 0, 1, 0 };
+      #define SHAKE_LEN 9
+      if (++s_anim_step < SHAKE_LEN) {
+        int sz = s_target_size + SHAKE_OFFSETS[s_anim_step];
+        if (sz < ANIM_MIN_SIZE) sz = ANIM_MIN_SIZE;
+        if (sz > ANIM_PEAK_SIZE) sz = ANIM_PEAK_SIZE;
+        s_size = sz;
         layer_mark_dirty(s_canvas_layer);
-        bool at_snap = (s_anim_step == SIZE_CYCLE_LEN - 2);
+        bool at_snap = (s_anim_step == SHAKE_LEN - 2);
         schedule(at_snap ? ANIM_SNAP_MS : ANIM_FAST_MS);
       } else if (++s_anim_rep < 2) {
-        s_anim_step = 0; s_size = SIZE_CYCLE[0];
+        s_anim_step = 0; s_size = s_target_size;
         layer_mark_dirty(s_canvas_layer); schedule(ANIM_FAST_MS);
       } else {
         s_phase=PHASE_DONE; s_size=s_target_size; layer_mark_dirty(s_canvas_layer);
       }
       break;
+    }
 
     case PHASE_DONE: break;
   }
@@ -595,13 +604,18 @@ static void prv_update_targets(void) {
   Layer *root = window_get_root_layer(s_window);
   GRect ub = layer_get_unobstructed_bounds(root);
   s_stack_size = pick_stack_size(ub.size.h);
-  if (s_layout == LAYOUT_VECTOR) s_target_size = WIDE_FULL_SIZE;
+  if (s_layout == LAYOUT_VECTOR) {
+    s_target_size = prv_compute_size(ub.size.h);
+  }
 }
 
 static void unobstructed_change(AnimationProgress progress, void *ctx) {
   prv_update_targets();
-  if (s_phase==PHASE_DONE && s_layout==LAYOUT_VECTOR)
-    { s_size=s_target_size; layer_mark_dirty(s_canvas_layer); }
+  // In vector layout during normal display, snap immediately to new computed size
+  if (s_phase==PHASE_DONE && s_layout==LAYOUT_VECTOR) {
+    s_size = s_target_size;
+    layer_mark_dirty(s_canvas_layer);
+  }
 }
 
 static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
@@ -611,7 +625,7 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   prv_update_targets();
   if (s_layout == LAYOUT_VECTOR) {
     s_phase=PHASE_SHAKE_CYCLE; s_anim_step=0; s_anim_rep=0;
-    s_size=SIZE_CYCLE[0]; schedule(ANIM_FAST_MS);
+    s_size=s_target_size; schedule(ANIM_FAST_MS);
   } else {
     s_size=s_target_size;
   }
@@ -664,12 +678,14 @@ static void window_load(Window *window) {
   layer_set_update_proc(s_canvas_layer, draw_layer);
   layer_add_child(root, s_canvas_layer);
   GRect ub = layer_get_unobstructed_bounds(root);
-  s_target_size=WIDE_FULL_SIZE; s_stack_size=pick_stack_size(ub.size.h);
+  s_stack_size = pick_stack_size(ub.size.h);
+  s_target_size = prv_compute_size(ub.size.h);
+  s_size = s_target_size;
   UnobstructedAreaHandlers ua={.change=unobstructed_change};
   unobstructed_area_service_subscribe(ua,NULL);
   accel_tap_service_subscribe(accel_tap_handler);
   s_phase=PHASE_COUNTDOWN; s_countdown_digit=9;
-  s_overshot=false; s_size=WIDE_FULL_SIZE; s_cd_sub=CD_HOLD_MAX;
+  s_overshot=false; s_cd_sub=CD_HOLD_MAX;
   layer_mark_dirty(s_canvas_layer); schedule(COUNTDOWN_EXPAND_HOLD_MS);
 }
 
