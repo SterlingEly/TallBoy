@@ -1,32 +1,22 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.27
+// TallBoy -- main.c  v3.28
 //
-// v3.27: INTEGER SIZE RETIRED — all animation in pixel heights
+// v3.28: four fixes
+//   1. PictonBlue (light blue) → dark fg (was missing)
+//   2. Animation 8x faster: ANIM_STEP_PX=8, ANIM_STEP_MS=16
+//   3. Margin corrected: 2u each side (was 1u) → target_h = ub_h - 4*UNIT
+//   4. Stacked layout dynamic sizing:
+//        stacked_dh = (ub_h - 5*UNIT) / 2
+//        (2u top margin + 1u gap + 2u bottom margin = 5u reserved)
+//        h_cy and m_cy pinned to exact 2u from canvas edges
+//        Retired: pick_stack_size, stack_digit_h, STACK_H_SZ1/2, STACK_SZ2_MIN
 //
-//   Digits are now parameterized by `h` (total pixel height),
-//   not a discrete integer size index. This is the correct model
-//   for a pure vector system: spans stretch to any h, arcs stay
-//   fixed size (ro=2u, ri=1u, sw=1u always), no discrete steps.
-//
-//   s_h        = current animated digit height in pixels
-//   s_target_h = ub_h - 2*UNIT  (fills screen with 1u margin each side)
-//   s_min_h    = 11*UNIT         (minimum legible height, was ANIM_MIN_SIZE=2)
-//   s_peak_h   = s_target_h + UNIT  (1u overshoot for snap effect)
-//
-//   All geometry derived from h directly (no size intermediary):
-//     bar  = (h - 7*UNIT) / 2    ring gap between inner cap centers
-//     tail = max(0, (h - 11*UNIT) / 4)  tail span length
-//
-//   Countdown/squish/blink: smooth 2px steps at ANIM_STEP_MS (40ms)
-//   Overshoot: grows to s_peak_h, holds ANIM_SNAP_MS, snaps to s_target_h
-//
-// DIGIT GEOMETRY — KEY RELATIONSHIPS:
-//   ro=2u, ri=1u, sw=1u, glyph_w=4u — all IMMUTABLE
-//   h_min = 11u = 88px/66px (arcs touch, bar=0, tail=0)
-//   bar  = (h - 7u) / 2   — pixels between inner ring centers
-//   tail = max(0, (h - 11u) / 4)  — stub span beyond outer ring
+// MARGIN MODEL (consistent across both layouts):
+//   Full-screen vector: 2u above + 2u below digits
+//   Stacked:            2u above top row + 1u gap + 2u below bottom row
+//   Quick look:         same 2u maintained as ub_h shrinks
 // ============================================================
 
 #define LAYOUT_VECTOR    0
@@ -45,9 +35,6 @@ static int s_layout = LAYOUT_VECTOR;
   #define SLOT_M_ONES   148
   #define SIDE_MARGIN    12
   #define HALF_UNIT       4
-  #define STACK_H_SZ1    56
-  #define STACK_H_SZ2    88
-  #define STACK_SZ2_MIN 190
   #define INFO_FONT_H    24
   #define INFO_LINE_H    28
   #define INFO_FONT_KEY  FONT_KEY_GOTHIC_24_BOLD
@@ -63,9 +50,6 @@ static int s_layout = LAYOUT_VECTOR;
   #define SLOT_M_ONES   108
   #define SIDE_MARGIN     6
   #define HALF_UNIT       3
-  #define STACK_H_SZ1    42
-  #define STACK_H_SZ2    66
-  #define STACK_SZ2_MIN 146
   #define INFO_FONT_H    18
   #define INFO_LINE_H    20
   #define INFO_FONT_KEY  FONT_KEY_GOTHIC_18_BOLD
@@ -75,31 +59,37 @@ static int s_layout = LAYOUT_VECTOR;
 #define HALF_SLOT_PAD   (UNIT / 2)
 #define GLYPH_W         (UNIT * 4)
 
-// Minimum digit height: arcs just touching, bar=0, tail=0
-// Derived from h = (3+4*2)*UNIT = 11*UNIT
+// Minimum digit height: arcs just touching (bar=0, tail=0) = 11u
 #define H_MIN           (UNIT * 11)
 
-// Animation timing
-#define ANIM_STEP_MS    40    // smooth pixel step interval (was 80ms at integer sizes)
-#define ANIM_STEP_PX    2     // pixels per step — 2px gives fluid motion
-#define ANIM_SNAP_MS    120   // hold at overshoot peak before snap back
-#define ANIM_OVERSHOOT  UNIT  // overshoot above target (1u)
+// Margin constants
+#define MARGIN_OUTER    (UNIT * 2)   // 2u above/below digits — both layouts
+#define MARGIN_GAP      UNIT         // 1u gap between stacked rows
 
-#define COUNTDOWN_HOLD_MS   400   // pause at full height between countdown digits
+// Animation timing — fast but still visually smooth
+#define ANIM_STEP_PX    8     // pixels per animation step
+#define ANIM_STEP_MS    16    // ~60fps equivalent
+#define ANIM_SNAP_MS    120   // hold at overshoot before snap
+#define ANIM_OVERSHOOT  UNIT  // 1u overshoot above target
+
+#define COUNTDOWN_HOLD_MS   400
 #define BLINK_REPS          2
 
 #define STEPS_AVG_MAX_MIN 120
 
 typedef enum { CD_SHRINK, CD_HOLD_MIN, CD_EXPAND, CD_HOLD_MAX } CdSubPhase;
 
-static int s_stack_size = 2;
-static int pick_stack_size(int ub_h) { return (ub_h >= STACK_SZ2_MIN) ? 2 : 1; }
-static int stack_digit_h(int sz)     { return (sz == 2) ? STACK_H_SZ2 : STACK_H_SZ1; }
-
-// Compute resting digit height: fills available height with 1u margin each side.
-// target_h = ub_h - 2*UNIT, clamped to [H_MIN, screen-limited max].
+// Full-screen target height: ub_h minus 2u top + 2u bottom margin
 static int prv_compute_target_h(int ub_h) {
-  int h = ub_h - 2 * UNIT;
+  int h = ub_h - 2 * MARGIN_OUTER;
+  if (h < H_MIN) h = H_MIN;
+  return h;
+}
+
+// Stacked row height: split available space equally between two rows,
+// reserving 2u top margin + 1u gap + 2u bottom margin = 5u total.
+static int prv_compute_stacked_h(int ub_h) {
+  int h = (ub_h - 2 * MARGIN_OUTER - MARGIN_GAP) / 2;
   if (h < H_MIN) h = H_MIN;
   return h;
 }
@@ -110,7 +100,7 @@ static Window    *s_window;
 static Layer     *s_canvas_layer;
 static int        s_hour = 0, s_minute = 0;
 static int        s_h = 0;          // current animated digit height (pixels)
-static int        s_target_h = 0;   // resting height from prv_compute_target_h()
+static int        s_target_h = 0;   // resting full-screen height
 static GColor     s_fg, s_bg;
 static Phase      s_phase = PHASE_COUNTDOWN;
 static int        s_anim_step = 0, s_anim_rep = 0;
@@ -128,19 +118,8 @@ static int        s_steps_avg = -1;
 static char       s_weather_temp[8] = "", s_weather_desc[32] = "";
 
 #if defined(PBL_COLOR)
-// Step pace background color spectrum.
-// % of avg  | color             | fg
-// 0/none    | Black             | White
-// 1-30%     | Red               | White
-// 31-60%    | Orange            | White
-// 61-90%    | Yellow            | Black
-// 91-200%   | Green             | White
-// 201-300%  | Blue              | White
-// 301-400%  | PictonBlue        | White  (closest to light blue)
-// 401-500%  | White             | Black
-// 501-600%  | BabyBlueEyes      | Black  (closest to lavender)
-// 601-1000% | Purple            | White
-// 1001%+    | Black             | White  (you're unhinged)
+// Step pace color spectrum — % of historical avg steps
+// Light backgrounds (White, Yellow, PictonBlue, BabyBlueEyes) → black fg
 static GColor prv_pace_color(int steps_today, int steps_avg) {
   if (steps_avg <= 0 || steps_today <= 0) return GColorBlack;
   int pct = (steps_today * 100) / steps_avg;
@@ -154,12 +133,13 @@ static GColor prv_pace_color(int steps_today, int steps_avg) {
   if (pct <= 500)  return GColorWhite;
   if (pct <= 600)  return GColorBabyBlueEyes;
   if (pct <= 1000) return GColorPurple;
-  return GColorBlack;
+  return GColorBlack;  // 1001%+: you're unhinged
 }
 
 static bool prv_bg_needs_dark_fg(GColor bg) {
-  return gcolor_equal(bg, GColorWhite)      ||
-         gcolor_equal(bg, GColorYellow)     ||
+  return gcolor_equal(bg, GColorWhite)       ||
+         gcolor_equal(bg, GColorYellow)      ||
+         gcolor_equal(bg, GColorPictonBlue)  ||   // light blue → black fg
          gcolor_equal(bg, GColorBabyBlueEyes);
 }
 #endif
@@ -196,46 +176,34 @@ static void fill_arc(GContext *ctx, int cx, int cy, int ro, int ri, int a0, int 
                        DEG_TO_TRIGANGLE(a0), DEG_TO_TRIGANGLE(a1));
 }
 
-// Draw a single vector digit.
-// slot_x: left edge of the 5u slot
-// cy:     vertical center of the digit
-// h:      total digit height in pixels (any integer >= H_MIN)
-//
-// All geometry derived directly from h — no discrete size index:
-//   bar  = (h - 7*UNIT) / 2    pixels between inner ring centers
-//   tail = max(0, (h - 11*UNIT) / 4)  tail span extension
+// Draw a single vector digit parameterized by pixel height h.
+// No discrete size index — spans stretch continuously.
+//   bar  = (h - 7*UNIT) / 2    ring gap
+//   tail = max(0, (h - H_MIN) / 4)  stub extension
 static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int h) {
   graphics_context_set_fill_color(ctx, s_fg);
 
-  // Immutable stroke geometry
   const int ro = UNIT * 2;
   const int ri = UNIT * 1;
   const int sw = UNIT;
 
-  // Horizontal anchors
   int gx     = slot_x + HALF_SLOT_PAD;
   int gx_r   = gx + GLYPH_W - sw;
   int cap_cx = gx + ro;
 
-  // Vertical extents from center
   int top_y = cy - h / 2;
   int bot_y = cy + h / 2;
 
-  // Ring geometry — derived from h, no size integer needed
-  int bar  = (h - 7 * UNIT) / 2;   // gap between inner ring centers
+  int bar  = (h - 7 * UNIT) / 2;
   if (bar < 0) bar = 0;
-  int t_bc = cy - (ro - HALF_UNIT); // top ring inner cap center
-  int t_tc = t_bc - bar;            // top ring outer cap center
-  int b_tc = cy + (ro - HALF_UNIT); // bottom ring inner cap center
-  int b_bc = b_tc + bar;            // bottom ring outer cap center
-
-  // Tail span — zero until h > H_MIN, then grows proportionally
+  int t_bc = cy - (ro - HALF_UNIT);
+  int t_tc = t_bc - bar;
+  int b_tc = cy + (ro - HALF_UNIT);
+  int b_bc = b_tc + bar;
   int tail = (h > H_MIN) ? (h - H_MIN) / 4 : 0;
 
-  // 0-style oval cap centers (single cap digits: 0, 6)
   #define top_cy (cy - (h - ro*2) / 2)
   #define bot_cy (cy + (h - ro*2) / 2)
-
   #define VBAR(x,y0,y1) if((y1)>(y0)) graphics_fill_rect(ctx,GRect((x),(y0),sw,(y1)-(y0)),0,GCornerNone)
   #define HBAR(y) graphics_fill_rect(ctx,GRect(gx,(y),GLYPH_W,sw),0,GCornerNone)
   #define NUB(x,y) graphics_fill_rect(ctx,GRect((x),(y),sw,sw),0,GCornerNone)
@@ -363,7 +331,6 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int h) 
   #undef NUB
 }
 
-// Colon: two dots at ±h/4 from cy, 2px closer together than raw math.
 static void draw_colon_vec(GContext *ctx, int slot_x, int cy, int h) {
   graphics_context_set_fill_color(ctx, s_fg);
   int r = UNIT / 2, dx = slot_x + SLOT_W / 2;
@@ -466,14 +433,16 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   if (s_layout == LAYOUT_VECTOR) {
     draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, s_h, center_y);
   } else {
-    int sdh = stack_digit_h(s_stack_size);
-    int h_cy = center_y - sdh/2 - HALF_UNIT;
-    int m_cy = center_y + sdh/2 + HALF_UNIT;
+    // LAYOUT_RIGHT: stacked digits pinned to exact 2u margins top & bottom,
+    // 1u gap between hour and minute rows. Dynamic digit height from ub_h.
+    int dh    = prv_compute_stacked_h(ub_h);
+    int h_cy  = ub_top + MARGIN_OUTER + dh / 2;
+    int m_cy  = ub_top + ub_h - MARGIN_OUTER - dh / 2;
     int ones_x = SCREEN_W - SIDE_MARGIN - SLOT_W;
     int tens_x = ones_x - SLOT_W;
     int info_x = SIDE_MARGIN;
-    int info_w = tens_x - SIDE_MARGIN*2;
-    draw_stacked_vec(ctx, h_tens, h_ones, m_tens, m_ones, sdh,
+    int info_w = tens_x - SIDE_MARGIN * 2;
+    draw_stacked_vec(ctx, h_tens, h_ones, m_tens, m_ones, dh,
                      tens_x, ones_x, h_cy, m_cy);
     if (tm && info_w > 20) draw_info_column(ctx, GRect(info_x, ub_top, info_w, ub_h), tm);
   }
@@ -488,8 +457,6 @@ static void prv_start_blink(void) {
   layer_mark_dirty(s_canvas_layer); schedule(ANIM_STEP_MS);
 }
 
-// Expand one step toward target, with overshoot.
-// Returns true when settled at s_target_h.
 static bool prv_expand_step(void) {
   if (s_overshot) {
     s_h = s_target_h; s_overshot = false;
@@ -580,8 +547,7 @@ static void timer_cb(void *data) {
       break;
 
     case PHASE_SHAKE_CYCLE: {
-      // Shake: descend 3u below target, climb back with 1u overshoot.
-      // All in pixel steps, anchored to s_target_h.
+      // Pixel offsets from s_target_h: down 3u then back up with 1u overshoot
       static const int SHAKE_OFFSETS_PX[] = {
         0, -UNIT, -(UNIT*2), -(UNIT*3),
         -(UNIT*2), -UNIT, 0, UNIT, 0
@@ -610,7 +576,6 @@ static void timer_cb(void *data) {
 static void prv_update_targets(void) {
   Layer *root = window_get_root_layer(s_window);
   GRect ub = layer_get_unobstructed_bounds(root);
-  s_stack_size = pick_stack_size(ub.size.h);
   if (s_layout == LAYOUT_VECTOR) {
     s_target_h = prv_compute_target_h(ub.size.h);
   }
@@ -685,7 +650,6 @@ static void window_load(Window *window) {
   layer_set_update_proc(s_canvas_layer, draw_layer);
   layer_add_child(root, s_canvas_layer);
   GRect ub = layer_get_unobstructed_bounds(root);
-  s_stack_size = pick_stack_size(ub.size.h);
   s_target_h = prv_compute_target_h(ub.size.h);
   s_h = s_target_h;
   UnobstructedAreaHandlers ua = {.change = unobstructed_change};
