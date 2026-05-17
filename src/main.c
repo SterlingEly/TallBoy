@@ -1,23 +1,36 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.28
+// TallBoy -- main.c  v3.29
 //
-// v3.28: four fixes
-//   1. PictonBlue (light blue) → dark fg (was missing)
-//   2. Animation 8x faster: ANIM_STEP_PX=8, ANIM_STEP_MS=16
-//   3. Margin corrected: 2u each side (was 1u) → target_h = ub_h - 4*UNIT
-//   4. Stacked layout dynamic sizing:
-//        stacked_dh = (ub_h - 5*UNIT) / 2
-//        (2u top margin + 1u gap + 2u bottom margin = 5u reserved)
-//        h_cy and m_cy pinned to exact 2u from canvas edges
-//        Retired: pick_stack_size, stack_digit_h, STACK_H_SZ1/2, STACK_SZ2_MIN
+// v3.29:
+//   1. Step pace colors: clean ROYGBIV
+//        0%: black (default)   1-30%: red    31-60%: orange
+//        61-90%: yellow        91-200%: green  201-400%: blue
+//        401-700%: indigo      701-1000%: violet   1001%+: black
+//   2. Info lines expanded to 8 lines max; all Radium fields added:
+//        calories, heart rate, BT, % of expected steps
+//   3. s_steps_avg → s_steps_expected (clearer name: expected cumulative
+//        steps at this point in day based on 7-day history)
+//   4. Health data: calories + heart rate tracking added
 //
-// MARGIN MODEL (consistent across both layouts):
-//   Full-screen vector: 2u above + 2u below digits
-//   Stacked:            2u above top row + 1u gap + 2u below bottom row
-//   Quick look:         same 2u maintained as ub_h shrinks
+// Layout shake cycle planned for v3.30:
+//   shake 0: full-screen time
+//   shake 1: time + 1 info above + 1 below
+//   shake 2: time + 2 above + 2 below
+//   shake 3: stacked left
+//   shake 4: stacked right
 // ============================================================
+//
+// DIGIT GEOMETRY — IMMUTABLE INVARIANTS:
+//   ro=2u, ri=1u, sw=1u, glyph_w=4u
+//   bar  = (h - 7*UNIT) / 2    ring gap between inner cap centers
+//   tail = max(0, (h - H_MIN) / 4)  stub span beyond outer ring cap
+//   H_MIN = 11*UNIT (88px emery, 66px flint)
+//
+// MARGIN MODEL:
+//   Full-screen: 2u above + 2u below digits
+//   Stacked:     2u top + 1u gap + 2u bottom = 5u reserved
 
 #define LAYOUT_VECTOR    0
 #define LAYOUT_RIGHT     1
@@ -58,36 +71,28 @@ static int s_layout = LAYOUT_VECTOR;
 
 #define HALF_SLOT_PAD   (UNIT / 2)
 #define GLYPH_W         (UNIT * 4)
-
-// Minimum digit height: arcs just touching (bar=0, tail=0) = 11u
 #define H_MIN           (UNIT * 11)
+#define MARGIN_OUTER    (UNIT * 2)
+#define MARGIN_GAP      UNIT
 
-// Margin constants
-#define MARGIN_OUTER    (UNIT * 2)   // 2u above/below digits — both layouts
-#define MARGIN_GAP      UNIT         // 1u gap between stacked rows
-
-// Animation timing — fast but still visually smooth
-#define ANIM_STEP_PX    8     // pixels per animation step
-#define ANIM_STEP_MS    16    // ~60fps equivalent
-#define ANIM_SNAP_MS    120   // hold at overshoot before snap
-#define ANIM_OVERSHOOT  UNIT  // 1u overshoot above target
+#define ANIM_STEP_PX    8
+#define ANIM_STEP_MS    16
+#define ANIM_SNAP_MS    120
+#define ANIM_OVERSHOOT  UNIT
 
 #define COUNTDOWN_HOLD_MS   400
 #define BLINK_REPS          2
-
-#define STEPS_AVG_MAX_MIN 120
+#define STEPS_AVG_MAX_MIN   120
+#define INFO_LINES_MAX      8
 
 typedef enum { CD_SHRINK, CD_HOLD_MIN, CD_EXPAND, CD_HOLD_MAX } CdSubPhase;
 
-// Full-screen target height: ub_h minus 2u top + 2u bottom margin
 static int prv_compute_target_h(int ub_h) {
   int h = ub_h - 2 * MARGIN_OUTER;
   if (h < H_MIN) h = H_MIN;
   return h;
 }
 
-// Stacked row height: split available space equally between two rows,
-// reserving 2u top margin + 1u gap + 2u bottom margin = 5u total.
 static int prv_compute_stacked_h(int ub_h) {
   int h = (ub_h - 2 * MARGIN_OUTER - MARGIN_GAP) / 2;
   if (h < H_MIN) h = H_MIN;
@@ -99,13 +104,11 @@ typedef enum { PHASE_COUNTDOWN, PHASE_BLINK, PHASE_DONE, PHASE_SQUISH, PHASE_SHA
 static Window    *s_window;
 static Layer     *s_canvas_layer;
 static int        s_hour = 0, s_minute = 0;
-static int        s_h = 0;          // current animated digit height (pixels)
-static int        s_target_h = 0;   // resting full-screen height
+static int        s_h = 0, s_target_h = 0;
 static GColor     s_fg, s_bg;
 static Phase      s_phase = PHASE_COUNTDOWN;
 static int        s_anim_step = 0, s_anim_rep = 0;
-static bool       s_going_down = true;
-static bool       s_overshot = false;
+static bool       s_going_down = true, s_overshot = false;
 static int        s_countdown_digit = 9;
 static CdSubPhase s_cd_sub = CD_HOLD_MAX;
 static AppTimer  *s_timer = NULL;
@@ -113,41 +116,40 @@ static bool       s_digit_pending = false;
 static int        s_pending_hour = 0, s_pending_minute = 0;
 static int        s_battery_pct = 100;
 static bool       s_charging = false, s_bt_connected = true;
-static int        s_steps = 0, s_distance_m = 0;
-static int        s_steps_avg = -1;
+static int        s_steps = 0, s_distance_m = 0, s_calories = 0, s_heart_rate = 0;
+static int        s_steps_expected = -1;  // expected cumulative steps at this minute, from 7-day history
 static char       s_weather_temp[8] = "", s_weather_desc[32] = "";
 
 #if defined(PBL_COLOR)
-// Step pace color spectrum — % of historical avg steps
-// Light backgrounds (White, Yellow, PictonBlue, BabyBlueEyes) → black fg
-static GColor prv_pace_color(int steps_today, int steps_avg) {
-  if (steps_avg <= 0 || steps_today <= 0) return GColorBlack;
-  int pct = (steps_today * 100) / steps_avg;
+// Step pace spectrum — ROYGBIV mapped to % of historical-average expected steps
+// fg is always white except Yellow (needs black for contrast)
+static GColor prv_pace_color(int steps_today, int steps_expected) {
+  if (steps_expected <= 0 || steps_today <= 0) return GColorBlack;
+  int pct = (steps_today * 100) / steps_expected;
   if (pct <= 0)    return GColorBlack;
   if (pct <= 30)   return GColorRed;
   if (pct <= 60)   return GColorOrange;
   if (pct <= 90)   return GColorYellow;
   if (pct <= 200)  return GColorGreen;
-  if (pct <= 300)  return GColorBlue;
-  if (pct <= 400)  return GColorPictonBlue;
-  if (pct <= 500)  return GColorWhite;
-  if (pct <= 600)  return GColorBabyBlueEyes;
-  if (pct <= 1000) return GColorPurple;
+  if (pct <= 400)  return GColorBlue;
+  if (pct <= 700)  return GColorIndigo;
+  if (pct <= 1000) return GColorViolet;
   return GColorBlack;  // 1001%+: you're unhinged
 }
 
 static bool prv_bg_needs_dark_fg(GColor bg) {
-  return gcolor_equal(bg, GColorWhite)       ||
-         gcolor_equal(bg, GColorYellow)      ||
-         gcolor_equal(bg, GColorPictonBlue)  ||   // light blue → black fg
-         gcolor_equal(bg, GColorBabyBlueEyes);
+  return gcolor_equal(bg, GColorYellow);
 }
 #endif
 
 #if defined(PBL_HEALTH)
 static HealthMinuteData s_minute_buf[STEPS_AVG_MAX_MIN];
 
-static int prv_calc_steps_avg(void) {
+// Returns expected cumulative steps at the current minute of day,
+// based on minute-level data from up to 7 prior days.
+// This is "what would typical-me have done by now" — the correct
+// denominator for step pace comparison. Fully on-watch, offline.
+static int prv_calc_steps_expected(void) {
   time_t now = time(NULL);
   struct tm *t = localtime(&now);
   int elapsed_min = t->tm_hour * 60 + t->tm_min;
@@ -162,6 +164,8 @@ static int prv_calc_steps_avg(void) {
     for (uint32_t i = 0; i < n; i++)
       if (!s_minute_buf[i].is_invalid) day_steps += s_minute_buf[i].steps;
     if (day_steps > 0) {
+      // If window is shorter than elapsed time (hit STEPS_AVG_MAX_MIN cap),
+      // scale up proportionally so we're comparing apples to apples.
       if (elapsed_min > window) day_steps = (day_steps * elapsed_min) / window;
       total += day_steps; day_count++;
     }
@@ -176,10 +180,6 @@ static void fill_arc(GContext *ctx, int cx, int cy, int ro, int ri, int a0, int 
                        DEG_TO_TRIGANGLE(a0), DEG_TO_TRIGANGLE(a1));
 }
 
-// Draw a single vector digit parameterized by pixel height h.
-// No discrete size index — spans stretch continuously.
-//   bar  = (h - 7*UNIT) / 2    ring gap
-//   tail = max(0, (h - H_MIN) / 4)  stub extension
 static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int h) {
   graphics_context_set_fill_color(ctx, s_fg);
 
@@ -190,9 +190,8 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int h) 
   int gx     = slot_x + HALF_SLOT_PAD;
   int gx_r   = gx + GLYPH_W - sw;
   int cap_cx = gx + ro;
-
-  int top_y = cy - h / 2;
-  int bot_y = cy + h / 2;
+  int top_y  = cy - h / 2;
+  int bot_y  = cy + h / 2;
 
   int bar  = (h - 7 * UNIT) / 2;
   if (bar < 0) bar = 0;
@@ -361,24 +360,64 @@ static void draw_stacked_vec(GContext *ctx, int h_tens, int h_ones,
 static const char *s_day_names_full[] = {
   "Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"
 };
-static const char *s_month_abbrs[] = {"JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"};
+static const char *s_month_abbrs[] = {
+  "JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"
+};
 
+// Build up to INFO_LINES_MAX info lines from all available data sources.
+// Order: day, date, steps, step pace %, distance, calories, heart rate, battery.
+// BT shown only when disconnected (replaces heart rate line in that case).
 static int build_info_lines(char lines[][32], int max_lines, struct tm *t) {
   int n = 0;
+
+  // Day name and date always first
   if (n < max_lines && t) snprintf(lines[n++], 32, "%s", s_day_names_full[t->tm_wday]);
   if (n < max_lines && t) snprintf(lines[n++], 32, "%s %d", s_month_abbrs[t->tm_mon], t->tm_mday);
+
 #if defined(PBL_HEALTH)
+  // Step count
   if (n < max_lines) {
-    if (s_steps >= 1000) snprintf(lines[n++], 32, "%dk steps", s_steps/1000);
+    if (s_steps >= 1000) snprintf(lines[n++], 32, "%d,%03d steps", s_steps/1000, s_steps%1000);
     else snprintf(lines[n++], 32, "%d steps", s_steps);
   }
-  if (n < max_lines && s_distance_m > 0) {
-    if (strcmp(i18n_get_system_locale(),"en_US")==0) { int mx=(s_distance_m*10)/1609; snprintf(lines[n++],32,"%d.%d mi",mx/10,mx%10); }
-    else { int kx=(s_distance_m*10)/1000; snprintf(lines[n++],32,"%d.%d km",kx/10,kx%10); }
+
+  // Step pace: current steps as % of expected at this time of day
+  if (n < max_lines && s_steps_expected > 0) {
+    int pct = (s_steps * 100) / s_steps_expected;
+    snprintf(lines[n++], 32, "%d%% pace", pct);
   }
-  if (n < max_lines && s_steps_avg > 0) snprintf(lines[n++], 32, "avg %d", s_steps_avg);
+
+  // Distance
+  if (n < max_lines && s_distance_m > 0) {
+    if (strcmp(i18n_get_system_locale(), "en_US") == 0) {
+      int mx = (s_distance_m * 10) / 1609;
+      snprintf(lines[n++], 32, "%d.%d mi", mx/10, mx%10);
+    } else {
+      int kx = (s_distance_m * 10) / 1000;
+      snprintf(lines[n++], 32, "%d.%d km", kx/10, kx%10);
+    }
+  }
+
+  // Calories (active kcal)
+  if (n < max_lines && s_calories > 0) {
+    snprintf(lines[n++], 32, "%d cal", s_calories);
+  }
+
+  // Heart rate or BT disconnection warning
+  if (n < max_lines) {
+    if (!s_bt_connected) {
+      snprintf(lines[n++], 32, "no phone");
+    } else if (s_heart_rate > 0) {
+      snprintf(lines[n++], 32, "%d bpm", s_heart_rate);
+    }
+  }
 #endif
-  if (n < max_lines) snprintf(lines[n++], 32, "bat %d%%", s_battery_pct);
+
+  // Battery always last
+  if (n < max_lines) {
+    snprintf(lines[n++], 32, "bat %d%%%s", s_battery_pct, s_charging ? " +" : "");
+  }
+
   return n;
 }
 
@@ -395,8 +434,10 @@ static void draw_info_block(GContext *ctx, int x, int y, int width, char lines[]
 }
 
 static void draw_info_column(GContext *ctx, GRect area, struct tm *t) {
-  char lines[6][32];
-  int n = build_info_lines(lines, area.size.h / INFO_LINE_H < 6 ? area.size.h / INFO_LINE_H : 6, t);
+  char lines[INFO_LINES_MAX][32];
+  int max = area.size.h / INFO_LINE_H;
+  if (max > INFO_LINES_MAX) max = INFO_LINES_MAX;
+  int n = build_info_lines(lines, max, t);
   if (!n) return;
   int start_y = area.origin.y + (area.size.h - n * INFO_LINE_H) / 2;
   draw_info_block(ctx, area.origin.x, start_y, area.size.w, lines, n);
@@ -409,7 +450,7 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   int center_y = ub_top + ub_h / 2;
 
 #if defined(PBL_COLOR) && defined(PBL_HEALTH)
-  GColor bg = prv_pace_color(s_steps, s_steps_avg);
+  GColor bg = prv_pace_color(s_steps, s_steps_expected);
   s_fg = prv_bg_needs_dark_fg(bg) ? GColorBlack : GColorWhite;
 #else
   GColor bg = s_bg;
@@ -433,8 +474,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   if (s_layout == LAYOUT_VECTOR) {
     draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, s_h, center_y);
   } else {
-    // LAYOUT_RIGHT: stacked digits pinned to exact 2u margins top & bottom,
-    // 1u gap between hour and minute rows. Dynamic digit height from ub_h.
     int dh    = prv_compute_stacked_h(ub_h);
     int h_cy  = ub_top + MARGIN_OUTER + dh / 2;
     int m_cy  = ub_top + ub_h - MARGIN_OUTER - dh / 2;
@@ -466,11 +505,7 @@ static bool prv_expand_step(void) {
   s_h += ANIM_STEP_PX;
   layer_mark_dirty(s_canvas_layer);
   int peak = s_target_h + ANIM_OVERSHOOT;
-  if (s_h >= peak) {
-    s_h = peak; s_overshot = true;
-    schedule(ANIM_SNAP_MS);
-    return false;
-  }
+  if (s_h >= peak) { s_h = peak; s_overshot = true; schedule(ANIM_SNAP_MS); return false; }
   schedule(ANIM_STEP_MS);
   return false;
 }
@@ -482,32 +517,26 @@ static void timer_cb(void *data) {
     case PHASE_COUNTDOWN:
       switch (s_cd_sub) {
         case CD_SHRINK:
-          s_h -= ANIM_STEP_PX;
-          layer_mark_dirty(s_canvas_layer);
+          s_h -= ANIM_STEP_PX; layer_mark_dirty(s_canvas_layer);
           if (s_h <= H_MIN) { s_h = H_MIN; s_cd_sub = CD_HOLD_MIN; schedule(ANIM_SNAP_MS); }
           else { schedule(ANIM_STEP_MS); }
           break;
         case CD_HOLD_MIN:
           if (s_countdown_digit == 0) { prv_start_blink(); break; }
-          s_countdown_digit--;
-          layer_mark_dirty(s_canvas_layer);
-          s_cd_sub = CD_EXPAND; s_overshot = false;
-          schedule(ANIM_STEP_MS);
+          s_countdown_digit--; layer_mark_dirty(s_canvas_layer);
+          s_cd_sub = CD_EXPAND; s_overshot = false; schedule(ANIM_STEP_MS);
           break;
-        case CD_EXPAND: {
+        case CD_EXPAND:
           if (s_overshot) {
-            s_h = s_target_h; s_overshot = false;
-            layer_mark_dirty(s_canvas_layer);
+            s_h = s_target_h; s_overshot = false; layer_mark_dirty(s_canvas_layer);
             s_cd_sub = CD_HOLD_MAX; schedule(COUNTDOWN_HOLD_MS);
           } else {
-            s_h += ANIM_STEP_PX;
-            layer_mark_dirty(s_canvas_layer);
+            s_h += ANIM_STEP_PX; layer_mark_dirty(s_canvas_layer);
             int peak = s_target_h + ANIM_OVERSHOOT;
             if (s_h >= peak) { s_h = peak; s_overshot = true; schedule(ANIM_SNAP_MS); }
             else { schedule(ANIM_STEP_MS); }
           }
           break;
-        }
         case CD_HOLD_MAX:
           s_cd_sub = CD_SHRINK; schedule(ANIM_STEP_MS);
           break;
@@ -547,22 +576,15 @@ static void timer_cb(void *data) {
       break;
 
     case PHASE_SHAKE_CYCLE: {
-      // Pixel offsets from s_target_h: down 3u then back up with 1u overshoot
-      static const int SHAKE_OFFSETS_PX[] = {
-        0, -UNIT, -(UNIT*2), -(UNIT*3),
-        -(UNIT*2), -UNIT, 0, UNIT, 0
-      };
+      static const int SHAKE_OFFSETS_PX[] = { 0, -UNIT, -(UNIT*2), -(UNIT*3), -(UNIT*2), -UNIT, 0, UNIT, 0 };
       #define SHAKE_LEN 9
       if (++s_anim_step < SHAKE_LEN) {
         int h = s_target_h + SHAKE_OFFSETS_PX[s_anim_step];
         if (h < H_MIN) h = H_MIN;
-        s_h = h;
-        layer_mark_dirty(s_canvas_layer);
-        bool at_snap = (s_anim_step == SHAKE_LEN - 2);
-        schedule(at_snap ? ANIM_SNAP_MS : ANIM_STEP_MS);
+        s_h = h; layer_mark_dirty(s_canvas_layer);
+        schedule(s_anim_step == SHAKE_LEN - 2 ? ANIM_SNAP_MS : ANIM_STEP_MS);
       } else if (++s_anim_rep < 2) {
-        s_anim_step = 0; s_h = s_target_h;
-        layer_mark_dirty(s_canvas_layer); schedule(ANIM_STEP_MS);
+        s_anim_step = 0; s_h = s_target_h; layer_mark_dirty(s_canvas_layer); schedule(ANIM_STEP_MS);
       } else {
         s_phase = PHASE_DONE; s_h = s_target_h; layer_mark_dirty(s_canvas_layer);
       }
@@ -576,16 +598,13 @@ static void timer_cb(void *data) {
 static void prv_update_targets(void) {
   Layer *root = window_get_root_layer(s_window);
   GRect ub = layer_get_unobstructed_bounds(root);
-  if (s_layout == LAYOUT_VECTOR) {
-    s_target_h = prv_compute_target_h(ub.size.h);
-  }
+  if (s_layout == LAYOUT_VECTOR) s_target_h = prv_compute_target_h(ub.size.h);
 }
 
 static void unobstructed_change(AnimationProgress progress, void *ctx) {
   prv_update_targets();
   if (s_phase == PHASE_DONE && s_layout == LAYOUT_VECTOR) {
-    s_h = s_target_h;
-    layer_mark_dirty(s_canvas_layer);
+    s_h = s_target_h; layer_mark_dirty(s_canvas_layer);
   }
 }
 
@@ -607,29 +626,44 @@ static void tick_handler(struct tm *t, TimeUnits units) {
   if (s_phase == PHASE_DONE && s_layout == LAYOUT_VECTOR) {
     s_pending_hour = t->tm_hour; s_pending_minute = t->tm_min;
     s_digit_pending = true; s_phase = PHASE_SQUISH;
-    s_going_down = true; s_overshot = false;
-    schedule(ANIM_STEP_MS);
+    s_going_down = true; s_overshot = false; schedule(ANIM_STEP_MS);
   } else if (s_phase == PHASE_SQUISH) {
     s_pending_hour = t->tm_hour; s_pending_minute = t->tm_min; s_digit_pending = true;
   } else {
     s_hour = t->tm_hour; s_minute = t->tm_min; layer_mark_dirty(s_canvas_layer);
   }
 #if defined(PBL_HEALTH)
-  s_steps_avg = prv_calc_steps_avg();
+  s_steps_expected = prv_calc_steps_expected();
 #endif
 }
 
-static void battery_handler(BatteryChargeState state){s_battery_pct=state.charge_percent;s_charging=state.is_charging;layer_mark_dirty(s_canvas_layer);}
-static void bt_handler(bool connected){s_bt_connected=connected;layer_mark_dirty(s_canvas_layer);}
+static void battery_handler(BatteryChargeState state) {
+  s_battery_pct = state.charge_percent; s_charging = state.is_charging;
+  layer_mark_dirty(s_canvas_layer);
+}
+static void bt_handler(bool connected) { s_bt_connected = connected; layer_mark_dirty(s_canvas_layer); }
 
 #if defined(PBL_HEALTH)
 static void health_handler(HealthEventType event, void *context) {
-  if(event==HealthEventMovementUpdate||event==HealthEventSignificantUpdate){
+  if (event == HealthEventMovementUpdate || event == HealthEventSignificantUpdate) {
     HealthServiceAccessibilityMask mask;
-    mask=health_service_metric_accessible(HealthMetricStepCount,time_start_of_today(),time(NULL));
-    s_steps=(mask&HealthServiceAccessibilityMaskAvailable)?(int)health_service_sum_today(HealthMetricStepCount):0;
-    mask=health_service_metric_accessible(HealthMetricWalkedDistanceMeters,time_start_of_today(),time(NULL));
-    s_distance_m=(mask&HealthServiceAccessibilityMaskAvailable)?(int)health_service_sum_today(HealthMetricWalkedDistanceMeters):0;
+    time_t start = time_start_of_today(), now = time(NULL);
+
+    mask = health_service_metric_accessible(HealthMetricStepCount, start, now);
+    s_steps = (mask & HealthServiceAccessibilityMaskAvailable)
+              ? (int)health_service_sum_today(HealthMetricStepCount) : 0;
+
+    mask = health_service_metric_accessible(HealthMetricWalkedDistanceMeters, start, now);
+    s_distance_m = (mask & HealthServiceAccessibilityMaskAvailable)
+                   ? (int)health_service_sum_today(HealthMetricWalkedDistanceMeters) : 0;
+
+    mask = health_service_metric_accessible(HealthMetricActiveKCalories, start, now);
+    s_calories = (mask & HealthServiceAccessibilityMaskAvailable)
+                 ? (int)health_service_sum_today(HealthMetricActiveKCalories) : 0;
+
+    mask = health_service_metric_accessible(HealthMetricHeartRateBPM, start, now);
+    s_heart_rate = (mask & HealthServiceAccessibilityMaskAvailable)
+                   ? (int)health_service_peek_current_value(HealthMetricHeartRateBPM) : 0;
   }
   layer_mark_dirty(s_canvas_layer);
 }
@@ -678,7 +712,7 @@ static void init(void) {
   bluetooth_connection_service_subscribe(bt_handler); s_bt_connected = bluetooth_connection_service_peek();
 #if defined(PBL_HEALTH)
   health_service_events_subscribe(health_handler, NULL); health_handler(HealthEventSignificantUpdate, NULL);
-  s_steps_avg = prv_calc_steps_avg();
+  s_steps_expected = prv_calc_steps_expected();
 #endif
   app_message_register_inbox_received(inbox_received); app_message_open(256, 64);
 }
