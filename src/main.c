@@ -1,9 +1,11 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.34a
-// Hotfix: dashes to dots in wide info separators;
-//         border moved to draw first (behind all content)
+// TallBoy -- main.c  v3.34b
+// Hotfix: corners outside border always black.
+// On emery: fill entire layer black, then fill bg color
+// as a rounded rect (radius=2u) so corners stay black.
+// The border draws on top and reinforces the edge.
 // ============================================================
 
 #define LAYOUT_FULL      0
@@ -61,7 +63,6 @@ static int s_layout = LAYOUT_FULL;
 #define BLINK_REPS         2
 #define STEPS_AVG_MAX_MIN  120
 
-// Middle dot separator for wide info pairs (UTF-8 U+00B7)
 #define DOT " \xc2\xb7 "
 
 typedef enum { CD_SHRINK, CD_HOLD_MIN, CD_EXPAND, CD_HOLD_MAX } CdSubPhase;
@@ -183,9 +184,6 @@ static void fill_arc(GContext *ctx, int cx, int cy, int ro, int ri, int a0, int 
                        DEG_TO_TRIGANGLE(a0), DEG_TO_TRIGANGLE(a1));
 }
 
-// Border: 1u rounded-rect outline using digit arc geometry (ro=2u, ri=1u).
-// Drawn immediately after background fill — behind all content.
-// Emery only (requires 2u outer margin to have space).
 #if defined(PBL_PLATFORM_EMERY)
 static void draw_border(GContext *ctx) {
   const int ro = UNIT * 2;
@@ -193,18 +191,14 @@ static void draw_border(GContext *ctx) {
   const int sw = UNIT;
 
   graphics_context_set_fill_color(ctx, s_fg);
-
-  // Bars flush to screen edges, shortened by ro at each end
-  graphics_fill_rect(ctx, GRect(ro, 0,            SCREEN_W - ro*2, sw), 0, GCornerNone); // top
-  graphics_fill_rect(ctx, GRect(ro, SCREEN_H - sw, SCREEN_W - ro*2, sw), 0, GCornerNone); // bottom
-  graphics_fill_rect(ctx, GRect(0,  ro,            sw, SCREEN_H - ro*2), 0, GCornerNone); // left
-  graphics_fill_rect(ctx, GRect(SCREEN_W - sw, ro, sw, SCREEN_H - ro*2), 0, GCornerNone); // right
-
-  // Quarter-circle corners joining the bars
-  fill_arc(ctx, ro,          ro,          ro, ri, 180, 270); // top-left
-  fill_arc(ctx, SCREEN_W-ro, ro,          ro, ri, 270, 360); // top-right
-  fill_arc(ctx, ro,          SCREEN_H-ro, ro, ri,  90, 180); // bottom-left
-  fill_arc(ctx, SCREEN_W-ro, SCREEN_H-ro, ro, ri,   0,  90); // bottom-right
+  graphics_fill_rect(ctx, GRect(ro, 0,            SCREEN_W - ro*2, sw), 0, GCornerNone);
+  graphics_fill_rect(ctx, GRect(ro, SCREEN_H - sw, SCREEN_W - ro*2, sw), 0, GCornerNone);
+  graphics_fill_rect(ctx, GRect(0,  ro,            sw, SCREEN_H - ro*2), 0, GCornerNone);
+  graphics_fill_rect(ctx, GRect(SCREEN_W - sw, ro, sw, SCREEN_H - ro*2), 0, GCornerNone);
+  fill_arc(ctx, ro,          ro,          ro, ri, 180, 270);
+  fill_arc(ctx, SCREEN_W-ro, ro,          ro, ri, 270, 360);
+  fill_arc(ctx, ro,          SCREEN_H-ro, ro, ri,  90, 180);
+  fill_arc(ctx, SCREEN_W-ro, SCREEN_H-ro, ro, ri,   0,  90);
 }
 #endif
 
@@ -430,16 +424,13 @@ static void prv_fmt_bat_bt(char *buf, int len) {
     snprintf(buf, len, "%d%% bat", s_battery_pct);
 }
 
-// Wide info lines — dot separator for all loose pairs
 static int build_info_lines_wide(char lines[][32], int max_lines, struct tm *t) {
   int n = 0;
 
-  // "Sunday, May 17" (comma, tight)
   if (n < max_lines && t)
     snprintf(lines[n++], 32, "%s, %s %d",
              s_day_names_full[t->tm_wday], s_month_names[t->tm_mon], t->tm_mday);
 
-  // "72 F & Sunny" (ampersand, tight)
   if (n < max_lines && s_weather_temp[0]) {
     if (s_weather_desc[0])
       snprintf(lines[n++], 32, "%s & %s", s_weather_temp, s_weather_desc);
@@ -447,7 +438,6 @@ static int build_info_lines_wide(char lines[][32], int max_lines, struct tm *t) 
       snprintf(lines[n++], 32, "%s", s_weather_temp);
   }
 
-  // "6:02am · 8:14pm" (dot)
   if (n < max_lines && (s_sunrise_min >= 0 || s_sunset_min >= 0)) {
     char rise[12], set[12];
     prv_fmt_time_min(rise, sizeof(rise), s_sunrise_min);
@@ -456,7 +446,6 @@ static int build_info_lines_wide(char lines[][32], int max_lines, struct tm *t) 
   }
 
 #if defined(PBL_HEALTH)
-  // "3,500 steps · 2.1 mi" (dot)
   if (n < max_lines) {
     char sbuf[16]; prv_fmt_steps_long(sbuf, sizeof(sbuf), s_steps);
     if (s_distance_m > 0) {
@@ -467,14 +456,12 @@ static int build_info_lines_wide(char lines[][32], int max_lines, struct tm *t) 
     }
   }
 
-  // "exp 3,500 · 100%" (dot)
   if (n < max_lines && s_steps_expected > 0) {
     char ebuf[16]; prv_fmt_steps_long(ebuf, sizeof(ebuf), s_steps_expected);
     int pct = (s_steps * 100) / s_steps_expected;
     snprintf(lines[n++], 32, "exp %s" DOT "%d%%", ebuf, pct);
   }
 
-  // "100 bpm · 212 cal" (dot)
   if (n < max_lines) {
     bool has_hr  = s_bt_connected && s_heart_rate > 0;
     bool has_cal = s_calories > 0;
@@ -487,7 +474,6 @@ static int build_info_lines_wide(char lines[][32], int max_lines, struct tm *t) 
   }
 #endif
 
-  // "84% bat" / "no phone"
   if (n < max_lines) {
     char bbuf[24]; prv_fmt_bat_bt(bbuf, sizeof(bbuf));
     snprintf(lines[n++], 32, "%s", bbuf);
@@ -496,7 +482,6 @@ static int build_info_lines_wide(char lines[][32], int max_lines, struct tm *t) 
   return n;
 }
 
-// Stacked info lines — narrow column, one field per line
 static int build_info_lines_stacked(char lines[][32], int max_lines, struct tm *t) {
   int n = 0;
 
@@ -566,8 +551,9 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   Layer *root  = window_get_root_layer(s_window);
   GRect ub     = layer_get_unobstructed_bounds(root);
   int ub_top   = ub.origin.y, ub_h = ub.size.h;
+  GRect bounds = layer_get_bounds(layer);
 
-  // 1. Background fill
+  // Determine bg color and fg before drawing anything
 #if defined(PBL_COLOR) && defined(PBL_HEALTH)
   GColor bg = prv_pace_color(s_steps, s_steps_expected);
   s_fg = prv_bg_needs_dark_fg(bg) ? GColorBlack : GColorWhite;
@@ -575,15 +561,26 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   GColor bg = s_bg;
   s_fg = GColorWhite;
 #endif
-  graphics_context_set_fill_color(ctx, bg);
-  graphics_fill_rect(ctx, layer_get_bounds(layer), 0, GCornerNone);
 
-  // 2. Border — drawn immediately after background, behind all content
+  // 1. Fill entire canvas black — corners outside border stay black always
+  graphics_context_set_fill_color(ctx, GColorBlack);
+  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+
 #if defined(PBL_PLATFORM_EMERY)
+  // 2. Fill bg color as rounded rect — naturally clips the four corner triangles
+  //    Corner radius matches border arcs (2u), so bg fills exactly the content area
+  graphics_context_set_fill_color(ctx, bg);
+  graphics_fill_rect(ctx, bounds, UNIT * 2, GCornersAll);
+
+  // 3. Border — reinforces the edge on top of the rounded bg
   draw_border(ctx);
+#else
+  // Non-emery: no border, just fill bg normally
+  graphics_context_set_fill_color(ctx, bg);
+  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 #endif
 
-  // 3. All content (digits, info lines)
+  // 4. All content
   int hr = s_hour % 12; if (!hr) hr = 12;
   int h_tens = hr/10, h_ones = hr%10, m_tens = s_minute/10, m_ones = s_minute%10;
 
