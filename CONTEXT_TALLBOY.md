@@ -7,17 +7,19 @@
 
 **TallBoy** is a Pebble watchface built around oversized vector-drawn digits that scale dynamically — "tall boys" that stretch and squish as an animation mechanic and fill the screen with pure time. Design by Sterling Ely (2026), implemented by Sterling Ely + Claude.
 
-**Sterling:** Design/concept lead, CloudPebble builds, Photoshop bitmap assets, device testing (Pebble Time 2 / emery).
+**Sterling:** Design/concept lead, CloudPebble builds, device testing (Pebble Time 2 / emery).
 **Claude:** Code, GitHub commits, documentation.
 
 ---
 
-## 2. REPO
+## 2. REPO & BUILD
 
 ```
 SterlingEly/TallBoy (branch: main)
-└── src/main.c       ← entire watchface, currently v3.24
+└── src/main.c       ← entire watchface, currently v3.30a
 ```
+
+**CloudPebble build rule:** The file Claude commits to GitHub is `src/main.c`. CloudPebble builds its own internal copy — after Claude pushes, Sterling manually syncs or edits in CloudPebble. Never use `push_files` (sends empty content). Always use `create_or_update_file` with current SHA.
 
 ---
 
@@ -31,193 +33,178 @@ SterlingEly/TallBoy (branch: main)
 | diorite | Pebble 2 SE | 144×168 rect | 6px | B&W, HR |
 | aplite | Pebble Classic | 144×168 rect | 6px | B&W |
 
-Emery has 25 units (200px / 8px = 25u exactly). All others have 24u (144px / 6px = 24u).
-Pixel verification: emery first, then low-res pass after emery geometry is locked.
+Emery = 25u wide (200px / 8px). All others = 24u (144px / 6px).
 
 ---
 
-## 4. HORIZONTAL LAYOUT — THE UNIT SYSTEM
+## 4. DIGIT GEOMETRY — THE UNIT SYSTEM
 
-Every digit is **4u wide** (GLYPH_W) within a **5u slot** (SLOT_W).
-The half-unit padding on each side creates the 1u visual gap between adjacent digits.
+### Horizontal
+Every digit is **4u wide** (GLYPH_W) within a **5u slot** (SLOT_W = 5u). Half-unit padding each side creates 1u visual gap between digits.
 
 ```
-[margin] [½u pad | 4u digit | ½u pad] ×4 + [½u pad | 1u colon | ½u pad] + [margin]
-       = margin + 5u×4 + 2u + 5u + margin = 23u content
+[margin] [½u|4u digit|½u] ×4 + [½u|1u colon|½u] + [margin] = 23u content
+Emery: 25u total → ~1u margin each side
+Flint: 24u total → ½u margin each side
 ```
 
-- **Emery:** 25u total → 1u margin each side (8px each)
-- **Flint/others:** 24u total → ½u margin each side (3px each)
-- All strokes are exactly **1u** wide (`sw = UNIT`)
-- Arc radius is always **2u** outer, **1u** inner (`ro = 2*UNIT, ri = UNIT`)
-
----
-
-## 5. VERTICAL DIGIT STRUCTURE
-
-Each digit is built from up to 4 layers. **Arc sizes never change** — only vertical spans stretch.
-
-### Layer 1: Arc Cap (top)
-Fixed size, moves with top boundary.
-| Type | Description | Used by |
-|------|-------------|---------|
-| **Arc cap** | Top half of 2u-radius ring (2u tall, 4u wide) | 0, 2, 3, 6, 8, 9 |
-| **HBAR cap** | Full-width 1u rectangle at top | 5, 7 |
-| **Diagonal cap** | Bespoke 5-point pentagon path (45° serif) | 1 only |
-| **None** | No top cap | 4 only |
-
-### Layer 2: Spans
-| Type | Description | Used by |
-|------|-------------|---------|
-| **Full span** | Runs full digit height; does not resize | 0 (sides), 1 (stem), 4 (right), 6 (left), 9 (right) |
-| **Bridge span** | Connects inner ring centers; resizes as `bar = (size-1)*2u` | 3, 5, 6, 8, 9 |
-| **Diagonal span** | GPath parallelogram | 2, 7 |
-| **Tail span** | Stub from outer ring center toward canvas edge; `tail = (size>2)?(size-2)*u:0` | 3 (×2), 5, 6, 9 |
-
-The **tail** variable is the key to consistent scaling: zero at size 2 (minimum), grows 1u per size step. All tail spans across all digits use the same formula.
-
-### Layer 3: Center Elements
-Anchored to `cy`; never move or resize.
-| Element | Description | Used by |
-|---------|-------------|---------|
-| **Crossbar** | HBAR at `cy - HALF_UNIT` | 4 |
-| **Ring pair** | 8's two rings centered via `t_tc/t_bc + b_tc/b_bc` | 8 |
-| **Center arc** | Bottom of top ring / top of bottom ring | 6, 9 |
-
-### Layer 4: Arc Base (bottom)
-Mirror of arc cap; fixed size, moves with bottom boundary.
-| Type | Description | Used by |
-|------|-------------|---------|
-| **Arc base** | Bottom half of 2u-radius ring | 0, 3, 5, 6, 8, 9 |
-| **Flat base** | Full-width 1u HBAR | 2 only |
-| **None** | Reaches canvas floor directly | 1, 4, 7 |
-
----
-
-## 6. KEY GEOMETRY VARIABLES
-
-All derived from `cy` (vertical center of digit slot):
+### Vertical — the h-based system (v3.27+)
+Digits are parameterized by **pixel height `h`** directly — no discrete size index.
 
 ```c
-const int ro = UNIT * 2;       // arc outer radius — NEVER changes with size
-const int ri = UNIT * 1;       // arc inner radius — NEVER changes with size
-const int sw = UNIT;           // stroke width    — NEVER changes with size
+// Immutable — NEVER change with h:
+const int ro = UNIT * 2;   // arc outer radius
+const int ri = UNIT * 1;   // arc inner radius  
+const int sw = UNIT;       // stroke width
 
-int gx     = slot_x + HALF_SLOT_PAD;  // left stroke left edge
-int gx_r   = gx + GLYPH_W - sw;       // right stroke left edge
-int cap_cx = gx + ro;                 // arc center x (always gx + 2u)
+// Derived from h:
+int bar  = (h - 7*UNIT) / 2;         // ring gap between inner cap centers
+int tail = (h > H_MIN) ? (h - H_MIN) / 4 : 0;  // tail stub extension
 
-int h     = (3 + 4*size) * UNIT;     // total digit height
-int top_y = cy - h / 2;             // canvas top
-int bot_y = cy + h / 2;             // canvas bottom
-
-// Ring system (3, 5, 6, 8, 9):
-int bar  = (size - 1) * 2 * UNIT;   // ring gap between inner cap centers
-int t_bc = cy - (ro - HALF_UNIT);   // top ring inner cap center
-int t_tc = t_bc - bar;              // top ring outer cap center
-int b_tc = cy + (ro - HALF_UNIT);   // bottom ring inner cap center
-int b_bc = b_tc + bar;              // bottom ring outer cap center
-
-// Tail span (3, 5, 6, 9):
-int tail = (size > 2) ? (size - 2) * UNIT : 0;
-// size 2 (min): 0u  size 3: 1u  size 4: 2u  size 5: 3u  size 6: 4u
+// H_MIN = 11*UNIT = 88px (emery) / 66px (flint) — minimum legible
+// At H_MIN: bar=0, tail=0, arcs just touching
 ```
 
-Note: `top_cy = cy - (h - ro*2)/2` and `bot_cy = cy + (h - ro*2)/2` are used only by digit 0 (the simple oval). The ring system variables (`t_tc` etc.) are used by all other multi-arc digits.
+**Formulas verified:** At h=196px (emery resting): bar=70px, tail=27px. At h=88px (min): bar=0, tail=0. ✓
+
+### Digit layer taxonomy
+1. **Arc cap** (top, fixed size): arc cap (0,2,3,6,8,9), hbar cap (5,7), diagonal cap (1), none (4)
+2. **Spans** (resize with h): full span (body), bridge span (`bar`), diagonal span (2,7), tail span (`tail`)
+3. **Center elements** (anchored to cy, never move): crossbar (4), ring pair (8), center arc (6,9)
+4. **Arc base** (bottom, fixed size): arc base (0,3,5,6,8,9), flat base (2), none (1,4,7)
 
 ---
 
-## 7. ANIMATION SYSTEM — LOCKED CONSTANTS
+## 5. MARGIN MODEL
 
 ```
-WIDE_FULL_SIZE  = 5   // resting display size — good margins on all platforms
-ANIM_PEAK_SIZE  = 6   // overshoot only (120ms snap back to 5)
-ANIM_MIN_SIZE   = 2   // squish floor — size 1 PERMANENTLY RETIRED
+Full-screen vector:  target_h = ub_h - 4*UNIT  (2u top + 2u bottom)
+Stacked layout:      row_h = (ub_h - 5*UNIT) / 2  (2u top + 1u gap + 2u bottom)
+Quick look:          same margins maintained as ub_h shrinks (unobstructed_change fires)
+H_MIN = 11*UNIT      floor for all layouts
+ANIM_OVERSHOOT = UNIT  1u above target for snap effect
 ```
 
-**Size 2 = 11u = 88px/66px ≈ 40% screen height** — minimum legible at all sizes.
-**Size 6 = 27u = 216px/162px** — too large to rest but great for the overshoot pop.
+On emery unobstructed (228px): `target_h = 228 - 32 = 196px`. Stacked row: `(228-40)/2 = 94px`.
+
+---
+
+## 6. ANIMATION SYSTEM
 
 ```c
-static const int SIZE_CYCLE[] = { 5, 4, 3, 2, 3, 4, 5, 6, 5 };  // shake animation
-#define SIZE_CYCLE_LEN 9
+ANIM_STEP_PX = 8     // pixels per timer step
+ANIM_STEP_MS = 16    // ~60fps cadence
+ANIM_SNAP_MS = 120   // hold at overshoot peak before snap back
+ANIM_OVERSHOOT = UNIT  // 1u above target
+
+COUNTDOWN_HOLD_MS = 400  // pause at full height between countdown digits
+BLINK_REPS = 2
 ```
 
-### Timing constants
-```
-ANIM_FAST_MS             = 80    // normal step interval
-ANIM_SNAP_MS             = 120   // hold at overshoot peak before snap to size 5
-COUNTDOWN_STEP_MS        = 160   // ← 2× SLOW for verification; revert to 80
-COUNTDOWN_EXPAND_HOLD_MS = 1000  // ← 2× SLOW for verification; revert to 500
-COUNTDOWN_SHRINK_HOLD_MS = 500   // normal
+### Sizing variables (no discrete size index — all pixel heights)
+```c
+s_h        // current animated digit height (pixels)
+s_target_h // resting height = prv_compute_target_h(ub_h)
+H_MIN      // = 11*UNIT, squish floor
 ```
 
 ### Animation phases
-- **COUNTDOWN:** 9→0 wink sequence at startup; outer slots raster (red stripe), inner slots vector
-- **BLINK:** 2× squish blinks after countdown before settling at size 5
-- **SQUISH:** minute-change animation in WIDE/VECTOR layouts; swaps time at minimum size
-- **SHAKE_CYCLE:** accel-tap triggered; runs SIZE_CYCLE twice
-- All expand phases overshoot to ANIM_PEAK_SIZE, snap back after ANIM_SNAP_MS
+- **PHASE_COUNTDOWN:** 9→0 wink at startup; all-vector, smooth pixel steps
+- **PHASE_BLINK:** 2× squish blinks after countdown before settling
+- **PHASE_SQUISH:** minute-change animation; swaps time digits at H_MIN
+- **PHASE_SHAKE_CYCLE:** accel-tap; SHAKE_OFFSETS_PX relative to s_target_h, 2 reps
+- All expand phases overshoot to `s_target_h + ANIM_OVERSHOOT`, snap back after ANIM_SNAP_MS
 
 ---
 
-## 8. LAYOUT SYSTEM (4 layouts, shake to cycle)
+## 7. LAYOUT SYSTEM
 
+Current layouts (shake to cycle):
 | # | Name | Description |
 |---|------|-------------|
-| 0 | `LAYOUT_WIDE` | Full-screen raster digits |
-| 1 | `LAYOUT_VECTOR` | Full-screen vector digits |
-| 2 | `LAYOUT_LEFT` | Stacked left raster + info column right |
-| 3 | `LAYOUT_RIGHT` | Stacked right vector + info column left |
+| 0 | `LAYOUT_VECTOR` | Full-screen vector digits, squish on minute change |
+| 1 | `LAYOUT_RIGHT` | Stacked vector right + info column left |
+
+**Planned v3.31 layout cycle (5 layouts):**
+| Shake | Layout | Description |
+|-------|--------|-------------|
+| 0 | Full time | Large digits, no info |
+| 1 | Info 1+1 | Time shrunk + 1 info line above + 1 below |
+| 2 | Info 2+2 | Time shrunk more + 2 above + 2 below |
+| 3 | Stacked right | Stacked digits right + info left |
+| 4 | Stacked left | Stacked digits left + info right |
 
 ---
 
-## 9. STEP PACE BACKGROUND COLOR (emery only)
+## 8. STEP PACE BACKGROUND COLOR (emery / PBL_COLOR only)
 
-`PBL_COLOR && PBL_HEALTH`. Compares today's steps to 7-day historical average.
+Compares today's steps to `s_steps_expected` (expected cumulative at current minute, from 7-day minute-level watch history — fully offline).
 
-| % of avg | Color | fg |
-|----------|-------|----|
-| no history | Black | White |
-| < 60% | Red | White |
-| < 80% | Orange | White |
-| < 90% | Yellow | **Black** |
-| ≤ 110% | Green | White |
-| ≤ 130% | Cyan | **Black** |
-| ≤ 160% | Blue | White |
-| > 160% | White | **Black** |
+| % of expected | Color | fg |
+|---------------|-------|----|
+| 0 / no data | Black | White |
+| 1–30% | Red | White |
+| 31–60% | Orange | White |
+| 61–90% | Yellow | **Black** |
+| 91–200% | Green | White |
+| 201–400% | Blue | White |
+| 401–700% | Indigo | White |
+| 701–1000% | VividViolet | White |
+| 1001%+ | Black | White (easter egg) |
+
+Note: `GColorViolet` does NOT exist in Pebble SDK. Use `GColorVividViolet`.
 
 ---
 
-## 10. RASTER SYSTEM — PENDING RETIREMENT
+## 9. HEALTH DATA (v3.30+)
 
-- 10 digits × 6 sizes = 60 bitmaps per platform (emery color + flint/low-res B&W)
-- Split countdown: outer slots raster (H_TENS, M_ONES), inner slots vector (H_ONES, M_TENS)
-- **DEBUG:** `blit()` draws 3px red stripe at top of each raster slot
-- **Retirement trigger:** after pixel-level verification confirms vector geometry is correct
+All health reads happen **once per minute** inside `tick_handler` via `prv_update_health()`. No `health_service_events_subscribe` — removed entirely. All reads are synchronous from on-device cache.
+
+```c
+s_steps          // HealthMetricStepCount (sum today)
+s_distance_m     // HealthMetricWalkedDistanceMeters (sum today)
+s_calories       // HealthMetricActiveKCalories (sum today)
+s_heart_rate     // HealthMetricHeartRateBPM (peek current)
+s_steps_expected // prv_calc_steps_expected() — 7-day minute-level avg at this time of day
+```
+
+`prv_calc_steps_expected()`: fetches up to 120 minutes of history from each of 7 prior days, sums steps, averages across days. Window capped at 120min; scales up proportionally if elapsed > window. Returns -1 if < 2 minutes elapsed.
+
+---
+
+## 10. INFO LINES (stacked layout, up to 8)
+
+Built by `build_info_lines()`, order:
+1. Full day name (Sunday, Monday…)
+2. Date (MAY 16)
+3. Step count (1,234 steps)
+4. Step pace % (87% pace) — only if s_steps_expected > 0
+5. Distance (mi or km) — only if > 0
+6. Calories (cal) — only if > 0
+7. Heart rate (bpm) or "no phone" if BT disconnected
+8. Battery (bat 84% or bat 84% +)
 
 ---
 
 ## 11. PIXEL VERIFICATION STATUS
 
-- ✅ Emery size 2 and size 5 verified in Photoshop
-- ✅ v3.23 geometry fixes applied (colon, 1, 2, 4, 7)
-- ⏳ Final emery verification pass (v3.24 build)
-- ⏳ Low-res (flint) verification pass
-- ⏳ Raster retirement
+- ✅ Emery vector digits pixel-verified at all sizes (Photoshop)
+- ✅ Low-res (flint) vector digits verified (subpixel anomalies acceptable)
+- ✅ Raster system fully retired (v3.25) — all bitmap code removed
+- ✅ Dynamic vertical sizing (v3.27+) — h in pixels, no discrete size index
+- ✅ Margins: 2u top/bottom full-screen, 2u+1u+2u stacked (v3.28)
 
 ---
 
-## 12. PENDING FEATURES (post-raster-cleanup)
+## 12. PENDING FEATURES
 
-1. Revert countdown timing: `COUNTDOWN_STEP_MS→80`, `COUNTDOWN_EXPAND_HOLD_MS→500`
-2. Remove raster system, red stripe debug, `LAYOUT_WIDE`, `s_demo_override` cleanup
-3. Port full Radium 2 info line field system (FIELD_NONE…FIELD_STEPS_PROJ=17)
-4. Shake-to-reveal info overlay in wide/vector layouts (~1min auto-dismiss)
-5. Weather/solar JS fetch (port from Radium 2 index.js)
-6. Hourly step pace comparison mode
-7. Config page
-8. Full-vector dynamic sizing: `unit = floor((available_h - 2u) / digit_h_formula)`
+### Next: v3.31 — multi-layout shake cycle
+Time shrinks dynamically as info lines are added above/below. Needs `draw_info_overlay()` system. Shake cycles through 5 layouts (see §7).
+
+### Soon
+- Weather/solar JS fetch (port from Radium2 `src/pkjs/`)
+- Config page (Clay vs custom HTML — decide when closer)
+- Hourly step pace comparison mode
 
 ---
 
@@ -225,18 +212,24 @@ COUNTDOWN_SHRINK_HOLD_MS = 500   // normal
 
 *Watchfaces display data as atmosphere, not content. Artfully vague > precisely readable.*
 
-Color, arc fill, dot position = mood/direction in a 2-sec glance. Cognitive friction ("why is it blue?") beats ignored stats. The watch is the barometer; the phone is the app.
+Color = mood. Position = direction. The watch is the barometer; the phone is the app.
 
 ---
 
-## 14. CLOUDPEBBLE / BUILD RULES
+## 14. RADIUM2 REFERENCE
 
-1. Remove `resources/media` from appinfo.json (CloudPebble handles resources via UI)
-2. `src/main.c` flat path (not `src/c/main.c`)
-3. Full files only — never partial diffs
-4. `create_or_update_file` with current SHA; **never use `push_files`** (sends empty content)
-5. No tilde (`~`) in resource filenames
+Repo: `SterlingEly/Radium2` (branch: master)
+- `src/c/main.c` — field system reference, icon drawing, weather/solar logic
+- `src/pkjs/` — weather/solar JS fetch to port
+
+Field IDs from Radium2 (for future config system):
+```
+FIELD_NONE=0, FIELD_DAY_LONG=1, FIELD_DATE=2, FIELD_DAY_DATE=3,
+FIELD_STEPS=4, FIELD_TEMP_F=5, FIELD_TEMP_C=6, FIELD_BATTERY=7,
+FIELD_DISTANCE=8, FIELD_CALORIES=9, FIELD_BT=10, FIELD_HEART_RATE=11,
+FIELD_SUNRISE=12, FIELD_SUNSET=13, FIELD_DAYLIGHT=14
+```
 
 ---
 
-*End of context seed. Last updated: v3.24, May 2026.*
+*End of context seed. Last updated: v3.30a, May 2026.*
