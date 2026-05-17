@@ -1,10 +1,17 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.30a
-// Hotfix: GColorViolet doesn't exist in Pebble SDK.
-// Replaced with GColorVividViolet (bright blue-purple).
-// All other changes from v3.30 intact.
+// TallBoy -- main.c  v3.31
+//
+// v3.31: info line overhaul
+//   - Stacked layout: 8 ordered lines (weather temp, day, date,
+//     steps, distance, expected steps, pace %, battery)
+//   - Wide/overlay layout: paired lines with " · " separator
+//     (weather+conditions, day+date, steps+distance,
+//      expected+pace%, HR+calories, sunrise+sunset)
+//   - Pace label: "%d%% exp" (ratio of actual to expected, not %)
+//   - Expected steps now shown as raw count ("exp 1,234")
+//   - build_info_lines_stacked / build_info_lines_wide separated
 // ============================================================
 
 #define LAYOUT_VECTOR    0
@@ -93,13 +100,13 @@ static int        s_battery_pct = 100;
 static bool       s_charging = false, s_bt_connected = true;
 static int        s_steps = 0, s_distance_m = 0, s_calories = 0, s_heart_rate = 0;
 static int        s_steps_expected = -1;
+static int        s_sunrise_min = -1, s_sunset_min = -1;  // minutes since midnight
 static char       s_weather_temp[8] = "", s_weather_desc[32] = "";
 
 #if defined(PBL_COLOR)
 // Step pace spectrum — ROYGBIV
-// 0/none: black  1-30%: red  31-60%: orange  61-90%: yellow
-// 91-200%: green  201-400%: blue  401-700%: indigo  701-1000%: vivid violet
-// 1001%+: black (easter egg)
+// Ratio of actual steps to expected-at-this-time-of-day (from 7-day history)
+// 50%=half expected, 100%=on pace, 200%=double expected
 static GColor prv_pace_color(int steps_today, int steps_expected) {
   if (steps_expected <= 0 || steps_today <= 0) return GColorBlack;
   int pct = (steps_today * 100) / steps_expected;
@@ -111,7 +118,7 @@ static GColor prv_pace_color(int steps_today, int steps_expected) {
   if (pct <= 400)  return GColorBlue;
   if (pct <= 700)  return GColorIndigo;
   if (pct <= 1000) return GColorVividViolet;
-  return GColorBlack;
+  return GColorBlack;  // 1001%+: easter egg
 }
 
 static bool prv_bg_needs_dark_fg(GColor bg) {
@@ -122,6 +129,8 @@ static bool prv_bg_needs_dark_fg(GColor bg) {
 #if defined(PBL_HEALTH)
 static HealthMinuteData s_minute_buf[STEPS_AVG_MAX_MIN];
 
+// Expected cumulative steps at current minute of day, from 7-day minute-level history.
+// 100% = on pace with historical average. Fully on-watch, offline.
 static int prv_calc_steps_expected(void) {
   time_t now = time(NULL);
   struct tm *t = localtime(&now);
@@ -358,35 +367,151 @@ static const char *s_month_abbrs[] = {
   "JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"
 };
 
-static int build_info_lines(char lines[][32], int max_lines, struct tm *t) {
-  int n = 0;
-  if (n < max_lines && t) snprintf(lines[n++], 32, "%s", s_day_names_full[t->tm_wday]);
-  if (n < max_lines && t) snprintf(lines[n++], 32, "%s %d", s_month_abbrs[t->tm_mon], t->tm_mday);
-#if defined(PBL_HEALTH)
-  if (n < max_lines) {
-    if (s_steps >= 1000) snprintf(lines[n++], 32, "%d,%03d steps", s_steps/1000, s_steps%1000);
-    else snprintf(lines[n++], 32, "%d steps", s_steps);
+// Distance formatted into buf (mi or km)
+static void prv_fmt_distance(char *buf, int len) {
+  if (strcmp(i18n_get_system_locale(), "en_US") == 0) {
+    int mx = (s_distance_m * 10) / 1609;
+    snprintf(buf, len, "%d.%d mi", mx/10, mx%10);
+  } else {
+    int kx = (s_distance_m * 10) / 1000;
+    snprintf(buf, len, "%d.%d km", kx/10, kx%10);
   }
+}
+
+// Steps formatted with thousands comma
+static void prv_fmt_steps(char *buf, int len, int steps) {
+  if (steps >= 1000) snprintf(buf, len, "%d,%03d", steps/1000, steps%1000);
+  else snprintf(buf, len, "%d", steps);
+}
+
+// Time from minutes-since-midnight, formatted as "H:MMam"
+static void prv_fmt_time_min(char *buf, int len, int total_min) {
+  if (total_min < 0) { snprintf(buf, len, "--"); return; }
+  int h = (total_min / 60) % 12;
+  if (!h) h = 12;
+  int m = total_min % 60;
+  const char *ampm = (total_min < 720) ? "am" : "pm";
+  snprintf(buf, len, "%d:%02d%s", h, m, ampm);
+}
+
+// ---------------------------------------------------------------
+// STACKED INFO LINES (narrow column, one item per line)
+// Order: weather temp, day, date, steps, distance,
+//        expected steps, pace %, battery
+// ---------------------------------------------------------------
+static int build_info_lines_stacked(char lines[][32], int max_lines, struct tm *t) {
+  int n = 0;
+
+  // Weather temp (short)
+  if (n < max_lines && s_weather_temp[0])
+    snprintf(lines[n++], 32, "%s", s_weather_temp);
+
+  // Day name
+  if (n < max_lines && t)
+    snprintf(lines[n++], 32, "%s", s_day_names_full[t->tm_wday]);
+
+  // Date
+  if (n < max_lines && t)
+    snprintf(lines[n++], 32, "%s %d", s_month_abbrs[t->tm_mon], t->tm_mday);
+
+#if defined(PBL_HEALTH)
+  // Steps
+  if (n < max_lines) {
+    char sbuf[16]; prv_fmt_steps(sbuf, sizeof(sbuf), s_steps);
+    snprintf(lines[n++], 32, "%s steps", sbuf);
+  }
+
+  // Distance
+  if (n < max_lines && s_distance_m > 0) {
+    prv_fmt_distance(lines[n++], 32);
+  }
+
+  // Expected steps (raw count)
+  if (n < max_lines && s_steps_expected > 0) {
+    char ebuf[16]; prv_fmt_steps(ebuf, sizeof(ebuf), s_steps_expected);
+    snprintf(lines[n++], 32, "exp %s", ebuf);
+  }
+
+  // Pace % (ratio of actual to expected; 100% = on pace)
   if (n < max_lines && s_steps_expected > 0) {
     int pct = (s_steps * 100) / s_steps_expected;
-    snprintf(lines[n++], 32, "%d%% pace", pct);
-  }
-  if (n < max_lines && s_distance_m > 0) {
-    if (strcmp(i18n_get_system_locale(), "en_US") == 0) {
-      int mx = (s_distance_m * 10) / 1609;
-      snprintf(lines[n++], 32, "%d.%d mi", mx/10, mx%10);
-    } else {
-      int kx = (s_distance_m * 10) / 1000;
-      snprintf(lines[n++], 32, "%d.%d km", kx/10, kx%10);
-    }
-  }
-  if (n < max_lines && s_calories > 0) snprintf(lines[n++], 32, "%d cal", s_calories);
-  if (n < max_lines) {
-    if (!s_bt_connected) snprintf(lines[n++], 32, "no phone");
-    else if (s_heart_rate > 0) snprintf(lines[n++], 32, "%d bpm", s_heart_rate);
+    snprintf(lines[n++], 32, "%d%% exp", pct);
   }
 #endif
-  if (n < max_lines) snprintf(lines[n++], 32, "bat %d%%%s", s_battery_pct, s_charging ? " +" : "");
+
+  // Battery
+  if (n < max_lines)
+    snprintf(lines[n++], 32, "bat %d%%%s", s_battery_pct, s_charging ? " +" : "");
+
+  return n;
+}
+
+// ---------------------------------------------------------------
+// WIDE INFO LINES (full width, paired items with " · " separator)
+// Each line pairs two related fields.
+// ---------------------------------------------------------------
+static int build_info_lines_wide(char lines[][32], int max_lines, struct tm *t) {
+  int n = 0;
+
+  // Weather: temp · conditions
+  if (n < max_lines && s_weather_temp[0]) {
+    if (s_weather_desc[0])
+      snprintf(lines[n++], 32, "%s · %s", s_weather_temp, s_weather_desc);
+    else
+      snprintf(lines[n++], 32, "%s", s_weather_temp);
+  }
+
+  // Day · Date
+  if (n < max_lines && t)
+    snprintf(lines[n++], 32, "%s · %s %d",
+             s_day_names_full[t->tm_wday], s_month_abbrs[t->tm_mon], t->tm_mday);
+
+#if defined(PBL_HEALTH)
+  // Steps · Distance
+  if (n < max_lines) {
+    char sbuf[16]; prv_fmt_steps(sbuf, sizeof(sbuf), s_steps);
+    if (s_distance_m > 0) {
+      char dbuf[16]; prv_fmt_distance(dbuf, sizeof(dbuf));
+      snprintf(lines[n++], 32, "%s · %s", sbuf, dbuf);
+    } else {
+      snprintf(lines[n++], 32, "%s steps", sbuf);
+    }
+  }
+
+  // Expected steps · Pace %
+  if (n < max_lines && s_steps_expected > 0) {
+    char ebuf[16]; prv_fmt_steps(ebuf, sizeof(ebuf), s_steps_expected);
+    int pct = (s_steps * 100) / s_steps_expected;
+    snprintf(lines[n++], 32, "exp %s · %d%%", ebuf, pct);
+  }
+
+  // Heart rate · Calories
+  if (n < max_lines) {
+    bool has_hr  = s_bt_connected && s_heart_rate > 0;
+    bool has_cal = s_calories > 0;
+    if (has_hr && has_cal)
+      snprintf(lines[n++], 32, "%d bpm · %d cal", s_heart_rate, s_calories);
+    else if (has_hr)
+      snprintf(lines[n++], 32, "%d bpm", s_heart_rate);
+    else if (has_cal)
+      snprintf(lines[n++], 32, "%d cal", s_calories);
+    else if (!s_bt_connected)
+      snprintf(lines[n++], 32, "no phone");
+  }
+#endif
+
+  // Sunrise · Sunset
+  if (n < max_lines && (s_sunrise_min >= 0 || s_sunset_min >= 0)) {
+    char rise[12], set[12];
+    prv_fmt_time_min(rise, sizeof(rise), s_sunrise_min);
+    prv_fmt_time_min(set,  sizeof(set),  s_sunset_min);
+    snprintf(lines[n++], 32, "%s · %s", rise, set);
+  }
+
+  // Battery (last)
+  if (n < max_lines)
+    snprintf(lines[n++], 32, "bat %d%%%s", s_battery_pct, s_charging ? " +" : "");
+
   return n;
 }
 
@@ -406,7 +531,7 @@ static void draw_info_column(GContext *ctx, GRect area, struct tm *t) {
   char lines[INFO_LINES_MAX][32];
   int max = area.size.h / INFO_LINE_H;
   if (max > INFO_LINES_MAX) max = INFO_LINES_MAX;
-  int n = build_info_lines(lines, max, t);
+  int n = build_info_lines_stacked(lines, max, t);
   if (!n) return;
   int start_y = area.origin.y + (area.size.h - n * INFO_LINE_H) / 2;
   draw_info_block(ctx, area.origin.x, start_y, area.size.w, lines, n);
@@ -443,6 +568,7 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   if (s_layout == LAYOUT_VECTOR) {
     draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, s_h, center_y);
   } else {
+    // LAYOUT_RIGHT: stacked digits right, narrow info column left
     int dh    = prv_compute_stacked_h(ub_h);
     int h_cy  = ub_top + MARGIN_OUTER + dh / 2;
     int m_cy  = ub_top + ub_h - MARGIN_OUTER - dh / 2;
@@ -617,10 +743,27 @@ static void bt_handler(bool connected) {
 
 static void inbox_received(DictionaryIterator *iter, void *context) {
   Tuple *t;
-  t=dict_find(iter,MESSAGE_KEY_WeatherTempF);if(t)snprintf(s_weather_temp,sizeof(s_weather_temp),"%dF",(int)t->value->int32);
-  t=dict_find(iter,MESSAGE_KEY_WeatherTempC);if(t&&!s_weather_temp[0])snprintf(s_weather_temp,sizeof(s_weather_temp),"%dC",(int)t->value->int32);
-  t=dict_find(iter,MESSAGE_KEY_WeatherCode);
-  if(t){int c=(int)t->value->int32;const char*d="WEATHER";if(c==0)d="CLEAR";else if(c<=3)d="CLOUDY";else if(c<=49)d="FOG";else if(c<=69)d="RAIN";else if(c<=79)d="SNOW";else if(c<=99)d="STORM";snprintf(s_weather_desc,sizeof(s_weather_desc),"%s",d);}
+  t = dict_find(iter, MESSAGE_KEY_WeatherTempF);
+  if (t) snprintf(s_weather_temp, sizeof(s_weather_temp), "%dF", (int)t->value->int32);
+  t = dict_find(iter, MESSAGE_KEY_WeatherTempC);
+  if (t && !s_weather_temp[0]) snprintf(s_weather_temp, sizeof(s_weather_temp), "%dC", (int)t->value->int32);
+  t = dict_find(iter, MESSAGE_KEY_WeatherCode);
+  if (t) {
+    int c = (int)t->value->int32;
+    const char *d = "WEATHER";
+    if (c == 0) d = "CLEAR";
+    else if (c <= 3) d = "CLOUDY";
+    else if (c <= 49) d = "FOG";
+    else if (c <= 69) d = "RAIN";
+    else if (c <= 79) d = "SNOW";
+    else if (c <= 99) d = "STORM";
+    snprintf(s_weather_desc, sizeof(s_weather_desc), "%s", d);
+  }
+  // Sunrise/sunset: expect minutes-since-midnight
+  t = dict_find(iter, MESSAGE_KEY_SunriseMin);
+  if (t) s_sunrise_min = (int)t->value->int32;
+  t = dict_find(iter, MESSAGE_KEY_SunsetMin);
+  if (t) s_sunset_min = (int)t->value->int32;
   layer_mark_dirty(s_canvas_layer);
 }
 
@@ -642,14 +785,14 @@ static void window_load(Window *window) {
 
 static void window_unload(Window *window) {
   unobstructed_area_service_unsubscribe(); accel_tap_service_unsubscribe();
-  if(s_timer){app_timer_cancel(s_timer);s_timer=NULL;}
+  if (s_timer) { app_timer_cancel(s_timer); s_timer = NULL; }
   layer_destroy(s_canvas_layer);
 }
 
 static void init(void) {
   s_fg = GColorWhite; s_bg = GColorBlack;
   s_window = window_create(); window_set_background_color(s_window, GColorBlack);
-  window_set_window_handlers(s_window,(WindowHandlers){.load=window_load,.unload=window_unload});
+  window_set_window_handlers(s_window, (WindowHandlers){.load=window_load,.unload=window_unload});
   window_stack_push(s_window, true);
   time_t now = time(NULL); struct tm *t = localtime(&now);
   s_hour = t->tm_hour; s_minute = t->tm_min;
@@ -667,4 +810,4 @@ static void deinit(void) {
   window_destroy(s_window);
 }
 
-int main(void){init();app_event_loop();deinit();}
+int main(void) { init(); app_event_loop(); deinit(); }
