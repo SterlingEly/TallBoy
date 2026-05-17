@@ -1,27 +1,11 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.32
-//
-// v3.32: 5-layout shake cycle + info overlay system
-//
-//   LAYOUT_FULL    (0): full-screen time, no info
-//   LAYOUT_INFO_1  (1): time shrunk + 1 wide line above + 1 below
-//   LAYOUT_INFO_2  (2): time shrunk more + 2 wide lines above + 2 below
-//   LAYOUT_STACK_R (3): stacked digits right + narrow info left
-//   LAYOUT_STACK_L (4): stacked digits left + narrow info right
-//
-//   Wide lines: tight pairs use space/comma (no dot):
-//     "72F Cloudy"        weather as one thought
-//     "Sunday, May 17"    date as one thought
-//     dot only for looser pairs:
-//     "1,234 · 0.8 mi"   steps · distance
-//     "exp 890 · 143%"   expected · pace
-//     "72 bpm · 420 cal" hr · calories
-//     "6:02am · 8:14pm"  sunrise · sunset
-//
-//   Month names now mixed case (May not MAY)
-//   Time height in info layouts computed from available space
+// TallBoy -- main.c  v3.32a
+// Hotfix: remove MESSAGE_KEY_SunriseMin/SunsetMin references —
+// these message keys don't exist in CloudPebble yet. Sunrise/sunset
+// display code is intact; s_sunrise_min/s_sunset_min stay -1 until
+// the JS fetch is wired up (future version).
 // ============================================================
 
 #define LAYOUT_FULL      0
@@ -68,7 +52,7 @@ static int s_layout = LAYOUT_FULL;
 #define GLYPH_W         (UNIT * 4)
 #define H_MIN           (UNIT * 11)
 #define MARGIN_OUTER    (UNIT * 2)
-#define MARGIN_GAP      UNIT        // gap between time block and info lines
+#define MARGIN_GAP      UNIT
 #define INFO_LINES_MAX  8
 
 #define ANIM_STEP_PX    8
@@ -82,10 +66,6 @@ static int s_layout = LAYOUT_FULL;
 
 typedef enum { CD_SHRINK, CD_HOLD_MIN, CD_EXPAND, CD_HOLD_MAX } CdSubPhase;
 
-// Compute time height for a given layout and unobstructed height.
-// info_lines = total number of info lines shown (above + below).
-// Each side has info_lines/2 lines. Formula:
-//   reserved = 2*MARGIN_OUTER + info_lines*INFO_LINE_H + 2*MARGIN_GAP (one gap each side)
 static int prv_compute_target_h(int ub_h, int info_lines) {
   int reserved = 2 * MARGIN_OUTER + info_lines * INFO_LINE_H + (info_lines > 0 ? 2 * MARGIN_GAP : 0);
   int h = ub_h - reserved;
@@ -99,7 +79,6 @@ static int prv_compute_stacked_h(int ub_h) {
   return h;
 }
 
-// Info lines for current layout (0 for full/stacked, 2 for info_1, 4 for info_2)
 static int prv_layout_info_lines(void) {
   if (s_layout == LAYOUT_INFO_1) return 2;
   if (s_layout == LAYOUT_INFO_2) return 4;
@@ -125,12 +104,10 @@ static int        s_battery_pct = 100;
 static bool       s_charging = false, s_bt_connected = true;
 static int        s_steps = 0, s_distance_m = 0, s_calories = 0, s_heart_rate = 0;
 static int        s_steps_expected = -1;
-static int        s_sunrise_min = -1, s_sunset_min = -1;
+static int        s_sunrise_min = -1, s_sunset_min = -1; // set by JS when available
 static char       s_weather_temp[8] = "", s_weather_desc[32] = "";
 
 #if defined(PBL_COLOR)
-// Step pace: ratio of actual to expected at this minute of day.
-// 50%=half pace, 100%=on pace, 200%=double expected. ROYGBIV spectrum.
 static GColor prv_pace_color(int steps_today, int steps_expected) {
   if (steps_expected <= 0 || steps_today <= 0) return GColorBlack;
   int pct = (steps_today * 100) / steps_expected;
@@ -385,12 +362,9 @@ static void draw_stacked_vec(GContext *ctx, int h_tens, int h_ones,
 static const char *s_day_names_full[] = {
   "Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"
 };
-// Mixed case months
 static const char *s_month_names[] = {
   "Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"
 };
-
-// ---- Format helpers ----
 
 static void prv_fmt_distance(char *buf, int len) {
   if (strcmp(i18n_get_system_locale(), "en_US") == 0) {
@@ -415,20 +389,17 @@ static void prv_fmt_time_min(char *buf, int len, int total_min) {
   snprintf(buf, len, "%d:%02d%s", h, m, total_min < 720 ? "am" : "pm");
 }
 
-// ---------------------------------------------------------------
-// WIDE INFO LINES — shown above/below time in INFO_1 / INFO_2
-// Tight pairs: space/comma (no dot). Looser pairs: " · ".
-// Lines are listed in priority order; caller requests how many.
-// ---------------------------------------------------------------
+// Wide info lines (full-width, for info overlay layouts).
+// Tight pairs: no dot. Looser pairs: " · " (UTF-8 middle dot).
 static int build_info_lines_wide(char lines[][32], int max_lines, struct tm *t) {
   int n = 0;
 
-  // "Sunday, May 17" — day+date as one unit (comma, no dot)
+  // "Sunday, May 17"
   if (n < max_lines && t)
     snprintf(lines[n++], 32, "%s, %s %d",
              s_day_names_full[t->tm_wday], s_month_names[t->tm_mon], t->tm_mday);
 
-  // "72F Cloudy" — weather as one unit (space, no dot)
+  // "72F cloudy"
   if (n < max_lines && s_weather_temp[0]) {
     if (s_weather_desc[0])
       snprintf(lines[n++], 32, "%s %s", s_weather_temp, s_weather_desc);
@@ -437,7 +408,7 @@ static int build_info_lines_wide(char lines[][32], int max_lines, struct tm *t) 
   }
 
 #if defined(PBL_HEALTH)
-  // "1,234 · 0.8 mi" — steps · distance (dot)
+  // "1,234 · 0.8 mi"
   if (n < max_lines) {
     char sbuf[16]; prv_fmt_steps(sbuf, sizeof(sbuf), s_steps);
     if (s_distance_m > 0) {
@@ -448,14 +419,14 @@ static int build_info_lines_wide(char lines[][32], int max_lines, struct tm *t) 
     }
   }
 
-  // "exp 890 · 143%" — expected count · pace ratio (dot)
+  // "exp 890 · 143%"
   if (n < max_lines && s_steps_expected > 0) {
     char ebuf[16]; prv_fmt_steps(ebuf, sizeof(ebuf), s_steps_expected);
     int pct = (s_steps * 100) / s_steps_expected;
     snprintf(lines[n++], 32, "exp %s \xc2\xb7 %d%%", ebuf, pct);
   }
 
-  // "72 bpm · 420 cal" — HR · calories (dot)
+  // "72 bpm · 420 cal"
   if (n < max_lines) {
     bool has_hr  = s_bt_connected && s_heart_rate > 0;
     bool has_cal = s_calories > 0;
@@ -470,7 +441,7 @@ static int build_info_lines_wide(char lines[][32], int max_lines, struct tm *t) 
   }
 #endif
 
-  // "6:02am · 8:14pm" — sunrise · sunset (dot)
+  // "6:02am · 8:14pm" — only shown when JS has sent sunrise/sunset
   if (n < max_lines && (s_sunrise_min >= 0 || s_sunset_min >= 0)) {
     char rise[12], set[12];
     prv_fmt_time_min(rise, sizeof(rise), s_sunrise_min);
@@ -481,9 +452,7 @@ static int build_info_lines_wide(char lines[][32], int max_lines, struct tm *t) 
   return n;
 }
 
-// ---------------------------------------------------------------
-// STACKED INFO LINES — narrow column, one field per line
-// ---------------------------------------------------------------
+// Stacked info lines (narrow column, one field per line).
 static int build_info_lines_stacked(char lines[][32], int max_lines, struct tm *t) {
   int n = 0;
 
@@ -521,7 +490,6 @@ static GFont prv_info_font(void) { return fonts_get_system_font(INFO_FONT_KEY); 
 
 static void draw_info_row(GContext *ctx, char lines[][32], int n,
                           int y, int width, int x_offset) {
-  // Draw n lines centered horizontally, starting at y
   GFont font = prv_info_font();
   graphics_context_set_text_color(ctx, s_fg);
   for (int i = 0; i < n; i++) {
@@ -574,11 +542,9 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy);
 
   } else if (s_layout == LAYOUT_INFO_1 || s_layout == LAYOUT_INFO_2) {
-    // Info overlay: lines_per_side lines above and below the time block
     int lines_per_side = (s_layout == LAYOUT_INFO_1) ? 1 : 2;
     int lines_total    = lines_per_side * 2;
 
-    // Time sits in the center of the available space after reserving info rows
     int info_block_h = lines_per_side * INFO_LINE_H;
     int time_top     = ub_top + MARGIN_OUTER + info_block_h + MARGIN_GAP;
     int time_bot     = ub_top + ub_h - MARGIN_OUTER - info_block_h - MARGIN_GAP;
@@ -587,41 +553,34 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy);
 
     if (tm) {
-      // Build all wide lines; take first lines_per_side for above, next for below
       char all_lines[INFO_LINES_MAX][32];
       int total = build_info_lines_wide(all_lines, lines_total, tm);
 
-      // Lines above time (first lines_per_side)
       int above_count = lines_per_side < total ? lines_per_side : total;
-      int above_y = ub_top + MARGIN_OUTER;
-      draw_info_row(ctx, all_lines, above_count, above_y, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
+      draw_info_row(ctx, all_lines, above_count,
+                    ub_top + MARGIN_OUTER, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
 
-      // Lines below time (next lines_per_side)
       int below_start = lines_per_side;
-      int below_count = (total - below_start);
+      int below_count = total - below_start;
       if (below_count > lines_per_side) below_count = lines_per_side;
       if (below_count > 0) {
-        int below_y = time_bot + MARGIN_GAP;
         draw_info_row(ctx, all_lines + below_start, below_count,
-                      below_y, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
+                      time_bot + MARGIN_GAP, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
       }
     }
 
   } else {
-    // LAYOUT_STACK_R or LAYOUT_STACK_L
     int dh    = prv_compute_stacked_h(ub_h);
     int h_cy  = ub_top + MARGIN_OUTER + dh / 2;
     int m_cy  = ub_top + ub_h - MARGIN_OUTER - dh / 2;
     int tens_x, ones_x, info_x, info_w;
 
     if (s_layout == LAYOUT_STACK_R) {
-      // Digits on the right
       ones_x = SCREEN_W - SIDE_MARGIN - SLOT_W;
       tens_x = ones_x - SLOT_W;
       info_x = SIDE_MARGIN;
       info_w = tens_x - SIDE_MARGIN * 2;
     } else {
-      // Digits on the left (LAYOUT_STACK_L)
       tens_x = SIDE_MARGIN;
       ones_x = SIDE_MARGIN + SLOT_W;
       info_x = ones_x + SLOT_W + SIDE_MARGIN;
@@ -752,17 +711,12 @@ static void timer_cb(void *data) {
 static void prv_update_targets(void) {
   Layer *root = window_get_root_layer(s_window);
   GRect ub = layer_get_unobstructed_bounds(root);
-  int ub_h = ub.size.h;
-  // Compute target_h based on current layout's info line count
-  int info_lines = prv_layout_info_lines();
-  s_target_h = prv_compute_target_h(ub_h, info_lines);
+  s_target_h = prv_compute_target_h(ub.size.h, prv_layout_info_lines());
 }
 
 static void unobstructed_change(AnimationProgress progress, void *ctx) {
   prv_update_targets();
-  if (s_phase == PHASE_DONE) {
-    s_h = s_target_h; layer_mark_dirty(s_canvas_layer);
-  }
+  if (s_phase == PHASE_DONE) { s_h = s_target_h; layer_mark_dirty(s_canvas_layer); }
 }
 
 static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
@@ -770,12 +724,10 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   if (s_phase != PHASE_DONE) return;
   s_layout = (s_layout + 1) % LAYOUT_COUNT;
   prv_update_targets();
-  // Shake animation only on LAYOUT_FULL (the most dramatic transition)
   if (s_layout == LAYOUT_FULL) {
     s_phase = PHASE_SHAKE_CYCLE; s_anim_step = 0; s_anim_rep = 0;
     s_h = s_target_h; schedule(ANIM_STEP_MS);
   } else {
-    // For other layouts, animate to new target_h smoothly
     s_phase = PHASE_SQUISH; s_going_down = true; s_overshot = false;
     schedule(ANIM_STEP_MS);
   }
@@ -783,7 +735,6 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
 }
 
 static void tick_handler(struct tm *t, TimeUnits units) {
-  // Squish animates on FULL and INFO layouts (visible time digits)
   bool anim_layout = (s_layout == LAYOUT_FULL ||
                       s_layout == LAYOUT_INFO_1 ||
                       s_layout == LAYOUT_INFO_2);
@@ -828,10 +779,7 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
     else if (c <= 99) d = "storm";
     snprintf(s_weather_desc, sizeof(s_weather_desc), "%s", d);
   }
-  t = dict_find(iter, MESSAGE_KEY_SunriseMin);
-  if (t) s_sunrise_min = (int)t->value->int32;
-  t = dict_find(iter, MESSAGE_KEY_SunsetMin);
-  if (t) s_sunset_min = (int)t->value->int32;
+  // Sunrise/sunset inbox handling added when JS fetch is implemented
   layer_mark_dirty(s_canvas_layer);
 }
 
