@@ -1,24 +1,37 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.33
+// TallBoy -- main.c  v3.34
 //
-// v3.33: info overlay spacing fixed
-//   Rule: exactly 1u gap between every element, time fills remainder.
+// v3.34:
+//   1. Wide info lines revised:
+//        "72 F & Sunny"            (weather, ampersand join)
+//        "Sunday, May 17"          (day+date, unchanged)
+//        sunrise/sunset line added above time (3rd line above)
+//        "3,500 steps - 2.1 mi"   (steps+distance, dash)
+//        "exp 3,500 - 100%"        (expected+%, dash)
+//        "100 bpm - 212 cal"       (HR+cal, dash)
+//        "84% bat"  or  "no phone" (battery+BT combined)
 //
-//   INFO_1 (1 line above + 1 below):
-//     1u | line | 1u | TIME | 1u | line | 1u
-//     reserved = 4*UNIT + 2*INFO_LINE_H
-//     time_h   = ub_h - reserved
+//   2. Stacked info lines revised:
+//        "72 F"        weather short
+//        "Sunday"      day long
+//        "May 17"      date (mixed case, no abbrev)
+//        "1.5k steps"  steps short format
+//        "exp 3,100"   expected total
+//        "100% exp"    pace %
+//        "+400 steps"  steps over/under expected (new)
+//        "0.8 mi"      distance
+//        "84% bat"     battery+BT combined
 //
-//   INFO_2 (2 lines above + 2 below):
-//     1u | line | 1u | line | 1u | TIME | 1u | line | 1u | line | 1u
-//     reserved = 6*UNIT + 4*INFO_LINE_H
-//     time_h   = ub_h - reserved
+//   3. Steps over/under expected: s_steps - s_steps_expected
+//        "+420 steps" / "-180 steps" / "on pace"
 //
-//   General: reserved = (lines_total + 2)*UNIT + lines_total*INFO_LINE_H
-//   Lines above start at ub_top + UNIT.
-//   Lines below start at time_bot + UNIT.
+//   4. Border (emery only): 1u rounded-rect outline using
+//        digit arc geometry (ro=2u, ri=1u), drawn last in
+//        draw_layer so it sits on top of everything. Color = s_fg.
+//        4 bars + 4 quarter-circle corners forming a complete
+//        rounded rectangle border matching the outer margin.
 // ============================================================
 
 #define LAYOUT_FULL      0
@@ -64,7 +77,7 @@ static int s_layout = LAYOUT_FULL;
 #define HALF_SLOT_PAD   (UNIT / 2)
 #define GLYPH_W         (UNIT * 4)
 #define H_MIN           (UNIT * 11)
-#define MARGIN_OUTER    (UNIT * 2)   // used by stacked layout only
+#define MARGIN_OUTER    (UNIT * 2)
 #define INFO_LINES_MAX  8
 
 #define ANIM_STEP_PX    8
@@ -80,11 +93,8 @@ typedef enum { CD_SHRINK, CD_HOLD_MIN, CD_EXPAND, CD_HOLD_MAX } CdSubPhase;
 
 // Info overlay: 1u gap between every element, time fills the rest.
 // reserved = (lines_total + 2)*UNIT + lines_total*INFO_LINE_H
-// (lines_total + 2 gaps: one above all lines, one between each line,
-//  one between last line and time, one between time and first line below,
-//  one after last line below = lines_total+2 total 1u gaps)
 static int prv_compute_target_h(int ub_h, int lines_total) {
-  if (lines_total == 0) return ub_h - 2 * MARGIN_OUTER;  // LAYOUT_FULL: 2u each side
+  if (lines_total == 0) return ub_h - 2 * MARGIN_OUTER;
   int reserved = (lines_total + 2) * UNIT + lines_total * INFO_LINE_H;
   int h = ub_h - reserved;
   if (h < H_MIN) h = H_MIN;
@@ -199,6 +209,34 @@ static void fill_arc(GContext *ctx, int cx, int cy, int ro, int ri, int a0, int 
   graphics_fill_radial(ctx, b, GOvalScaleModeFitCircle, (uint16_t)(ro - ri),
                        DEG_TO_TRIGANGLE(a0), DEG_TO_TRIGANGLE(a1));
 }
+
+// Border: 1u rounded-rect outline, emery only.
+// ro=2u, ri=1u (same as digit arcs). Drawn on top of all content.
+// Lives entirely within the 2u outer margin — no content displaced.
+#if defined(PBL_PLATFORM_EMERY)
+static void draw_border(GContext *ctx) {
+  const int ro = UNIT * 2;   // 16px
+  const int ri = UNIT * 1;   // 8px
+  const int sw = UNIT;       // 8px stroke width
+
+  graphics_context_set_fill_color(ctx, s_fg);
+
+  // Top bar: full width minus corner radius each side
+  graphics_fill_rect(ctx, GRect(ro, 0, SCREEN_W - ro*2, sw), 0, GCornerNone);
+  // Bottom bar
+  graphics_fill_rect(ctx, GRect(ro, SCREEN_H - sw, SCREEN_W - ro*2, sw), 0, GCornerNone);
+  // Left bar: full height minus corner radius each side
+  graphics_fill_rect(ctx, GRect(0, ro, sw, SCREEN_H - ro*2), 0, GCornerNone);
+  // Right bar
+  graphics_fill_rect(ctx, GRect(SCREEN_W - sw, ro, sw, SCREEN_H - ro*2), 0, GCornerNone);
+
+  // Corners — arc centers are at (ro, ro), (W-ro, ro), (ro, H-ro), (W-ro, H-ro)
+  fill_arc(ctx, ro,          ro,          ro, ri, 180, 270);  // top-left
+  fill_arc(ctx, SCREEN_W-ro, ro,          ro, ri, 270, 360);  // top-right
+  fill_arc(ctx, ro,          SCREEN_H-ro, ro, ri,  90, 180);  // bottom-left
+  fill_arc(ctx, SCREEN_W-ro, SCREEN_H-ro, ro, ri,   0,  90);  // bottom-right
+}
+#endif
 
 static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int h) {
   graphics_context_set_fill_color(ctx, s_fg);
@@ -394,7 +432,15 @@ static void prv_fmt_distance(char *buf, int len) {
   }
 }
 
-static void prv_fmt_steps(char *buf, int len, int steps) {
+// Short step format: "1.5k" under 10k, comma format above
+static void prv_fmt_steps_short(char *buf, int len, int steps) {
+  if (steps >= 10000) snprintf(buf, len, "%d,%03d", steps/1000, steps%1000);
+  else if (steps >= 1000) snprintf(buf, len, "%d.%dk", steps/1000, (steps%1000)/100);
+  else snprintf(buf, len, "%d", steps);
+}
+
+// Long step format with thousands comma
+static void prv_fmt_steps_long(char *buf, int len, int steps) {
   if (steps >= 1000) snprintf(buf, len, "%d,%03d", steps/1000, steps%1000);
   else snprintf(buf, len, "%d", steps);
 }
@@ -407,90 +453,148 @@ static void prv_fmt_time_min(char *buf, int len, int total_min) {
   snprintf(buf, len, "%d:%02d%s", h, m, total_min < 720 ? "am" : "pm");
 }
 
+// Battery + BT combined: "84% bat" or "84% bat +" (charging) or "no phone"
+static void prv_fmt_bat_bt(char *buf, int len) {
+  if (!s_bt_connected)
+    snprintf(buf, len, "no phone");
+  else if (s_charging)
+    snprintf(buf, len, "%d%% bat +", s_battery_pct);
+  else
+    snprintf(buf, len, "%d%% bat", s_battery_pct);
+}
+
+// ---------------------------------------------------------------
+// WIDE INFO LINES — above/below time in INFO_1/INFO_2
+// Above time (priority order): day+date, weather, sunrise+sunset
+// Below time (priority order): steps+distance, exp+%, HR+cal, battery+BT
+// Separator: " - " for loose pairs, "&" or "," for tight pairs
+// ---------------------------------------------------------------
 static int build_info_lines_wide(char lines[][32], int max_lines, struct tm *t) {
   int n = 0;
 
+  // === ABOVE TIME (slots 0..N-1, filled first) ===
+
+  // "Sunday, May 17"
   if (n < max_lines && t)
     snprintf(lines[n++], 32, "%s, %s %d",
              s_day_names_full[t->tm_wday], s_month_names[t->tm_mon], t->tm_mday);
 
+  // "72 F & Sunny" (ampersand, tight pair)
   if (n < max_lines && s_weather_temp[0]) {
     if (s_weather_desc[0])
-      snprintf(lines[n++], 32, "%s %s", s_weather_temp, s_weather_desc);
+      snprintf(lines[n++], 32, "%s & %s", s_weather_temp, s_weather_desc);
     else
       snprintf(lines[n++], 32, "%s", s_weather_temp);
   }
 
+  // "6:02am - 8:14pm" (sunrise/sunset, dash — related but distinct)
+  if (n < max_lines && (s_sunrise_min >= 0 || s_sunset_min >= 0)) {
+    char rise[12], set[12];
+    prv_fmt_time_min(rise, sizeof(rise), s_sunrise_min);
+    prv_fmt_time_min(set,  sizeof(set),  s_sunset_min);
+    snprintf(lines[n++], 32, "%s - %s", rise, set);
+  }
+
+  // === BELOW TIME ===
+
 #if defined(PBL_HEALTH)
+  // "3,500 steps - 2.1 mi"
   if (n < max_lines) {
-    char sbuf[16]; prv_fmt_steps(sbuf, sizeof(sbuf), s_steps);
+    char sbuf[16]; prv_fmt_steps_long(sbuf, sizeof(sbuf), s_steps);
     if (s_distance_m > 0) {
       char dbuf[16]; prv_fmt_distance(dbuf, sizeof(dbuf));
-      snprintf(lines[n++], 32, "%s \xc2\xb7 %s", sbuf, dbuf);
+      snprintf(lines[n++], 32, "%s steps - %s", sbuf, dbuf);
     } else {
       snprintf(lines[n++], 32, "%s steps", sbuf);
     }
   }
 
+  // "exp 3,500 - 100%"
   if (n < max_lines && s_steps_expected > 0) {
-    char ebuf[16]; prv_fmt_steps(ebuf, sizeof(ebuf), s_steps_expected);
+    char ebuf[16]; prv_fmt_steps_long(ebuf, sizeof(ebuf), s_steps_expected);
     int pct = (s_steps * 100) / s_steps_expected;
-    snprintf(lines[n++], 32, "exp %s \xc2\xb7 %d%%", ebuf, pct);
+    snprintf(lines[n++], 32, "exp %s - %d%%", ebuf, pct);
   }
 
+  // "100 bpm - 212 cal"
   if (n < max_lines) {
     bool has_hr  = s_bt_connected && s_heart_rate > 0;
     bool has_cal = s_calories > 0;
     if (has_hr && has_cal)
-      snprintf(lines[n++], 32, "%d bpm \xc2\xb7 %d cal", s_heart_rate, s_calories);
+      snprintf(lines[n++], 32, "%d bpm - %d cal", s_heart_rate, s_calories);
     else if (has_hr)
       snprintf(lines[n++], 32, "%d bpm", s_heart_rate);
     else if (has_cal)
       snprintf(lines[n++], 32, "%d cal", s_calories);
-    else if (!s_bt_connected)
-      snprintf(lines[n++], 32, "no phone");
   }
 #endif
 
-  if (n < max_lines && (s_sunrise_min >= 0 || s_sunset_min >= 0)) {
-    char rise[12], set[12];
-    prv_fmt_time_min(rise, sizeof(rise), s_sunrise_min);
-    prv_fmt_time_min(set,  sizeof(set),  s_sunset_min);
-    snprintf(lines[n++], 32, "%s \xc2\xb7 %s", rise, set);
+  // "84% bat" / "no phone"
+  if (n < max_lines) {
+    char bbuf[24]; prv_fmt_bat_bt(bbuf, sizeof(bbuf));
+    snprintf(lines[n++], 32, "%s", bbuf);
   }
 
   return n;
 }
 
+// ---------------------------------------------------------------
+// STACKED INFO LINES — narrow column, one field per line
+// ---------------------------------------------------------------
 static int build_info_lines_stacked(char lines[][32], int max_lines, struct tm *t) {
   int n = 0;
 
+  // "72 F"
   if (n < max_lines && s_weather_temp[0])
     snprintf(lines[n++], 32, "%s", s_weather_temp);
+
+  // "Sunday"
   if (n < max_lines && t)
     snprintf(lines[n++], 32, "%s", s_day_names_full[t->tm_wday]);
+
+  // "May 17"
   if (n < max_lines && t)
     snprintf(lines[n++], 32, "%s %d", s_month_names[t->tm_mon], t->tm_mday);
 
 #if defined(PBL_HEALTH)
+  // "1.5k steps"
   if (n < max_lines) {
-    char sbuf[16]; prv_fmt_steps(sbuf, sizeof(sbuf), s_steps);
+    char sbuf[16]; prv_fmt_steps_short(sbuf, sizeof(sbuf), s_steps);
     snprintf(lines[n++], 32, "%s steps", sbuf);
   }
-  if (n < max_lines && s_distance_m > 0)
-    prv_fmt_distance(lines[n++], 32);
+
+  // "exp 3,100"
   if (n < max_lines && s_steps_expected > 0) {
-    char ebuf[16]; prv_fmt_steps(ebuf, sizeof(ebuf), s_steps_expected);
+    char ebuf[16]; prv_fmt_steps_long(ebuf, sizeof(ebuf), s_steps_expected);
     snprintf(lines[n++], 32, "exp %s", ebuf);
   }
+
+  // "100% exp"
   if (n < max_lines && s_steps_expected > 0) {
     int pct = (s_steps * 100) / s_steps_expected;
     snprintf(lines[n++], 32, "%d%% exp", pct);
   }
+
+  // "+420 steps" / "-180 steps" (over/under expected)
+  if (n < max_lines && s_steps_expected > 0) {
+    int diff = s_steps - s_steps_expected;
+    if (diff == 0) {
+      snprintf(lines[n++], 32, "on pace");
+    } else {
+      char dbuf[16]; prv_fmt_steps_long(dbuf, sizeof(dbuf), diff < 0 ? -diff : diff);
+      snprintf(lines[n++], 32, "%s%s steps", diff > 0 ? "+" : "-", dbuf);
+    }
+  }
+
+  // "0.8 mi"
+  if (n < max_lines && s_distance_m > 0)
+    prv_fmt_distance(lines[n++], 32);
 #endif
 
-  if (n < max_lines)
-    snprintf(lines[n++], 32, "bat %d%%%s", s_battery_pct, s_charging ? " +" : "");
+  // "84% bat" / "no phone"
+  if (n < max_lines) {
+    prv_fmt_bat_bt(lines[n++], 32);
+  }
 
   return n;
 }
@@ -540,6 +644,9 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int cy = ub_top + ub_h / 2;
     draw_digits_vec(ctx, s_countdown_digit, s_countdown_digit,
                     s_countdown_digit, s_countdown_digit, s_h, cy);
+#if defined(PBL_PLATFORM_EMERY)
+    draw_border(ctx);
+#endif
     return;
   }
 
@@ -551,16 +658,9 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy);
 
   } else if (s_layout == LAYOUT_INFO_1 || s_layout == LAYOUT_INFO_2) {
-    // Strict 1u-gap layout:
-    // ub_top + UNIT = top of first line above
-    // each line takes INFO_LINE_H, followed by UNIT gap
-    // time fills remaining space
-    // then UNIT gap, first line below, UNIT gap, ...down to ub_top+ub_h
     int lines_per_side = (s_layout == LAYOUT_INFO_1) ? 1 : 2;
 
-    // Top of time block: after outer gap + lines above + gap
     int time_top = ub_top + UNIT + lines_per_side * (INFO_LINE_H + UNIT);
-    // Bottom of time block: before lines below + gap + outer gap
     int time_bot = ub_top + ub_h - UNIT - lines_per_side * (INFO_LINE_H + UNIT);
     int time_cy  = (time_top + time_bot) / 2;
 
@@ -571,14 +671,12 @@ static void draw_layer(Layer *layer, GContext *ctx) {
       char all_lines[INFO_LINES_MAX][32];
       int total = build_info_lines_wide(all_lines, lines_total, tm);
 
-      // Draw lines above: starting at ub_top + UNIT, each line then +UNIT gap
       int above_count = lines_per_side < total ? lines_per_side : total;
       for (int i = 0; i < above_count; i++) {
         int y = ub_top + UNIT + i * (INFO_LINE_H + UNIT);
         draw_info_row(ctx, all_lines + i, 1, y, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
       }
 
-      // Draw lines below: starting at time_bot + UNIT
       int below_start = lines_per_side;
       int below_count = total - below_start;
       if (below_count > lines_per_side) below_count = lines_per_side;
@@ -612,6 +710,11 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     if (tm && info_w > 20)
       draw_info_column(ctx, GRect(info_x, ub_top, info_w, ub_h), tm);
   }
+
+  // Border drawn last — on top of all content, emery only
+#if defined(PBL_PLATFORM_EMERY)
+  draw_border(ctx);
+#endif
 }
 
 static void timer_cb(void *data);
@@ -799,7 +902,6 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
     else if (c <= 99) d = "storm";
     snprintf(s_weather_desc, sizeof(s_weather_desc), "%s", d);
   }
-  // Sunrise/sunset inbox handling added when JS fetch is implemented
   layer_mark_dirty(s_canvas_layer);
 }
 
