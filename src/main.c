@@ -1,28 +1,11 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.30
-//
-// v3.30: all health data refreshed once per minute in tick_handler.
-//   health_service_events_subscribe / health_handler removed.
-//   Steps, distance, calories, HR, and expected steps are all read
-//   synchronously from cached watch data — instant, no overhead.
-//   HealthEventSignificantUpdate call kept at init() for first-load.
-//
-// All health APIs are on-watch, offline. No phone required.
-// Minute-level refresh matches the ambient display philosophy:
-//   everything updates together, once, at the minute boundary.
+// TallBoy -- main.c  v3.30a
+// Hotfix: GColorViolet doesn't exist in Pebble SDK.
+// Replaced with GColorVividViolet (bright blue-purple).
+// All other changes from v3.30 intact.
 // ============================================================
-//
-// DIGIT GEOMETRY — IMMUTABLE INVARIANTS:
-//   ro=2u, ri=1u, sw=1u, glyph_w=4u
-//   bar  = (h - 7*UNIT) / 2    ring gap
-//   tail = max(0, (h - H_MIN) / 4)  stub extension
-//   H_MIN = 11*UNIT (88px emery / 66px flint)
-//
-// MARGIN MODEL:
-//   Full-screen: 2u above + 2u below digits
-//   Stacked:     2u top + 1u gap + 2u bottom = 5u reserved
 
 #define LAYOUT_VECTOR    0
 #define LAYOUT_RIGHT     1
@@ -113,6 +96,10 @@ static int        s_steps_expected = -1;
 static char       s_weather_temp[8] = "", s_weather_desc[32] = "";
 
 #if defined(PBL_COLOR)
+// Step pace spectrum — ROYGBIV
+// 0/none: black  1-30%: red  31-60%: orange  61-90%: yellow
+// 91-200%: green  201-400%: blue  401-700%: indigo  701-1000%: vivid violet
+// 1001%+: black (easter egg)
 static GColor prv_pace_color(int steps_today, int steps_expected) {
   if (steps_expected <= 0 || steps_today <= 0) return GColorBlack;
   int pct = (steps_today * 100) / steps_expected;
@@ -123,7 +110,7 @@ static GColor prv_pace_color(int steps_today, int steps_expected) {
   if (pct <= 200)  return GColorGreen;
   if (pct <= 400)  return GColorBlue;
   if (pct <= 700)  return GColorIndigo;
-  if (pct <= 1000) return GColorViolet;
+  if (pct <= 1000) return GColorVividViolet;
   return GColorBlack;
 }
 
@@ -135,9 +122,6 @@ static bool prv_bg_needs_dark_fg(GColor bg) {
 #if defined(PBL_HEALTH)
 static HealthMinuteData s_minute_buf[STEPS_AVG_MAX_MIN];
 
-// Expected cumulative steps at the current minute of day,
-// averaged from up to 7 days of minute-level watch history.
-// Fully on-watch, offline. Called once per minute from tick_handler.
 static int prv_calc_steps_expected(void) {
   time_t now = time(NULL);
   struct tm *t = localtime(&now);
@@ -160,8 +144,6 @@ static int prv_calc_steps_expected(void) {
   return day_count > 0 ? total / day_count : -1;
 }
 
-// Read all health metrics from watch cache. Called once per minute.
-// All reads are synchronous from on-device storage — no overhead.
 static void prv_update_health(void) {
   HealthServiceAccessibilityMask mask;
   time_t start = time_start_of_today(), now = time(NULL);
@@ -609,10 +591,7 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   layer_mark_dirty(s_canvas_layer);
 }
 
-// All data refreshed once per minute — time, health, expected steps.
-// Health reads are synchronous from on-device cache: no latency, no overhead.
 static void tick_handler(struct tm *t, TimeUnits units) {
-  // Trigger squish animation for vector layout on minute change
   if (s_phase == PHASE_DONE && s_layout == LAYOUT_VECTOR) {
     s_pending_hour = t->tm_hour; s_pending_minute = t->tm_min;
     s_digit_pending = true; s_phase = PHASE_SQUISH;
@@ -678,7 +657,6 @@ static void init(void) {
   battery_state_service_subscribe(battery_handler); battery_handler(battery_state_service_peek());
   bluetooth_connection_service_subscribe(bt_handler); s_bt_connected = bluetooth_connection_service_peek();
 #if defined(PBL_HEALTH)
-  // Initial health read on boot — no event subscription needed
   prv_update_health();
 #endif
   app_message_register_inbox_received(inbox_received); app_message_open(256, 64);
