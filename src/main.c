@@ -1,11 +1,24 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.32a
-// Hotfix: remove MESSAGE_KEY_SunriseMin/SunsetMin references —
-// these message keys don't exist in CloudPebble yet. Sunrise/sunset
-// display code is intact; s_sunrise_min/s_sunset_min stay -1 until
-// the JS fetch is wired up (future version).
+// TallBoy -- main.c  v3.33
+//
+// v3.33: info overlay spacing fixed
+//   Rule: exactly 1u gap between every element, time fills remainder.
+//
+//   INFO_1 (1 line above + 1 below):
+//     1u | line | 1u | TIME | 1u | line | 1u
+//     reserved = 4*UNIT + 2*INFO_LINE_H
+//     time_h   = ub_h - reserved
+//
+//   INFO_2 (2 lines above + 2 below):
+//     1u | line | 1u | line | 1u | TIME | 1u | line | 1u | line | 1u
+//     reserved = 6*UNIT + 4*INFO_LINE_H
+//     time_h   = ub_h - reserved
+//
+//   General: reserved = (lines_total + 2)*UNIT + lines_total*INFO_LINE_H
+//   Lines above start at ub_top + UNIT.
+//   Lines below start at time_bot + UNIT.
 // ============================================================
 
 #define LAYOUT_FULL      0
@@ -51,8 +64,7 @@ static int s_layout = LAYOUT_FULL;
 #define HALF_SLOT_PAD   (UNIT / 2)
 #define GLYPH_W         (UNIT * 4)
 #define H_MIN           (UNIT * 11)
-#define MARGIN_OUTER    (UNIT * 2)
-#define MARGIN_GAP      UNIT
+#define MARGIN_OUTER    (UNIT * 2)   // used by stacked layout only
 #define INFO_LINES_MAX  8
 
 #define ANIM_STEP_PX    8
@@ -66,15 +78,21 @@ static int s_layout = LAYOUT_FULL;
 
 typedef enum { CD_SHRINK, CD_HOLD_MIN, CD_EXPAND, CD_HOLD_MAX } CdSubPhase;
 
-static int prv_compute_target_h(int ub_h, int info_lines) {
-  int reserved = 2 * MARGIN_OUTER + info_lines * INFO_LINE_H + (info_lines > 0 ? 2 * MARGIN_GAP : 0);
+// Info overlay: 1u gap between every element, time fills the rest.
+// reserved = (lines_total + 2)*UNIT + lines_total*INFO_LINE_H
+// (lines_total + 2 gaps: one above all lines, one between each line,
+//  one between last line and time, one between time and first line below,
+//  one after last line below = lines_total+2 total 1u gaps)
+static int prv_compute_target_h(int ub_h, int lines_total) {
+  if (lines_total == 0) return ub_h - 2 * MARGIN_OUTER;  // LAYOUT_FULL: 2u each side
+  int reserved = (lines_total + 2) * UNIT + lines_total * INFO_LINE_H;
   int h = ub_h - reserved;
   if (h < H_MIN) h = H_MIN;
   return h;
 }
 
 static int prv_compute_stacked_h(int ub_h) {
-  int h = (ub_h - 2 * MARGIN_OUTER - MARGIN_GAP) / 2;
+  int h = (ub_h - 2 * MARGIN_OUTER - UNIT) / 2;
   if (h < H_MIN) h = H_MIN;
   return h;
 }
@@ -104,7 +122,7 @@ static int        s_battery_pct = 100;
 static bool       s_charging = false, s_bt_connected = true;
 static int        s_steps = 0, s_distance_m = 0, s_calories = 0, s_heart_rate = 0;
 static int        s_steps_expected = -1;
-static int        s_sunrise_min = -1, s_sunset_min = -1; // set by JS when available
+static int        s_sunrise_min = -1, s_sunset_min = -1;
 static char       s_weather_temp[8] = "", s_weather_desc[32] = "";
 
 #if defined(PBL_COLOR)
@@ -389,17 +407,13 @@ static void prv_fmt_time_min(char *buf, int len, int total_min) {
   snprintf(buf, len, "%d:%02d%s", h, m, total_min < 720 ? "am" : "pm");
 }
 
-// Wide info lines (full-width, for info overlay layouts).
-// Tight pairs: no dot. Looser pairs: " · " (UTF-8 middle dot).
 static int build_info_lines_wide(char lines[][32], int max_lines, struct tm *t) {
   int n = 0;
 
-  // "Sunday, May 17"
   if (n < max_lines && t)
     snprintf(lines[n++], 32, "%s, %s %d",
              s_day_names_full[t->tm_wday], s_month_names[t->tm_mon], t->tm_mday);
 
-  // "72F cloudy"
   if (n < max_lines && s_weather_temp[0]) {
     if (s_weather_desc[0])
       snprintf(lines[n++], 32, "%s %s", s_weather_temp, s_weather_desc);
@@ -408,7 +422,6 @@ static int build_info_lines_wide(char lines[][32], int max_lines, struct tm *t) 
   }
 
 #if defined(PBL_HEALTH)
-  // "1,234 · 0.8 mi"
   if (n < max_lines) {
     char sbuf[16]; prv_fmt_steps(sbuf, sizeof(sbuf), s_steps);
     if (s_distance_m > 0) {
@@ -419,14 +432,12 @@ static int build_info_lines_wide(char lines[][32], int max_lines, struct tm *t) 
     }
   }
 
-  // "exp 890 · 143%"
   if (n < max_lines && s_steps_expected > 0) {
     char ebuf[16]; prv_fmt_steps(ebuf, sizeof(ebuf), s_steps_expected);
     int pct = (s_steps * 100) / s_steps_expected;
     snprintf(lines[n++], 32, "exp %s \xc2\xb7 %d%%", ebuf, pct);
   }
 
-  // "72 bpm · 420 cal"
   if (n < max_lines) {
     bool has_hr  = s_bt_connected && s_heart_rate > 0;
     bool has_cal = s_calories > 0;
@@ -441,7 +452,6 @@ static int build_info_lines_wide(char lines[][32], int max_lines, struct tm *t) 
   }
 #endif
 
-  // "6:02am · 8:14pm" — only shown when JS has sent sunrise/sunset
   if (n < max_lines && (s_sunrise_min >= 0 || s_sunset_min >= 0)) {
     char rise[12], set[12];
     prv_fmt_time_min(rise, sizeof(rise), s_sunrise_min);
@@ -452,7 +462,6 @@ static int build_info_lines_wide(char lines[][32], int max_lines, struct tm *t) 
   return n;
 }
 
-// Stacked info lines (narrow column, one field per line).
 static int build_info_lines_stacked(char lines[][32], int max_lines, struct tm *t) {
   int n = 0;
 
@@ -542,30 +551,41 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy);
 
   } else if (s_layout == LAYOUT_INFO_1 || s_layout == LAYOUT_INFO_2) {
+    // Strict 1u-gap layout:
+    // ub_top + UNIT = top of first line above
+    // each line takes INFO_LINE_H, followed by UNIT gap
+    // time fills remaining space
+    // then UNIT gap, first line below, UNIT gap, ...down to ub_top+ub_h
     int lines_per_side = (s_layout == LAYOUT_INFO_1) ? 1 : 2;
-    int lines_total    = lines_per_side * 2;
 
-    int info_block_h = lines_per_side * INFO_LINE_H;
-    int time_top     = ub_top + MARGIN_OUTER + info_block_h + MARGIN_GAP;
-    int time_bot     = ub_top + ub_h - MARGIN_OUTER - info_block_h - MARGIN_GAP;
-    int time_cy      = (time_top + time_bot) / 2;
+    // Top of time block: after outer gap + lines above + gap
+    int time_top = ub_top + UNIT + lines_per_side * (INFO_LINE_H + UNIT);
+    // Bottom of time block: before lines below + gap + outer gap
+    int time_bot = ub_top + ub_h - UNIT - lines_per_side * (INFO_LINE_H + UNIT);
+    int time_cy  = (time_top + time_bot) / 2;
 
     draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy);
 
     if (tm) {
+      int lines_total = lines_per_side * 2;
       char all_lines[INFO_LINES_MAX][32];
       int total = build_info_lines_wide(all_lines, lines_total, tm);
 
+      // Draw lines above: starting at ub_top + UNIT, each line then +UNIT gap
       int above_count = lines_per_side < total ? lines_per_side : total;
-      draw_info_row(ctx, all_lines, above_count,
-                    ub_top + MARGIN_OUTER, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
+      for (int i = 0; i < above_count; i++) {
+        int y = ub_top + UNIT + i * (INFO_LINE_H + UNIT);
+        draw_info_row(ctx, all_lines + i, 1, y, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
+      }
 
+      // Draw lines below: starting at time_bot + UNIT
       int below_start = lines_per_side;
       int below_count = total - below_start;
       if (below_count > lines_per_side) below_count = lines_per_side;
-      if (below_count > 0) {
-        draw_info_row(ctx, all_lines + below_start, below_count,
-                      time_bot + MARGIN_GAP, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
+      for (int i = 0; i < below_count; i++) {
+        int y = time_bot + UNIT + i * (INFO_LINE_H + UNIT);
+        draw_info_row(ctx, all_lines + below_start + i, 1,
+                      y, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
       }
     }
 
