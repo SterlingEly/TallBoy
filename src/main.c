@@ -1,11 +1,14 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.34b
-// Hotfix: corners outside border always black.
-// On emery: fill entire layer black, then fill bg color
-// as a rounded rect (radius=2u) so corners stay black.
-// The border draws on top and reinforces the edge.
+// TallBoy -- main.c  v3.34c
+// Hotfix: border corner arc angles corrected.
+// Pebble angles: 0=12-o'clock, clockwise.
+// Arc fills the pie slice pointing INTO the corner:
+//   top-left     (ro,ro):     270→360
+//   top-right    (W-ro,ro):   360→450 (= 0→90)
+//   bottom-left  (ro,H-ro):   180→270
+//   bottom-right (W-ro,H-ro):  90→180
 // ============================================================
 
 #define LAYOUT_FULL      0
@@ -191,14 +194,23 @@ static void draw_border(GContext *ctx) {
   const int sw = UNIT;
 
   graphics_context_set_fill_color(ctx, s_fg);
-  graphics_fill_rect(ctx, GRect(ro, 0,            SCREEN_W - ro*2, sw), 0, GCornerNone);
-  graphics_fill_rect(ctx, GRect(ro, SCREEN_H - sw, SCREEN_W - ro*2, sw), 0, GCornerNone);
-  graphics_fill_rect(ctx, GRect(0,  ro,            sw, SCREEN_H - ro*2), 0, GCornerNone);
-  graphics_fill_rect(ctx, GRect(SCREEN_W - sw, ro, sw, SCREEN_H - ro*2), 0, GCornerNone);
-  fill_arc(ctx, ro,          ro,          ro, ri, 180, 270);
-  fill_arc(ctx, SCREEN_W-ro, ro,          ro, ri, 270, 360);
-  fill_arc(ctx, ro,          SCREEN_H-ro, ro, ri,  90, 180);
-  fill_arc(ctx, SCREEN_W-ro, SCREEN_H-ro, ro, ri,   0,  90);
+
+  // Bars flush to screen edges, shortened by ro at each end
+  graphics_fill_rect(ctx, GRect(ro, 0,             SCREEN_W - ro*2, sw), 0, GCornerNone); // top
+  graphics_fill_rect(ctx, GRect(ro, SCREEN_H - sw, SCREEN_W - ro*2, sw), 0, GCornerNone); // bottom
+  graphics_fill_rect(ctx, GRect(0,  ro,             sw, SCREEN_H - ro*2), 0, GCornerNone); // left
+  graphics_fill_rect(ctx, GRect(SCREEN_W - sw, ro,  sw, SCREEN_H - ro*2), 0, GCornerNone); // right
+
+  // Quarter-circle corners — arc fills the pie slice pointing INTO the corner.
+  // Pebble angles: 0=12-o'clock, clockwise.
+  //   top-left     center (ro,ro):         sweep 270→360 (left→top quadrant)
+  //   top-right    center (W-ro,ro):       sweep 360→450 (top→right quadrant)
+  //   bottom-left  center (ro,H-ro):       sweep 180→270 (bottom→left quadrant)
+  //   bottom-right center (W-ro,H-ro):     sweep  90→180 (right→bottom quadrant)
+  fill_arc(ctx, ro,          ro,          ro, ri, 270, 360); // top-left
+  fill_arc(ctx, SCREEN_W-ro, ro,          ro, ri, 360, 450); // top-right
+  fill_arc(ctx, ro,          SCREEN_H-ro, ro, ri, 180, 270); // bottom-left
+  fill_arc(ctx, SCREEN_W-ro, SCREEN_H-ro, ro, ri,  90, 180); // bottom-right
 }
 #endif
 
@@ -553,7 +565,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   int ub_top   = ub.origin.y, ub_h = ub.size.h;
   GRect bounds = layer_get_bounds(layer);
 
-  // Determine bg color and fg before drawing anything
 #if defined(PBL_COLOR) && defined(PBL_HEALTH)
   GColor bg = prv_pace_color(s_steps, s_steps_expected);
   s_fg = prv_bg_needs_dark_fg(bg) ? GColorBlack : GColorWhite;
@@ -562,25 +573,23 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   s_fg = GColorWhite;
 #endif
 
-  // 1. Fill entire canvas black — corners outside border stay black always
+  // 1. Entire canvas black — corners outside border stay black always
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 
 #if defined(PBL_PLATFORM_EMERY)
-  // 2. Fill bg color as rounded rect — naturally clips the four corner triangles
-  //    Corner radius matches border arcs (2u), so bg fills exactly the content area
+  // 2. Bg color as rounded rect — clips corners, bg only fills content area
   graphics_context_set_fill_color(ctx, bg);
   graphics_fill_rect(ctx, bounds, UNIT * 2, GCornersAll);
 
-  // 3. Border — reinforces the edge on top of the rounded bg
+  // 3. Border reinforces the edge
   draw_border(ctx);
 #else
-  // Non-emery: no border, just fill bg normally
   graphics_context_set_fill_color(ctx, bg);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 #endif
 
-  // 4. All content
+  // 4. Content
   int hr = s_hour % 12; if (!hr) hr = 12;
   int h_tens = hr/10, h_ones = hr%10, m_tens = s_minute/10, m_ones = s_minute%10;
 
