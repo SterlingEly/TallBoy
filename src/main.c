@@ -1,32 +1,24 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.29
+// TallBoy -- main.c  v3.30
 //
-// v3.29:
-//   1. Step pace colors: clean ROYGBIV
-//        0%: black (default)   1-30%: red    31-60%: orange
-//        61-90%: yellow        91-200%: green  201-400%: blue
-//        401-700%: indigo      701-1000%: violet   1001%+: black
-//   2. Info lines expanded to 8 lines max; all Radium fields added:
-//        calories, heart rate, BT, % of expected steps
-//   3. s_steps_avg → s_steps_expected (clearer name: expected cumulative
-//        steps at this point in day based on 7-day history)
-//   4. Health data: calories + heart rate tracking added
+// v3.30: all health data refreshed once per minute in tick_handler.
+//   health_service_events_subscribe / health_handler removed.
+//   Steps, distance, calories, HR, and expected steps are all read
+//   synchronously from cached watch data — instant, no overhead.
+//   HealthEventSignificantUpdate call kept at init() for first-load.
 //
-// Layout shake cycle planned for v3.30:
-//   shake 0: full-screen time
-//   shake 1: time + 1 info above + 1 below
-//   shake 2: time + 2 above + 2 below
-//   shake 3: stacked left
-//   shake 4: stacked right
+// All health APIs are on-watch, offline. No phone required.
+// Minute-level refresh matches the ambient display philosophy:
+//   everything updates together, once, at the minute boundary.
 // ============================================================
 //
 // DIGIT GEOMETRY — IMMUTABLE INVARIANTS:
 //   ro=2u, ri=1u, sw=1u, glyph_w=4u
-//   bar  = (h - 7*UNIT) / 2    ring gap between inner cap centers
-//   tail = max(0, (h - H_MIN) / 4)  stub span beyond outer ring cap
-//   H_MIN = 11*UNIT (88px emery, 66px flint)
+//   bar  = (h - 7*UNIT) / 2    ring gap
+//   tail = max(0, (h - H_MIN) / 4)  stub extension
+//   H_MIN = 11*UNIT (88px emery / 66px flint)
 //
 // MARGIN MODEL:
 //   Full-screen: 2u above + 2u below digits
@@ -117,12 +109,10 @@ static int        s_pending_hour = 0, s_pending_minute = 0;
 static int        s_battery_pct = 100;
 static bool       s_charging = false, s_bt_connected = true;
 static int        s_steps = 0, s_distance_m = 0, s_calories = 0, s_heart_rate = 0;
-static int        s_steps_expected = -1;  // expected cumulative steps at this minute, from 7-day history
+static int        s_steps_expected = -1;
 static char       s_weather_temp[8] = "", s_weather_desc[32] = "";
 
 #if defined(PBL_COLOR)
-// Step pace spectrum — ROYGBIV mapped to % of historical-average expected steps
-// fg is always white except Yellow (needs black for contrast)
 static GColor prv_pace_color(int steps_today, int steps_expected) {
   if (steps_expected <= 0 || steps_today <= 0) return GColorBlack;
   int pct = (steps_today * 100) / steps_expected;
@@ -134,7 +124,7 @@ static GColor prv_pace_color(int steps_today, int steps_expected) {
   if (pct <= 400)  return GColorBlue;
   if (pct <= 700)  return GColorIndigo;
   if (pct <= 1000) return GColorViolet;
-  return GColorBlack;  // 1001%+: you're unhinged
+  return GColorBlack;
 }
 
 static bool prv_bg_needs_dark_fg(GColor bg) {
@@ -145,10 +135,9 @@ static bool prv_bg_needs_dark_fg(GColor bg) {
 #if defined(PBL_HEALTH)
 static HealthMinuteData s_minute_buf[STEPS_AVG_MAX_MIN];
 
-// Returns expected cumulative steps at the current minute of day,
-// based on minute-level data from up to 7 prior days.
-// This is "what would typical-me have done by now" — the correct
-// denominator for step pace comparison. Fully on-watch, offline.
+// Expected cumulative steps at the current minute of day,
+// averaged from up to 7 days of minute-level watch history.
+// Fully on-watch, offline. Called once per minute from tick_handler.
 static int prv_calc_steps_expected(void) {
   time_t now = time(NULL);
   struct tm *t = localtime(&now);
@@ -164,13 +153,36 @@ static int prv_calc_steps_expected(void) {
     for (uint32_t i = 0; i < n; i++)
       if (!s_minute_buf[i].is_invalid) day_steps += s_minute_buf[i].steps;
     if (day_steps > 0) {
-      // If window is shorter than elapsed time (hit STEPS_AVG_MAX_MIN cap),
-      // scale up proportionally so we're comparing apples to apples.
       if (elapsed_min > window) day_steps = (day_steps * elapsed_min) / window;
       total += day_steps; day_count++;
     }
   }
   return day_count > 0 ? total / day_count : -1;
+}
+
+// Read all health metrics from watch cache. Called once per minute.
+// All reads are synchronous from on-device storage — no overhead.
+static void prv_update_health(void) {
+  HealthServiceAccessibilityMask mask;
+  time_t start = time_start_of_today(), now = time(NULL);
+
+  mask = health_service_metric_accessible(HealthMetricStepCount, start, now);
+  s_steps = (mask & HealthServiceAccessibilityMaskAvailable)
+            ? (int)health_service_sum_today(HealthMetricStepCount) : 0;
+
+  mask = health_service_metric_accessible(HealthMetricWalkedDistanceMeters, start, now);
+  s_distance_m = (mask & HealthServiceAccessibilityMaskAvailable)
+                 ? (int)health_service_sum_today(HealthMetricWalkedDistanceMeters) : 0;
+
+  mask = health_service_metric_accessible(HealthMetricActiveKCalories, start, now);
+  s_calories = (mask & HealthServiceAccessibilityMaskAvailable)
+               ? (int)health_service_sum_today(HealthMetricActiveKCalories) : 0;
+
+  mask = health_service_metric_accessible(HealthMetricHeartRateBPM, start, now);
+  s_heart_rate = (mask & HealthServiceAccessibilityMaskAvailable)
+                 ? (int)health_service_peek_current_value(HealthMetricHeartRateBPM) : 0;
+
+  s_steps_expected = prv_calc_steps_expected();
 }
 #endif
 
@@ -364,30 +376,19 @@ static const char *s_month_abbrs[] = {
   "JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"
 };
 
-// Build up to INFO_LINES_MAX info lines from all available data sources.
-// Order: day, date, steps, step pace %, distance, calories, heart rate, battery.
-// BT shown only when disconnected (replaces heart rate line in that case).
 static int build_info_lines(char lines[][32], int max_lines, struct tm *t) {
   int n = 0;
-
-  // Day name and date always first
   if (n < max_lines && t) snprintf(lines[n++], 32, "%s", s_day_names_full[t->tm_wday]);
   if (n < max_lines && t) snprintf(lines[n++], 32, "%s %d", s_month_abbrs[t->tm_mon], t->tm_mday);
-
 #if defined(PBL_HEALTH)
-  // Step count
   if (n < max_lines) {
     if (s_steps >= 1000) snprintf(lines[n++], 32, "%d,%03d steps", s_steps/1000, s_steps%1000);
     else snprintf(lines[n++], 32, "%d steps", s_steps);
   }
-
-  // Step pace: current steps as % of expected at this time of day
   if (n < max_lines && s_steps_expected > 0) {
     int pct = (s_steps * 100) / s_steps_expected;
     snprintf(lines[n++], 32, "%d%% pace", pct);
   }
-
-  // Distance
   if (n < max_lines && s_distance_m > 0) {
     if (strcmp(i18n_get_system_locale(), "en_US") == 0) {
       int mx = (s_distance_m * 10) / 1609;
@@ -397,27 +398,13 @@ static int build_info_lines(char lines[][32], int max_lines, struct tm *t) {
       snprintf(lines[n++], 32, "%d.%d km", kx/10, kx%10);
     }
   }
-
-  // Calories (active kcal)
-  if (n < max_lines && s_calories > 0) {
-    snprintf(lines[n++], 32, "%d cal", s_calories);
-  }
-
-  // Heart rate or BT disconnection warning
+  if (n < max_lines && s_calories > 0) snprintf(lines[n++], 32, "%d cal", s_calories);
   if (n < max_lines) {
-    if (!s_bt_connected) {
-      snprintf(lines[n++], 32, "no phone");
-    } else if (s_heart_rate > 0) {
-      snprintf(lines[n++], 32, "%d bpm", s_heart_rate);
-    }
+    if (!s_bt_connected) snprintf(lines[n++], 32, "no phone");
+    else if (s_heart_rate > 0) snprintf(lines[n++], 32, "%d bpm", s_heart_rate);
   }
 #endif
-
-  // Battery always last
-  if (n < max_lines) {
-    snprintf(lines[n++], 32, "bat %d%%%s", s_battery_pct, s_charging ? " +" : "");
-  }
-
+  if (n < max_lines) snprintf(lines[n++], 32, "bat %d%%%s", s_battery_pct, s_charging ? " +" : "");
   return n;
 }
 
@@ -463,8 +450,8 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   int h_tens = hr/10, h_ones = hr%10, m_tens = s_minute/10, m_ones = s_minute%10;
 
   if (s_phase == PHASE_COUNTDOWN) {
-    int d = s_countdown_digit;
-    draw_digits_vec(ctx, d, d, d, d, s_h, center_y);
+    draw_digits_vec(ctx, s_countdown_digit, s_countdown_digit,
+                    s_countdown_digit, s_countdown_digit, s_h, center_y);
     return;
   }
 
@@ -622,7 +609,10 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   layer_mark_dirty(s_canvas_layer);
 }
 
+// All data refreshed once per minute — time, health, expected steps.
+// Health reads are synchronous from on-device cache: no latency, no overhead.
 static void tick_handler(struct tm *t, TimeUnits units) {
+  // Trigger squish animation for vector layout on minute change
   if (s_phase == PHASE_DONE && s_layout == LAYOUT_VECTOR) {
     s_pending_hour = t->tm_hour; s_pending_minute = t->tm_min;
     s_digit_pending = true; s_phase = PHASE_SQUISH;
@@ -633,7 +623,7 @@ static void tick_handler(struct tm *t, TimeUnits units) {
     s_hour = t->tm_hour; s_minute = t->tm_min; layer_mark_dirty(s_canvas_layer);
   }
 #if defined(PBL_HEALTH)
-  s_steps_expected = prv_calc_steps_expected();
+  prv_update_health();
 #endif
 }
 
@@ -641,33 +631,10 @@ static void battery_handler(BatteryChargeState state) {
   s_battery_pct = state.charge_percent; s_charging = state.is_charging;
   layer_mark_dirty(s_canvas_layer);
 }
-static void bt_handler(bool connected) { s_bt_connected = connected; layer_mark_dirty(s_canvas_layer); }
 
-#if defined(PBL_HEALTH)
-static void health_handler(HealthEventType event, void *context) {
-  if (event == HealthEventMovementUpdate || event == HealthEventSignificantUpdate) {
-    HealthServiceAccessibilityMask mask;
-    time_t start = time_start_of_today(), now = time(NULL);
-
-    mask = health_service_metric_accessible(HealthMetricStepCount, start, now);
-    s_steps = (mask & HealthServiceAccessibilityMaskAvailable)
-              ? (int)health_service_sum_today(HealthMetricStepCount) : 0;
-
-    mask = health_service_metric_accessible(HealthMetricWalkedDistanceMeters, start, now);
-    s_distance_m = (mask & HealthServiceAccessibilityMaskAvailable)
-                   ? (int)health_service_sum_today(HealthMetricWalkedDistanceMeters) : 0;
-
-    mask = health_service_metric_accessible(HealthMetricActiveKCalories, start, now);
-    s_calories = (mask & HealthServiceAccessibilityMaskAvailable)
-                 ? (int)health_service_sum_today(HealthMetricActiveKCalories) : 0;
-
-    mask = health_service_metric_accessible(HealthMetricHeartRateBPM, start, now);
-    s_heart_rate = (mask & HealthServiceAccessibilityMaskAvailable)
-                   ? (int)health_service_peek_current_value(HealthMetricHeartRateBPM) : 0;
-  }
-  layer_mark_dirty(s_canvas_layer);
+static void bt_handler(bool connected) {
+  s_bt_connected = connected; layer_mark_dirty(s_canvas_layer);
 }
-#endif
 
 static void inbox_received(DictionaryIterator *iter, void *context) {
   Tuple *t;
@@ -711,17 +678,14 @@ static void init(void) {
   battery_state_service_subscribe(battery_handler); battery_handler(battery_state_service_peek());
   bluetooth_connection_service_subscribe(bt_handler); s_bt_connected = bluetooth_connection_service_peek();
 #if defined(PBL_HEALTH)
-  health_service_events_subscribe(health_handler, NULL); health_handler(HealthEventSignificantUpdate, NULL);
-  s_steps_expected = prv_calc_steps_expected();
+  // Initial health read on boot — no event subscription needed
+  prv_update_health();
 #endif
   app_message_register_inbox_received(inbox_received); app_message_open(256, 64);
 }
 
 static void deinit(void) {
   tick_timer_service_unsubscribe(); battery_state_service_unsubscribe(); bluetooth_connection_service_unsubscribe();
-#if defined(PBL_HEALTH)
-  health_service_events_unsubscribe();
-#endif
   window_destroy(s_window);
 }
 
