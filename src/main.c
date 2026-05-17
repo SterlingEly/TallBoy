@@ -1,37 +1,9 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.34
-//
-// v3.34:
-//   1. Wide info lines revised:
-//        "72 F & Sunny"            (weather, ampersand join)
-//        "Sunday, May 17"          (day+date, unchanged)
-//        sunrise/sunset line added above time (3rd line above)
-//        "3,500 steps - 2.1 mi"   (steps+distance, dash)
-//        "exp 3,500 - 100%"        (expected+%, dash)
-//        "100 bpm - 212 cal"       (HR+cal, dash)
-//        "84% bat"  or  "no phone" (battery+BT combined)
-//
-//   2. Stacked info lines revised:
-//        "72 F"        weather short
-//        "Sunday"      day long
-//        "May 17"      date (mixed case, no abbrev)
-//        "1.5k steps"  steps short format
-//        "exp 3,100"   expected total
-//        "100% exp"    pace %
-//        "+400 steps"  steps over/under expected (new)
-//        "0.8 mi"      distance
-//        "84% bat"     battery+BT combined
-//
-//   3. Steps over/under expected: s_steps - s_steps_expected
-//        "+420 steps" / "-180 steps" / "on pace"
-//
-//   4. Border (emery only): 1u rounded-rect outline using
-//        digit arc geometry (ro=2u, ri=1u), drawn last in
-//        draw_layer so it sits on top of everything. Color = s_fg.
-//        4 bars + 4 quarter-circle corners forming a complete
-//        rounded rectangle border matching the outer margin.
+// TallBoy -- main.c  v3.34a
+// Hotfix: dashes to dots in wide info separators;
+//         border moved to draw first (behind all content)
 // ============================================================
 
 #define LAYOUT_FULL      0
@@ -89,10 +61,11 @@ static int s_layout = LAYOUT_FULL;
 #define BLINK_REPS         2
 #define STEPS_AVG_MAX_MIN  120
 
+// Middle dot separator for wide info pairs (UTF-8 U+00B7)
+#define DOT " \xc2\xb7 "
+
 typedef enum { CD_SHRINK, CD_HOLD_MIN, CD_EXPAND, CD_HOLD_MAX } CdSubPhase;
 
-// Info overlay: 1u gap between every element, time fills the rest.
-// reserved = (lines_total + 2)*UNIT + lines_total*INFO_LINE_H
 static int prv_compute_target_h(int ub_h, int lines_total) {
   if (lines_total == 0) return ub_h - 2 * MARGIN_OUTER;
   int reserved = (lines_total + 2) * UNIT + lines_total * INFO_LINE_H;
@@ -210,31 +183,28 @@ static void fill_arc(GContext *ctx, int cx, int cy, int ro, int ri, int a0, int 
                        DEG_TO_TRIGANGLE(a0), DEG_TO_TRIGANGLE(a1));
 }
 
-// Border: 1u rounded-rect outline, emery only.
-// ro=2u, ri=1u (same as digit arcs). Drawn on top of all content.
-// Lives entirely within the 2u outer margin — no content displaced.
+// Border: 1u rounded-rect outline using digit arc geometry (ro=2u, ri=1u).
+// Drawn immediately after background fill — behind all content.
+// Emery only (requires 2u outer margin to have space).
 #if defined(PBL_PLATFORM_EMERY)
 static void draw_border(GContext *ctx) {
-  const int ro = UNIT * 2;   // 16px
-  const int ri = UNIT * 1;   // 8px
-  const int sw = UNIT;       // 8px stroke width
+  const int ro = UNIT * 2;
+  const int ri = UNIT * 1;
+  const int sw = UNIT;
 
   graphics_context_set_fill_color(ctx, s_fg);
 
-  // Top bar: full width minus corner radius each side
-  graphics_fill_rect(ctx, GRect(ro, 0, SCREEN_W - ro*2, sw), 0, GCornerNone);
-  // Bottom bar
-  graphics_fill_rect(ctx, GRect(ro, SCREEN_H - sw, SCREEN_W - ro*2, sw), 0, GCornerNone);
-  // Left bar: full height minus corner radius each side
-  graphics_fill_rect(ctx, GRect(0, ro, sw, SCREEN_H - ro*2), 0, GCornerNone);
-  // Right bar
-  graphics_fill_rect(ctx, GRect(SCREEN_W - sw, ro, sw, SCREEN_H - ro*2), 0, GCornerNone);
+  // Bars flush to screen edges, shortened by ro at each end
+  graphics_fill_rect(ctx, GRect(ro, 0,            SCREEN_W - ro*2, sw), 0, GCornerNone); // top
+  graphics_fill_rect(ctx, GRect(ro, SCREEN_H - sw, SCREEN_W - ro*2, sw), 0, GCornerNone); // bottom
+  graphics_fill_rect(ctx, GRect(0,  ro,            sw, SCREEN_H - ro*2), 0, GCornerNone); // left
+  graphics_fill_rect(ctx, GRect(SCREEN_W - sw, ro, sw, SCREEN_H - ro*2), 0, GCornerNone); // right
 
-  // Corners — arc centers are at (ro, ro), (W-ro, ro), (ro, H-ro), (W-ro, H-ro)
-  fill_arc(ctx, ro,          ro,          ro, ri, 180, 270);  // top-left
-  fill_arc(ctx, SCREEN_W-ro, ro,          ro, ri, 270, 360);  // top-right
-  fill_arc(ctx, ro,          SCREEN_H-ro, ro, ri,  90, 180);  // bottom-left
-  fill_arc(ctx, SCREEN_W-ro, SCREEN_H-ro, ro, ri,   0,  90);  // bottom-right
+  // Quarter-circle corners joining the bars
+  fill_arc(ctx, ro,          ro,          ro, ri, 180, 270); // top-left
+  fill_arc(ctx, SCREEN_W-ro, ro,          ro, ri, 270, 360); // top-right
+  fill_arc(ctx, ro,          SCREEN_H-ro, ro, ri,  90, 180); // bottom-left
+  fill_arc(ctx, SCREEN_W-ro, SCREEN_H-ro, ro, ri,   0,  90); // bottom-right
 }
 #endif
 
@@ -432,14 +402,12 @@ static void prv_fmt_distance(char *buf, int len) {
   }
 }
 
-// Short step format: "1.5k" under 10k, comma format above
 static void prv_fmt_steps_short(char *buf, int len, int steps) {
   if (steps >= 10000) snprintf(buf, len, "%d,%03d", steps/1000, steps%1000);
   else if (steps >= 1000) snprintf(buf, len, "%d.%dk", steps/1000, (steps%1000)/100);
   else snprintf(buf, len, "%d", steps);
 }
 
-// Long step format with thousands comma
 static void prv_fmt_steps_long(char *buf, int len, int steps) {
   if (steps >= 1000) snprintf(buf, len, "%d,%03d", steps/1000, steps%1000);
   else snprintf(buf, len, "%d", steps);
@@ -453,7 +421,6 @@ static void prv_fmt_time_min(char *buf, int len, int total_min) {
   snprintf(buf, len, "%d:%02d%s", h, m, total_min < 720 ? "am" : "pm");
 }
 
-// Battery + BT combined: "84% bat" or "84% bat +" (charging) or "no phone"
 static void prv_fmt_bat_bt(char *buf, int len) {
   if (!s_bt_connected)
     snprintf(buf, len, "no phone");
@@ -463,23 +430,16 @@ static void prv_fmt_bat_bt(char *buf, int len) {
     snprintf(buf, len, "%d%% bat", s_battery_pct);
 }
 
-// ---------------------------------------------------------------
-// WIDE INFO LINES — above/below time in INFO_1/INFO_2
-// Above time (priority order): day+date, weather, sunrise+sunset
-// Below time (priority order): steps+distance, exp+%, HR+cal, battery+BT
-// Separator: " - " for loose pairs, "&" or "," for tight pairs
-// ---------------------------------------------------------------
+// Wide info lines — dot separator for all loose pairs
 static int build_info_lines_wide(char lines[][32], int max_lines, struct tm *t) {
   int n = 0;
 
-  // === ABOVE TIME (slots 0..N-1, filled first) ===
-
-  // "Sunday, May 17"
+  // "Sunday, May 17" (comma, tight)
   if (n < max_lines && t)
     snprintf(lines[n++], 32, "%s, %s %d",
              s_day_names_full[t->tm_wday], s_month_names[t->tm_mon], t->tm_mday);
 
-  // "72 F & Sunny" (ampersand, tight pair)
+  // "72 F & Sunny" (ampersand, tight)
   if (n < max_lines && s_weather_temp[0]) {
     if (s_weather_desc[0])
       snprintf(lines[n++], 32, "%s & %s", s_weather_temp, s_weather_desc);
@@ -487,41 +447,39 @@ static int build_info_lines_wide(char lines[][32], int max_lines, struct tm *t) 
       snprintf(lines[n++], 32, "%s", s_weather_temp);
   }
 
-  // "6:02am - 8:14pm" (sunrise/sunset, dash — related but distinct)
+  // "6:02am · 8:14pm" (dot)
   if (n < max_lines && (s_sunrise_min >= 0 || s_sunset_min >= 0)) {
     char rise[12], set[12];
     prv_fmt_time_min(rise, sizeof(rise), s_sunrise_min);
     prv_fmt_time_min(set,  sizeof(set),  s_sunset_min);
-    snprintf(lines[n++], 32, "%s - %s", rise, set);
+    snprintf(lines[n++], 32, "%s" DOT "%s", rise, set);
   }
 
-  // === BELOW TIME ===
-
 #if defined(PBL_HEALTH)
-  // "3,500 steps - 2.1 mi"
+  // "3,500 steps · 2.1 mi" (dot)
   if (n < max_lines) {
     char sbuf[16]; prv_fmt_steps_long(sbuf, sizeof(sbuf), s_steps);
     if (s_distance_m > 0) {
       char dbuf[16]; prv_fmt_distance(dbuf, sizeof(dbuf));
-      snprintf(lines[n++], 32, "%s steps - %s", sbuf, dbuf);
+      snprintf(lines[n++], 32, "%s steps" DOT "%s", sbuf, dbuf);
     } else {
       snprintf(lines[n++], 32, "%s steps", sbuf);
     }
   }
 
-  // "exp 3,500 - 100%"
+  // "exp 3,500 · 100%" (dot)
   if (n < max_lines && s_steps_expected > 0) {
     char ebuf[16]; prv_fmt_steps_long(ebuf, sizeof(ebuf), s_steps_expected);
     int pct = (s_steps * 100) / s_steps_expected;
-    snprintf(lines[n++], 32, "exp %s - %d%%", ebuf, pct);
+    snprintf(lines[n++], 32, "exp %s" DOT "%d%%", ebuf, pct);
   }
 
-  // "100 bpm - 212 cal"
+  // "100 bpm · 212 cal" (dot)
   if (n < max_lines) {
     bool has_hr  = s_bt_connected && s_heart_rate > 0;
     bool has_cal = s_calories > 0;
     if (has_hr && has_cal)
-      snprintf(lines[n++], 32, "%d bpm - %d cal", s_heart_rate, s_calories);
+      snprintf(lines[n++], 32, "%d bpm" DOT "%d cal", s_heart_rate, s_calories);
     else if (has_hr)
       snprintf(lines[n++], 32, "%d bpm", s_heart_rate);
     else if (has_cal)
@@ -538,44 +496,30 @@ static int build_info_lines_wide(char lines[][32], int max_lines, struct tm *t) 
   return n;
 }
 
-// ---------------------------------------------------------------
-// STACKED INFO LINES — narrow column, one field per line
-// ---------------------------------------------------------------
+// Stacked info lines — narrow column, one field per line
 static int build_info_lines_stacked(char lines[][32], int max_lines, struct tm *t) {
   int n = 0;
 
-  // "72 F"
   if (n < max_lines && s_weather_temp[0])
     snprintf(lines[n++], 32, "%s", s_weather_temp);
-
-  // "Sunday"
   if (n < max_lines && t)
     snprintf(lines[n++], 32, "%s", s_day_names_full[t->tm_wday]);
-
-  // "May 17"
   if (n < max_lines && t)
     snprintf(lines[n++], 32, "%s %d", s_month_names[t->tm_mon], t->tm_mday);
 
 #if defined(PBL_HEALTH)
-  // "1.5k steps"
   if (n < max_lines) {
     char sbuf[16]; prv_fmt_steps_short(sbuf, sizeof(sbuf), s_steps);
     snprintf(lines[n++], 32, "%s steps", sbuf);
   }
-
-  // "exp 3,100"
   if (n < max_lines && s_steps_expected > 0) {
     char ebuf[16]; prv_fmt_steps_long(ebuf, sizeof(ebuf), s_steps_expected);
     snprintf(lines[n++], 32, "exp %s", ebuf);
   }
-
-  // "100% exp"
   if (n < max_lines && s_steps_expected > 0) {
     int pct = (s_steps * 100) / s_steps_expected;
     snprintf(lines[n++], 32, "%d%% exp", pct);
   }
-
-  // "+420 steps" / "-180 steps" (over/under expected)
   if (n < max_lines && s_steps_expected > 0) {
     int diff = s_steps - s_steps_expected;
     if (diff == 0) {
@@ -585,16 +529,12 @@ static int build_info_lines_stacked(char lines[][32], int max_lines, struct tm *
       snprintf(lines[n++], 32, "%s%s steps", diff > 0 ? "+" : "-", dbuf);
     }
   }
-
-  // "0.8 mi"
   if (n < max_lines && s_distance_m > 0)
     prv_fmt_distance(lines[n++], 32);
 #endif
 
-  // "84% bat" / "no phone"
-  if (n < max_lines) {
+  if (n < max_lines)
     prv_fmt_bat_bt(lines[n++], 32);
-  }
 
   return n;
 }
@@ -627,6 +567,7 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   GRect ub     = layer_get_unobstructed_bounds(root);
   int ub_top   = ub.origin.y, ub_h = ub.size.h;
 
+  // 1. Background fill
 #if defined(PBL_COLOR) && defined(PBL_HEALTH)
   GColor bg = prv_pace_color(s_steps, s_steps_expected);
   s_fg = prv_bg_needs_dark_fg(bg) ? GColorBlack : GColorWhite;
@@ -637,6 +578,12 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   graphics_context_set_fill_color(ctx, bg);
   graphics_fill_rect(ctx, layer_get_bounds(layer), 0, GCornerNone);
 
+  // 2. Border — drawn immediately after background, behind all content
+#if defined(PBL_PLATFORM_EMERY)
+  draw_border(ctx);
+#endif
+
+  // 3. All content (digits, info lines)
   int hr = s_hour % 12; if (!hr) hr = 12;
   int h_tens = hr/10, h_ones = hr%10, m_tens = s_minute/10, m_ones = s_minute%10;
 
@@ -644,9 +591,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int cy = ub_top + ub_h / 2;
     draw_digits_vec(ctx, s_countdown_digit, s_countdown_digit,
                     s_countdown_digit, s_countdown_digit, s_h, cy);
-#if defined(PBL_PLATFORM_EMERY)
-    draw_border(ctx);
-#endif
     return;
   }
 
@@ -710,11 +654,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     if (tm && info_w > 20)
       draw_info_column(ctx, GRect(info_x, ub_top, info_w, ub_h), tm);
   }
-
-  // Border drawn last — on top of all content, emery only
-#if defined(PBL_PLATFORM_EMERY)
-  draw_border(ctx);
-#endif
 }
 
 static void timer_cb(void *data);
