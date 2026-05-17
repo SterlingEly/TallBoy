@@ -1,23 +1,36 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.31
+// TallBoy -- main.c  v3.32
 //
-// v3.31: info line overhaul
-//   - Stacked layout: 8 ordered lines (weather temp, day, date,
-//     steps, distance, expected steps, pace %, battery)
-//   - Wide/overlay layout: paired lines with " · " separator
-//     (weather+conditions, day+date, steps+distance,
-//      expected+pace%, HR+calories, sunrise+sunset)
-//   - Pace label: "%d%% exp" (ratio of actual to expected, not %)
-//   - Expected steps now shown as raw count ("exp 1,234")
-//   - build_info_lines_stacked / build_info_lines_wide separated
+// v3.32: 5-layout shake cycle + info overlay system
+//
+//   LAYOUT_FULL    (0): full-screen time, no info
+//   LAYOUT_INFO_1  (1): time shrunk + 1 wide line above + 1 below
+//   LAYOUT_INFO_2  (2): time shrunk more + 2 wide lines above + 2 below
+//   LAYOUT_STACK_R (3): stacked digits right + narrow info left
+//   LAYOUT_STACK_L (4): stacked digits left + narrow info right
+//
+//   Wide lines: tight pairs use space/comma (no dot):
+//     "72F Cloudy"        weather as one thought
+//     "Sunday, May 17"    date as one thought
+//     dot only for looser pairs:
+//     "1,234 · 0.8 mi"   steps · distance
+//     "exp 890 · 143%"   expected · pace
+//     "72 bpm · 420 cal" hr · calories
+//     "6:02am · 8:14pm"  sunrise · sunset
+//
+//   Month names now mixed case (May not MAY)
+//   Time height in info layouts computed from available space
 // ============================================================
 
-#define LAYOUT_VECTOR    0
-#define LAYOUT_RIGHT     1
-#define LAYOUT_COUNT     2
-static int s_layout = LAYOUT_VECTOR;
+#define LAYOUT_FULL      0
+#define LAYOUT_INFO_1    1
+#define LAYOUT_INFO_2    2
+#define LAYOUT_STACK_R   3
+#define LAYOUT_STACK_L   4
+#define LAYOUT_COUNT     5
+static int s_layout = LAYOUT_FULL;
 
 #if defined(PBL_PLATFORM_EMERY)
   #define SCREEN_W      200
@@ -55,22 +68,27 @@ static int s_layout = LAYOUT_VECTOR;
 #define GLYPH_W         (UNIT * 4)
 #define H_MIN           (UNIT * 11)
 #define MARGIN_OUTER    (UNIT * 2)
-#define MARGIN_GAP      UNIT
+#define MARGIN_GAP      UNIT        // gap between time block and info lines
+#define INFO_LINES_MAX  8
 
 #define ANIM_STEP_PX    8
 #define ANIM_STEP_MS    16
 #define ANIM_SNAP_MS    120
 #define ANIM_OVERSHOOT  UNIT
 
-#define COUNTDOWN_HOLD_MS   400
-#define BLINK_REPS          2
-#define STEPS_AVG_MAX_MIN   120
-#define INFO_LINES_MAX      8
+#define COUNTDOWN_HOLD_MS  400
+#define BLINK_REPS         2
+#define STEPS_AVG_MAX_MIN  120
 
 typedef enum { CD_SHRINK, CD_HOLD_MIN, CD_EXPAND, CD_HOLD_MAX } CdSubPhase;
 
-static int prv_compute_target_h(int ub_h) {
-  int h = ub_h - 2 * MARGIN_OUTER;
+// Compute time height for a given layout and unobstructed height.
+// info_lines = total number of info lines shown (above + below).
+// Each side has info_lines/2 lines. Formula:
+//   reserved = 2*MARGIN_OUTER + info_lines*INFO_LINE_H + 2*MARGIN_GAP (one gap each side)
+static int prv_compute_target_h(int ub_h, int info_lines) {
+  int reserved = 2 * MARGIN_OUTER + info_lines * INFO_LINE_H + (info_lines > 0 ? 2 * MARGIN_GAP : 0);
+  int h = ub_h - reserved;
   if (h < H_MIN) h = H_MIN;
   return h;
 }
@@ -79,6 +97,13 @@ static int prv_compute_stacked_h(int ub_h) {
   int h = (ub_h - 2 * MARGIN_OUTER - MARGIN_GAP) / 2;
   if (h < H_MIN) h = H_MIN;
   return h;
+}
+
+// Info lines for current layout (0 for full/stacked, 2 for info_1, 4 for info_2)
+static int prv_layout_info_lines(void) {
+  if (s_layout == LAYOUT_INFO_1) return 2;
+  if (s_layout == LAYOUT_INFO_2) return 4;
+  return 0;
 }
 
 typedef enum { PHASE_COUNTDOWN, PHASE_BLINK, PHASE_DONE, PHASE_SQUISH, PHASE_SHAKE_CYCLE } Phase;
@@ -100,13 +125,12 @@ static int        s_battery_pct = 100;
 static bool       s_charging = false, s_bt_connected = true;
 static int        s_steps = 0, s_distance_m = 0, s_calories = 0, s_heart_rate = 0;
 static int        s_steps_expected = -1;
-static int        s_sunrise_min = -1, s_sunset_min = -1;  // minutes since midnight
+static int        s_sunrise_min = -1, s_sunset_min = -1;
 static char       s_weather_temp[8] = "", s_weather_desc[32] = "";
 
 #if defined(PBL_COLOR)
-// Step pace spectrum — ROYGBIV
-// Ratio of actual steps to expected-at-this-time-of-day (from 7-day history)
-// 50%=half expected, 100%=on pace, 200%=double expected
+// Step pace: ratio of actual to expected at this minute of day.
+// 50%=half pace, 100%=on pace, 200%=double expected. ROYGBIV spectrum.
 static GColor prv_pace_color(int steps_today, int steps_expected) {
   if (steps_expected <= 0 || steps_today <= 0) return GColorBlack;
   int pct = (steps_today * 100) / steps_expected;
@@ -118,7 +142,7 @@ static GColor prv_pace_color(int steps_today, int steps_expected) {
   if (pct <= 400)  return GColorBlue;
   if (pct <= 700)  return GColorIndigo;
   if (pct <= 1000) return GColorVividViolet;
-  return GColorBlack;  // 1001%+: easter egg
+  return GColorBlack;
 }
 
 static bool prv_bg_needs_dark_fg(GColor bg) {
@@ -129,8 +153,6 @@ static bool prv_bg_needs_dark_fg(GColor bg) {
 #if defined(PBL_HEALTH)
 static HealthMinuteData s_minute_buf[STEPS_AVG_MAX_MIN];
 
-// Expected cumulative steps at current minute of day, from 7-day minute-level history.
-// 100% = on pace with historical average. Fully on-watch, offline.
 static int prv_calc_steps_expected(void) {
   time_t now = time(NULL);
   struct tm *t = localtime(&now);
@@ -363,11 +385,13 @@ static void draw_stacked_vec(GContext *ctx, int h_tens, int h_ones,
 static const char *s_day_names_full[] = {
   "Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"
 };
-static const char *s_month_abbrs[] = {
-  "JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"
+// Mixed case months
+static const char *s_month_names[] = {
+  "Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"
 };
 
-// Distance formatted into buf (mi or km)
+// ---- Format helpers ----
+
 static void prv_fmt_distance(char *buf, int len) {
   if (strcmp(i18n_get_system_locale(), "en_US") == 0) {
     int mx = (s_distance_m * 10) / 1609;
@@ -378,119 +402,65 @@ static void prv_fmt_distance(char *buf, int len) {
   }
 }
 
-// Steps formatted with thousands comma
 static void prv_fmt_steps(char *buf, int len, int steps) {
   if (steps >= 1000) snprintf(buf, len, "%d,%03d", steps/1000, steps%1000);
   else snprintf(buf, len, "%d", steps);
 }
 
-// Time from minutes-since-midnight, formatted as "H:MMam"
 static void prv_fmt_time_min(char *buf, int len, int total_min) {
   if (total_min < 0) { snprintf(buf, len, "--"); return; }
   int h = (total_min / 60) % 12;
   if (!h) h = 12;
   int m = total_min % 60;
-  const char *ampm = (total_min < 720) ? "am" : "pm";
-  snprintf(buf, len, "%d:%02d%s", h, m, ampm);
+  snprintf(buf, len, "%d:%02d%s", h, m, total_min < 720 ? "am" : "pm");
 }
 
 // ---------------------------------------------------------------
-// STACKED INFO LINES (narrow column, one item per line)
-// Order: weather temp, day, date, steps, distance,
-//        expected steps, pace %, battery
-// ---------------------------------------------------------------
-static int build_info_lines_stacked(char lines[][32], int max_lines, struct tm *t) {
-  int n = 0;
-
-  // Weather temp (short)
-  if (n < max_lines && s_weather_temp[0])
-    snprintf(lines[n++], 32, "%s", s_weather_temp);
-
-  // Day name
-  if (n < max_lines && t)
-    snprintf(lines[n++], 32, "%s", s_day_names_full[t->tm_wday]);
-
-  // Date
-  if (n < max_lines && t)
-    snprintf(lines[n++], 32, "%s %d", s_month_abbrs[t->tm_mon], t->tm_mday);
-
-#if defined(PBL_HEALTH)
-  // Steps
-  if (n < max_lines) {
-    char sbuf[16]; prv_fmt_steps(sbuf, sizeof(sbuf), s_steps);
-    snprintf(lines[n++], 32, "%s steps", sbuf);
-  }
-
-  // Distance
-  if (n < max_lines && s_distance_m > 0) {
-    prv_fmt_distance(lines[n++], 32);
-  }
-
-  // Expected steps (raw count)
-  if (n < max_lines && s_steps_expected > 0) {
-    char ebuf[16]; prv_fmt_steps(ebuf, sizeof(ebuf), s_steps_expected);
-    snprintf(lines[n++], 32, "exp %s", ebuf);
-  }
-
-  // Pace % (ratio of actual to expected; 100% = on pace)
-  if (n < max_lines && s_steps_expected > 0) {
-    int pct = (s_steps * 100) / s_steps_expected;
-    snprintf(lines[n++], 32, "%d%% exp", pct);
-  }
-#endif
-
-  // Battery
-  if (n < max_lines)
-    snprintf(lines[n++], 32, "bat %d%%%s", s_battery_pct, s_charging ? " +" : "");
-
-  return n;
-}
-
-// ---------------------------------------------------------------
-// WIDE INFO LINES (full width, paired items with " · " separator)
-// Each line pairs two related fields.
+// WIDE INFO LINES — shown above/below time in INFO_1 / INFO_2
+// Tight pairs: space/comma (no dot). Looser pairs: " · ".
+// Lines are listed in priority order; caller requests how many.
 // ---------------------------------------------------------------
 static int build_info_lines_wide(char lines[][32], int max_lines, struct tm *t) {
   int n = 0;
 
-  // Weather: temp · conditions
+  // "Sunday, May 17" — day+date as one unit (comma, no dot)
+  if (n < max_lines && t)
+    snprintf(lines[n++], 32, "%s, %s %d",
+             s_day_names_full[t->tm_wday], s_month_names[t->tm_mon], t->tm_mday);
+
+  // "72F Cloudy" — weather as one unit (space, no dot)
   if (n < max_lines && s_weather_temp[0]) {
     if (s_weather_desc[0])
-      snprintf(lines[n++], 32, "%s · %s", s_weather_temp, s_weather_desc);
+      snprintf(lines[n++], 32, "%s %s", s_weather_temp, s_weather_desc);
     else
       snprintf(lines[n++], 32, "%s", s_weather_temp);
   }
 
-  // Day · Date
-  if (n < max_lines && t)
-    snprintf(lines[n++], 32, "%s · %s %d",
-             s_day_names_full[t->tm_wday], s_month_abbrs[t->tm_mon], t->tm_mday);
-
 #if defined(PBL_HEALTH)
-  // Steps · Distance
+  // "1,234 · 0.8 mi" — steps · distance (dot)
   if (n < max_lines) {
     char sbuf[16]; prv_fmt_steps(sbuf, sizeof(sbuf), s_steps);
     if (s_distance_m > 0) {
       char dbuf[16]; prv_fmt_distance(dbuf, sizeof(dbuf));
-      snprintf(lines[n++], 32, "%s · %s", sbuf, dbuf);
+      snprintf(lines[n++], 32, "%s \xc2\xb7 %s", sbuf, dbuf);
     } else {
       snprintf(lines[n++], 32, "%s steps", sbuf);
     }
   }
 
-  // Expected steps · Pace %
+  // "exp 890 · 143%" — expected count · pace ratio (dot)
   if (n < max_lines && s_steps_expected > 0) {
     char ebuf[16]; prv_fmt_steps(ebuf, sizeof(ebuf), s_steps_expected);
     int pct = (s_steps * 100) / s_steps_expected;
-    snprintf(lines[n++], 32, "exp %s · %d%%", ebuf, pct);
+    snprintf(lines[n++], 32, "exp %s \xc2\xb7 %d%%", ebuf, pct);
   }
 
-  // Heart rate · Calories
+  // "72 bpm · 420 cal" — HR · calories (dot)
   if (n < max_lines) {
     bool has_hr  = s_bt_connected && s_heart_rate > 0;
     bool has_cal = s_calories > 0;
     if (has_hr && has_cal)
-      snprintf(lines[n++], 32, "%d bpm · %d cal", s_heart_rate, s_calories);
+      snprintf(lines[n++], 32, "%d bpm \xc2\xb7 %d cal", s_heart_rate, s_calories);
     else if (has_hr)
       snprintf(lines[n++], 32, "%d bpm", s_heart_rate);
     else if (has_cal)
@@ -500,15 +470,47 @@ static int build_info_lines_wide(char lines[][32], int max_lines, struct tm *t) 
   }
 #endif
 
-  // Sunrise · Sunset
+  // "6:02am · 8:14pm" — sunrise · sunset (dot)
   if (n < max_lines && (s_sunrise_min >= 0 || s_sunset_min >= 0)) {
     char rise[12], set[12];
     prv_fmt_time_min(rise, sizeof(rise), s_sunrise_min);
     prv_fmt_time_min(set,  sizeof(set),  s_sunset_min);
-    snprintf(lines[n++], 32, "%s · %s", rise, set);
+    snprintf(lines[n++], 32, "%s \xc2\xb7 %s", rise, set);
   }
 
-  // Battery (last)
+  return n;
+}
+
+// ---------------------------------------------------------------
+// STACKED INFO LINES — narrow column, one field per line
+// ---------------------------------------------------------------
+static int build_info_lines_stacked(char lines[][32], int max_lines, struct tm *t) {
+  int n = 0;
+
+  if (n < max_lines && s_weather_temp[0])
+    snprintf(lines[n++], 32, "%s", s_weather_temp);
+  if (n < max_lines && t)
+    snprintf(lines[n++], 32, "%s", s_day_names_full[t->tm_wday]);
+  if (n < max_lines && t)
+    snprintf(lines[n++], 32, "%s %d", s_month_names[t->tm_mon], t->tm_mday);
+
+#if defined(PBL_HEALTH)
+  if (n < max_lines) {
+    char sbuf[16]; prv_fmt_steps(sbuf, sizeof(sbuf), s_steps);
+    snprintf(lines[n++], 32, "%s steps", sbuf);
+  }
+  if (n < max_lines && s_distance_m > 0)
+    prv_fmt_distance(lines[n++], 32);
+  if (n < max_lines && s_steps_expected > 0) {
+    char ebuf[16]; prv_fmt_steps(ebuf, sizeof(ebuf), s_steps_expected);
+    snprintf(lines[n++], 32, "exp %s", ebuf);
+  }
+  if (n < max_lines && s_steps_expected > 0) {
+    int pct = (s_steps * 100) / s_steps_expected;
+    snprintf(lines[n++], 32, "%d%% exp", pct);
+  }
+#endif
+
   if (n < max_lines)
     snprintf(lines[n++], 32, "bat %d%%%s", s_battery_pct, s_charging ? " +" : "");
 
@@ -517,13 +519,15 @@ static int build_info_lines_wide(char lines[][32], int max_lines, struct tm *t) 
 
 static GFont prv_info_font(void) { return fonts_get_system_font(INFO_FONT_KEY); }
 
-static void draw_info_block(GContext *ctx, int x, int y, int width, char lines[][32], int n) {
-  if (!n) return;
+static void draw_info_row(GContext *ctx, char lines[][32], int n,
+                          int y, int width, int x_offset) {
+  // Draw n lines centered horizontally, starting at y
   GFont font = prv_info_font();
   graphics_context_set_text_color(ctx, s_fg);
   for (int i = 0; i < n; i++) {
-    GRect r = GRect(x, y + i * INFO_LINE_H, width, INFO_FONT_H + 4);
-    graphics_draw_text(ctx, lines[i], font, r, GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+    GRect r = GRect(x_offset, y + i * INFO_LINE_H, width, INFO_FONT_H + 4);
+    graphics_draw_text(ctx, lines[i], font, r,
+                       GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
   }
 }
 
@@ -534,14 +538,13 @@ static void draw_info_column(GContext *ctx, GRect area, struct tm *t) {
   int n = build_info_lines_stacked(lines, max, t);
   if (!n) return;
   int start_y = area.origin.y + (area.size.h - n * INFO_LINE_H) / 2;
-  draw_info_block(ctx, area.origin.x, start_y, area.size.w, lines, n);
+  draw_info_row(ctx, lines, n, start_y, area.size.w, area.origin.x);
 }
 
 static void draw_layer(Layer *layer, GContext *ctx) {
   Layer *root  = window_get_root_layer(s_window);
   GRect ub     = layer_get_unobstructed_bounds(root);
   int ub_top   = ub.origin.y, ub_h = ub.size.h;
-  int center_y = ub_top + ub_h / 2;
 
 #if defined(PBL_COLOR) && defined(PBL_HEALTH)
   GColor bg = prv_pace_color(s_steps, s_steps_expected);
@@ -557,33 +560,86 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   int h_tens = hr/10, h_ones = hr%10, m_tens = s_minute/10, m_ones = s_minute%10;
 
   if (s_phase == PHASE_COUNTDOWN) {
+    int cy = ub_top + ub_h / 2;
     draw_digits_vec(ctx, s_countdown_digit, s_countdown_digit,
-                    s_countdown_digit, s_countdown_digit, s_h, center_y);
+                    s_countdown_digit, s_countdown_digit, s_h, cy);
     return;
   }
 
   time_t now_t = time(NULL);
   struct tm *tm = (s_phase == PHASE_DONE) ? localtime(&now_t) : NULL;
 
-  if (s_layout == LAYOUT_VECTOR) {
-    draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, s_h, center_y);
+  if (s_layout == LAYOUT_FULL) {
+    int cy = ub_top + ub_h / 2;
+    draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy);
+
+  } else if (s_layout == LAYOUT_INFO_1 || s_layout == LAYOUT_INFO_2) {
+    // Info overlay: lines_per_side lines above and below the time block
+    int lines_per_side = (s_layout == LAYOUT_INFO_1) ? 1 : 2;
+    int lines_total    = lines_per_side * 2;
+
+    // Time sits in the center of the available space after reserving info rows
+    int info_block_h = lines_per_side * INFO_LINE_H;
+    int time_top     = ub_top + MARGIN_OUTER + info_block_h + MARGIN_GAP;
+    int time_bot     = ub_top + ub_h - MARGIN_OUTER - info_block_h - MARGIN_GAP;
+    int time_cy      = (time_top + time_bot) / 2;
+
+    draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy);
+
+    if (tm) {
+      // Build all wide lines; take first lines_per_side for above, next for below
+      char all_lines[INFO_LINES_MAX][32];
+      int total = build_info_lines_wide(all_lines, lines_total, tm);
+
+      // Lines above time (first lines_per_side)
+      int above_count = lines_per_side < total ? lines_per_side : total;
+      int above_y = ub_top + MARGIN_OUTER;
+      draw_info_row(ctx, all_lines, above_count, above_y, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
+
+      // Lines below time (next lines_per_side)
+      int below_start = lines_per_side;
+      int below_count = (total - below_start);
+      if (below_count > lines_per_side) below_count = lines_per_side;
+      if (below_count > 0) {
+        int below_y = time_bot + MARGIN_GAP;
+        draw_info_row(ctx, all_lines + below_start, below_count,
+                      below_y, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
+      }
+    }
+
   } else {
-    // LAYOUT_RIGHT: stacked digits right, narrow info column left
+    // LAYOUT_STACK_R or LAYOUT_STACK_L
     int dh    = prv_compute_stacked_h(ub_h);
     int h_cy  = ub_top + MARGIN_OUTER + dh / 2;
     int m_cy  = ub_top + ub_h - MARGIN_OUTER - dh / 2;
-    int ones_x = SCREEN_W - SIDE_MARGIN - SLOT_W;
-    int tens_x = ones_x - SLOT_W;
-    int info_x = SIDE_MARGIN;
-    int info_w = tens_x - SIDE_MARGIN * 2;
+    int tens_x, ones_x, info_x, info_w;
+
+    if (s_layout == LAYOUT_STACK_R) {
+      // Digits on the right
+      ones_x = SCREEN_W - SIDE_MARGIN - SLOT_W;
+      tens_x = ones_x - SLOT_W;
+      info_x = SIDE_MARGIN;
+      info_w = tens_x - SIDE_MARGIN * 2;
+    } else {
+      // Digits on the left (LAYOUT_STACK_L)
+      tens_x = SIDE_MARGIN;
+      ones_x = SIDE_MARGIN + SLOT_W;
+      info_x = ones_x + SLOT_W + SIDE_MARGIN;
+      info_w = SCREEN_W - info_x - SIDE_MARGIN;
+    }
+
     draw_stacked_vec(ctx, h_tens, h_ones, m_tens, m_ones, dh,
                      tens_x, ones_x, h_cy, m_cy);
-    if (tm && info_w > 20) draw_info_column(ctx, GRect(info_x, ub_top, info_w, ub_h), tm);
+    if (tm && info_w > 20)
+      draw_info_column(ctx, GRect(info_x, ub_top, info_w, ub_h), tm);
   }
 }
 
 static void timer_cb(void *data);
-static void schedule(uint32_t ms) { if (s_timer) app_timer_cancel(s_timer); s_timer = app_timer_register(ms, timer_cb, NULL); }
+static void schedule(uint32_t ms) {
+  if (s_timer) app_timer_cancel(s_timer);
+  s_timer = app_timer_register(ms, timer_cb, NULL);
+}
 
 static void prv_start_blink(void) {
   s_h = s_target_h; s_going_down = true; s_anim_rep = 0; s_overshot = false;
@@ -671,7 +727,9 @@ static void timer_cb(void *data) {
       break;
 
     case PHASE_SHAKE_CYCLE: {
-      static const int SHAKE_OFFSETS_PX[] = { 0, -UNIT, -(UNIT*2), -(UNIT*3), -(UNIT*2), -UNIT, 0, UNIT, 0 };
+      static const int SHAKE_OFFSETS_PX[] = {
+        0, -UNIT, -(UNIT*2), -(UNIT*3), -(UNIT*2), -UNIT, 0, UNIT, 0
+      };
       #define SHAKE_LEN 9
       if (++s_anim_step < SHAKE_LEN) {
         int h = s_target_h + SHAKE_OFFSETS_PX[s_anim_step];
@@ -679,7 +737,8 @@ static void timer_cb(void *data) {
         s_h = h; layer_mark_dirty(s_canvas_layer);
         schedule(s_anim_step == SHAKE_LEN - 2 ? ANIM_SNAP_MS : ANIM_STEP_MS);
       } else if (++s_anim_rep < 2) {
-        s_anim_step = 0; s_h = s_target_h; layer_mark_dirty(s_canvas_layer); schedule(ANIM_STEP_MS);
+        s_anim_step = 0; s_h = s_target_h;
+        layer_mark_dirty(s_canvas_layer); schedule(ANIM_STEP_MS);
       } else {
         s_phase = PHASE_DONE; s_h = s_target_h; layer_mark_dirty(s_canvas_layer);
       }
@@ -693,12 +752,15 @@ static void timer_cb(void *data) {
 static void prv_update_targets(void) {
   Layer *root = window_get_root_layer(s_window);
   GRect ub = layer_get_unobstructed_bounds(root);
-  if (s_layout == LAYOUT_VECTOR) s_target_h = prv_compute_target_h(ub.size.h);
+  int ub_h = ub.size.h;
+  // Compute target_h based on current layout's info line count
+  int info_lines = prv_layout_info_lines();
+  s_target_h = prv_compute_target_h(ub_h, info_lines);
 }
 
 static void unobstructed_change(AnimationProgress progress, void *ctx) {
   prv_update_targets();
-  if (s_phase == PHASE_DONE && s_layout == LAYOUT_VECTOR) {
+  if (s_phase == PHASE_DONE) {
     s_h = s_target_h; layer_mark_dirty(s_canvas_layer);
   }
 }
@@ -708,17 +770,24 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   if (s_phase != PHASE_DONE) return;
   s_layout = (s_layout + 1) % LAYOUT_COUNT;
   prv_update_targets();
-  if (s_layout == LAYOUT_VECTOR) {
+  // Shake animation only on LAYOUT_FULL (the most dramatic transition)
+  if (s_layout == LAYOUT_FULL) {
     s_phase = PHASE_SHAKE_CYCLE; s_anim_step = 0; s_anim_rep = 0;
     s_h = s_target_h; schedule(ANIM_STEP_MS);
   } else {
-    s_h = s_target_h;
+    // For other layouts, animate to new target_h smoothly
+    s_phase = PHASE_SQUISH; s_going_down = true; s_overshot = false;
+    schedule(ANIM_STEP_MS);
   }
   layer_mark_dirty(s_canvas_layer);
 }
 
 static void tick_handler(struct tm *t, TimeUnits units) {
-  if (s_phase == PHASE_DONE && s_layout == LAYOUT_VECTOR) {
+  // Squish animates on FULL and INFO layouts (visible time digits)
+  bool anim_layout = (s_layout == LAYOUT_FULL ||
+                      s_layout == LAYOUT_INFO_1 ||
+                      s_layout == LAYOUT_INFO_2);
+  if (s_phase == PHASE_DONE && anim_layout) {
     s_pending_hour = t->tm_hour; s_pending_minute = t->tm_min;
     s_digit_pending = true; s_phase = PHASE_SQUISH;
     s_going_down = true; s_overshot = false; schedule(ANIM_STEP_MS);
@@ -750,16 +819,15 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
   t = dict_find(iter, MESSAGE_KEY_WeatherCode);
   if (t) {
     int c = (int)t->value->int32;
-    const char *d = "WEATHER";
-    if (c == 0) d = "CLEAR";
-    else if (c <= 3) d = "CLOUDY";
-    else if (c <= 49) d = "FOG";
-    else if (c <= 69) d = "RAIN";
-    else if (c <= 79) d = "SNOW";
-    else if (c <= 99) d = "STORM";
+    const char *d = "weather";
+    if (c == 0)       d = "clear";
+    else if (c <= 3)  d = "cloudy";
+    else if (c <= 49) d = "fog";
+    else if (c <= 69) d = "rain";
+    else if (c <= 79) d = "snow";
+    else if (c <= 99) d = "storm";
     snprintf(s_weather_desc, sizeof(s_weather_desc), "%s", d);
   }
-  // Sunrise/sunset: expect minutes-since-midnight
   t = dict_find(iter, MESSAGE_KEY_SunriseMin);
   if (t) s_sunrise_min = (int)t->value->int32;
   t = dict_find(iter, MESSAGE_KEY_SunsetMin);
@@ -773,7 +841,7 @@ static void window_load(Window *window) {
   layer_set_update_proc(s_canvas_layer, draw_layer);
   layer_add_child(root, s_canvas_layer);
   GRect ub = layer_get_unobstructed_bounds(root);
-  s_target_h = prv_compute_target_h(ub.size.h);
+  s_target_h = prv_compute_target_h(ub.size.h, 0);
   s_h = s_target_h;
   UnobstructedAreaHandlers ua = {.change = unobstructed_change};
   unobstructed_area_service_subscribe(ua, NULL);
