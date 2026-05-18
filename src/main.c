@@ -1,14 +1,10 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.35
-//
-// v3.35:
-//   1. Stacked info column spacing: 8 lines distributed evenly
-//      within 2u top/bottom margins. slot_h = available/n,
-//      text rect fills the slot — no fixed INFO_LINE_H gaps.
-//   2. Green background → dark fg (GColorBlack)
-//   3. Time draws last in stacked layouts (front layer)
+// TallBoy -- main.c  v3.35a
+// Hotfix: stacked info column top/bottom margin adjustment.
+// First line was ½u too high, last line 1.5u too low.
+// avail_top += HALF_UNIT, avail_h -= 2*UNIT total.
 // ============================================================
 
 #define LAYOUT_FULL      0
@@ -31,7 +27,7 @@ static int s_layout = LAYOUT_FULL;
   #define SIDE_MARGIN    12
   #define HALF_UNIT       4
   #define INFO_FONT_H    24
-  #define INFO_LINE_H    28  // used for wide/info overlay layouts only
+  #define INFO_LINE_H    28
   #define INFO_FONT_KEY  FONT_KEY_GOTHIC_24_BOLD
   #define UNIT            8
 #else
@@ -127,7 +123,6 @@ static GColor prv_pace_color(int steps_today, int steps_expected) {
   return GColorBlack;
 }
 
-// Yellow and green are light enough to need black fg
 static bool prv_bg_needs_dark_fg(GColor bg) {
   return gcolor_equal(bg, GColorYellow) || gcolor_equal(bg, GColorGreen);
 }
@@ -429,25 +424,21 @@ static void prv_fmt_bat_bt(char *buf, int len) {
 
 static int build_info_lines_wide(char lines[][32], int max_lines, struct tm *t) {
   int n = 0;
-
   if (n < max_lines && t)
     snprintf(lines[n++], 32, "%s, %s %d",
              s_day_names_full[t->tm_wday], s_month_names[t->tm_mon], t->tm_mday);
-
   if (n < max_lines && s_weather_temp[0]) {
     if (s_weather_desc[0])
       snprintf(lines[n++], 32, "%s & %s", s_weather_temp, s_weather_desc);
     else
       snprintf(lines[n++], 32, "%s", s_weather_temp);
   }
-
   if (n < max_lines && (s_sunrise_min >= 0 || s_sunset_min >= 0)) {
     char rise[12], set[12];
     prv_fmt_time_min(rise, sizeof(rise), s_sunrise_min);
     prv_fmt_time_min(set,  sizeof(set),  s_sunset_min);
     snprintf(lines[n++], 32, "%s" DOT "%s", rise, set);
   }
-
 #if defined(PBL_HEALTH)
   if (n < max_lines) {
     char sbuf[16]; prv_fmt_steps_long(sbuf, sizeof(sbuf), s_steps);
@@ -458,13 +449,11 @@ static int build_info_lines_wide(char lines[][32], int max_lines, struct tm *t) 
       snprintf(lines[n++], 32, "%s steps", sbuf);
     }
   }
-
   if (n < max_lines && s_steps_expected > 0) {
     char ebuf[16]; prv_fmt_steps_long(ebuf, sizeof(ebuf), s_steps_expected);
     int pct = (s_steps * 100) / s_steps_expected;
     snprintf(lines[n++], 32, "exp %s" DOT "%d%%", ebuf, pct);
   }
-
   if (n < max_lines) {
     bool has_hr  = s_bt_connected && s_heart_rate > 0;
     bool has_cal = s_calories > 0;
@@ -476,25 +465,21 @@ static int build_info_lines_wide(char lines[][32], int max_lines, struct tm *t) 
       snprintf(lines[n++], 32, "%d cal", s_calories);
   }
 #endif
-
   if (n < max_lines) {
     char bbuf[24]; prv_fmt_bat_bt(bbuf, sizeof(bbuf));
     snprintf(lines[n++], 32, "%s", bbuf);
   }
-
   return n;
 }
 
 static int build_info_lines_stacked(char lines[][32], int max_lines, struct tm *t) {
   int n = 0;
-
   if (n < max_lines && s_weather_temp[0])
     snprintf(lines[n++], 32, "%s", s_weather_temp);
   if (n < max_lines && t)
     snprintf(lines[n++], 32, "%s", s_day_names_full[t->tm_wday]);
   if (n < max_lines && t)
     snprintf(lines[n++], 32, "%s %d", s_month_names[t->tm_mon], t->tm_mday);
-
 #if defined(PBL_HEALTH)
   if (n < max_lines) {
     char sbuf[16]; prv_fmt_steps_short(sbuf, sizeof(sbuf), s_steps);
@@ -520,53 +505,47 @@ static int build_info_lines_stacked(char lines[][32], int max_lines, struct tm *
   if (n < max_lines && s_distance_m > 0)
     prv_fmt_distance(lines[n++], 32);
 #endif
-
   if (n < max_lines)
     prv_fmt_bat_bt(lines[n++], 32);
-
   return n;
 }
 
 static GFont prv_info_font(void) { return fonts_get_system_font(INFO_FONT_KEY); }
 
-// Draw a single text line centered in its slot rect.
-// slot_h is the full allocated height per line (available_h / n_lines).
-// Text renders from top of rect; Pebble font has ~2-3px internal top padding
-// which provides natural centering at these slot sizes.
 static void draw_info_line(GContext *ctx, const char *text, int x, int y,
                            int width, int slot_h) {
   GFont font = prv_info_font();
   graphics_context_set_text_color(ctx, s_fg);
-  GRect r = GRect(x, y, width, slot_h);
-  graphics_draw_text(ctx, text, font, r,
+  graphics_draw_text(ctx, text, font, GRect(x, y, width, slot_h),
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 }
 
-// Draw n stacked info lines evenly distributed within [area.origin.y + MARGIN_OUTER,
-// area.origin.y + area.size.h - MARGIN_OUTER]. slot_h = available / n.
+// Distribute n lines evenly within the column area.
+// Top margin: MARGIN_OUTER + HALF_UNIT (nudges first line down ½u)
+// Bottom margin: MARGIN_OUTER + UNIT + HALF_UNIT (pulls last line up 1.5u)
+// Both corrections compensate for Gothic 24 Bold's internal top padding
+// and the slight overshoot at the bottom of tight slots.
 static void draw_info_column(GContext *ctx, GRect area, struct tm *t) {
   char lines[INFO_LINES_MAX][32];
-  // Temporarily allow all lines — we'll clip to what fits after measuring slot_h
   int n = build_info_lines_stacked(lines, INFO_LINES_MAX, t);
   if (!n) return;
 
-  int avail_top  = area.origin.y + MARGIN_OUTER;
-  int avail_h    = area.size.h - 2 * MARGIN_OUTER;
-  int slot_h     = avail_h / n;
+  int avail_top = area.origin.y + MARGIN_OUTER + HALF_UNIT;
+  int avail_bot = area.origin.y + area.size.h - MARGIN_OUTER - UNIT - HALF_UNIT;
+  int avail_h   = avail_bot - avail_top;
+  int slot_h    = avail_h / n;
 
-  // If slot is too small for the font, reduce line count until it fits
+  // Safety: if slots are too small for the font, drop lines until they fit
   while (n > 1 && slot_h < INFO_FONT_H) {
     n--;
     slot_h = avail_h / n;
   }
 
-  for (int i = 0; i < n; i++) {
-    int y = avail_top + i * slot_h;
-    draw_info_line(ctx, lines[i], area.origin.x, y, area.size.w, slot_h);
-  }
+  for (int i = 0; i < n; i++)
+    draw_info_line(ctx, lines[i], area.origin.x, avail_top + i * slot_h,
+                   area.size.w, slot_h);
 }
 
-// Draw n wide info lines with fixed INFO_LINE_H spacing, starting at y.
 static void draw_info_row(GContext *ctx, char lines[][32], int n,
                           int y, int width, int x_offset) {
   GFont font = prv_info_font();
@@ -592,22 +571,18 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   s_fg = GColorWhite;
 #endif
 
-  // 1. Entire canvas black — corners outside border stay black
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 
 #if defined(PBL_PLATFORM_EMERY)
-  // 2. Bg color as rounded rect — clips corners to content area
   graphics_context_set_fill_color(ctx, bg);
   graphics_fill_rect(ctx, bounds, UNIT * 2, GCornersAll);
-  // 3. Border
   draw_border(ctx);
 #else
   graphics_context_set_fill_color(ctx, bg);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 #endif
 
-  // 4. Content
   int hr = s_hour % 12; if (!hr) hr = 12;
   int h_tens = hr/10, h_ones = hr%10, m_tens = s_minute/10, m_ones = s_minute%10;
 
@@ -627,12 +602,10 @@ static void draw_layer(Layer *layer, GContext *ctx) {
 
   } else if (s_layout == LAYOUT_INFO_1 || s_layout == LAYOUT_INFO_2) {
     int lines_per_side = (s_layout == LAYOUT_INFO_1) ? 1 : 2;
-
     int time_top = ub_top + UNIT + lines_per_side * (INFO_LINE_H + UNIT);
     int time_bot = ub_top + ub_h - UNIT - lines_per_side * (INFO_LINE_H + UNIT);
     int time_cy  = (time_top + time_bot) / 2;
 
-    // Info lines drawn first, time on top
     if (tm) {
       int lines_total = lines_per_side * 2;
       char all_lines[INFO_LINES_MAX][32];
@@ -643,7 +616,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
         int y = ub_top + UNIT + i * (INFO_LINE_H + UNIT);
         draw_info_row(ctx, all_lines + i, 1, y, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
       }
-
       int below_start = lines_per_side;
       int below_count = total - below_start;
       if (below_count > lines_per_side) below_count = lines_per_side;
@@ -653,12 +625,9 @@ static void draw_layer(Layer *layer, GContext *ctx) {
                       y, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
       }
     }
-
-    // Time draws last = front layer
     draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy);
 
   } else {
-    // Stacked layouts: info column first, digits on top
     int dh    = prv_compute_stacked_h(ub_h);
     int h_cy  = ub_top + MARGIN_OUTER + dh / 2;
     int m_cy  = ub_top + ub_h - MARGIN_OUTER - dh / 2;
@@ -676,11 +645,8 @@ static void draw_layer(Layer *layer, GContext *ctx) {
       info_w = SCREEN_W - info_x - SIDE_MARGIN;
     }
 
-    // Info drawn first
     if (tm && info_w > 20)
       draw_info_column(ctx, GRect(info_x, ub_top, info_w, ub_h), tm);
-
-    // Digits drawn last = front layer
     draw_stacked_vec(ctx, h_tens, h_ones, m_tens, m_ones, dh,
                      tens_x, ones_x, h_cy, m_cy);
   }
