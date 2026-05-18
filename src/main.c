@@ -1,33 +1,30 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.37
+// TallBoy -- main.c  v3.38
 //
-// Font metrics locked in from device measurement (emery, Gothic 24 Bold):
-//   INFO_LINE_H    = 28px  full cell height
-//   INFO_GLYPH_H   = 18px  actual rendered glyph height
-//   INFO_TOP_PAD   = 10px  internal top padding (dead space above glyph)
-//   INFO_BOT_PAD   =  0px  internal bottom padding
-//   INFO_LINE_STEP = 26px  rect-top-to-rect-top for 1u (8px) glyph gap
-//                        = INFO_GLYPH_H + UNIT = 18 + 8
+// v3.38:
+//   1. Border radius 4u (was 2u). draw_border uses BORDER_RADIUS=4u
+//      for arc centers and bar insets. bg rounded-rect fill matches.
+//      Corner arcs now 4u outer / 3u inner (1u stroke preserved).
 //
-// Positioning rule: to place a glyph visually at pixel Y,
-//   set rect.origin.y = Y - INFO_TOP_PAD
+//   2. Margin split: MARGIN_CANVAS vs MARGIN_DIGIT
+//      MARGIN_CANVAS = 1u — screen edge to canvas boundary (border lives here)
+//      MARGIN_DIGIT  = 1u — canvas boundary to digit content
+//      Previously MARGIN_OUTER = 2u served both roles, causing 2u gap
+//      between quick-look bar and digits. Now prv_compute_target_h uses
+//      only MARGIN_DIGIT, so quick-look gives correct 1u gap.
+//      Info line placement still anchors to MARGIN_CANVAS + MARGIN_DIGIT = 2u
+//      from screen edge, so info layout is unchanged.
 //
-// Wide mode:
-//   Top block first glyph at ub_top + MARGIN_OUTER (2u from edge)
-//     → rect starts at ub_top + MARGIN_OUTER - INFO_TOP_PAD
-//   Bottom block last glyph bottom at ub_bot - MARGIN_OUTER
-//     → last rect bottom = ub_bot - MARGIN_OUTER (no bot padding)
-//     → last rect top = ub_bot - MARGIN_OUTER - INFO_LINE_H
-//   Lines spaced INFO_LINE_STEP apart (1u between glyphs)
+//   3. Descender constant documented: INFO_DESCENDER = 4px (measured).
+//      INFO_BOT_ADJUST = 2 available for future bottom-margin tweaking.
+//      Not applied yet.
 //
-// Stacked mode:
-//   First glyph at ub_top + MARGIN_OUTER
-//     → first rect top = MARGIN_OUTER - INFO_TOP_PAD = UNIT - 2px
-//   n lines distributed: slot_h = avail_h / n
-//   avail_h = (ub_bot - MARGIN_OUTER) - (ub_top + MARGIN_OUTER - INFO_TOP_PAD)
-//
+// Font metrics (emery, Gothic 24 Bold, measured):
+//   INFO_LINE_H   = 28px  INFO_GLYPH_H = 18px  INFO_TOP_PAD = 10px
+//   INFO_LINE_STEP = 26px (= INFO_GLYPH_H + UNIT = 18 + 8)
+//   INFO_DESCENDER = 4px  (g, y, comma tails below baseline)
 // ============================================================
 
 // #define DEBUG_TEXT_BOXES   // uncomment to show magenta rects behind text
@@ -41,45 +38,59 @@
 static int s_layout = LAYOUT_FULL;
 
 #if defined(PBL_PLATFORM_EMERY)
-  #define SCREEN_W        200
-  #define SCREEN_H        228
-  #define SLOT_W           40
-  #define COLON_SLOT_X     80
-  #define SLOT_H_TENS      12
-  #define SLOT_H_ONES      52
-  #define SLOT_M_TENS     108
-  #define SLOT_M_ONES     148
-  #define SIDE_MARGIN      12
-  #define HALF_UNIT         4
-  #define INFO_LINE_H      28   // full font cell height
-  #define INFO_GLYPH_H     18   // actual glyph height (measured on device)
-  #define INFO_TOP_PAD     10   // dead space above glyph inside cell
-  #define INFO_LINE_STEP   26   // rect-to-rect step for 1u glyph gap (GLYPH_H + UNIT)
+  #define SCREEN_W          200
+  #define SCREEN_H          228
+  #define SLOT_W             40
+  #define COLON_SLOT_X       80
+  #define SLOT_H_TENS        12
+  #define SLOT_H_ONES        52
+  #define SLOT_M_TENS       108
+  #define SLOT_M_ONES       148
+  #define SIDE_MARGIN        12
+  #define HALF_UNIT           4
+  #define INFO_LINE_H        28
+  #define INFO_GLYPH_H       18
+  #define INFO_TOP_PAD       10
+  #define INFO_DESCENDER      4   // px below baseline (g, y, comma) — not yet used
+  #define INFO_BOT_ADJUST     2   // potential bottom-margin reduction — not yet applied
+  #define INFO_LINE_STEP     26   // = INFO_GLYPH_H + UNIT
   #define INFO_FONT_KEY    FONT_KEY_GOTHIC_24_BOLD
-  #define UNIT              8
+  #define UNIT                8
+  #define BORDER_RADIUS      32   // 4u — corner arc outer radius for border and bg fill
 #else
-  #define SCREEN_W        144
-  #define SCREEN_H        168
-  #define SLOT_W           30
-  #define COLON_SLOT_X     57
-  #define SLOT_H_TENS       6
-  #define SLOT_H_ONES      36
-  #define SLOT_M_TENS      78
-  #define SLOT_M_ONES     108
-  #define SIDE_MARGIN       6
-  #define HALF_UNIT         3
-  #define INFO_LINE_H      20   // estimated — not yet measured on flint
-  #define INFO_GLYPH_H     14
-  #define INFO_TOP_PAD      6
-  #define INFO_LINE_STEP   20
+  #define SCREEN_W          144
+  #define SCREEN_H          168
+  #define SLOT_W             30
+  #define COLON_SLOT_X       57
+  #define SLOT_H_TENS         6
+  #define SLOT_H_ONES        36
+  #define SLOT_M_TENS        78
+  #define SLOT_M_ONES       108
+  #define SIDE_MARGIN         6
+  #define HALF_UNIT           3
+  #define INFO_LINE_H        20
+  #define INFO_GLYPH_H       14
+  #define INFO_TOP_PAD        6
+  #define INFO_DESCENDER      3
+  #define INFO_BOT_ADJUST     1
+  #define INFO_LINE_STEP     20
   #define INFO_FONT_KEY    FONT_KEY_GOTHIC_18_BOLD
-  #define UNIT              6
+  #define UNIT                6
+  #define BORDER_RADIUS      (UNIT * 2)  // non-emery has no border but keep consistent
 #endif
+
+// MARGIN_CANVAS: screen edge → canvas boundary (border stroke, rounded bg)
+// MARGIN_DIGIT:  canvas boundary → digit/content area
+// Together they equal the old MARGIN_OUTER = 2u.
+// Splitting allows quick-look bar to give 1u gap (MARGIN_DIGIT only)
+// while the border still occupies its own 1u outer zone (MARGIN_CANVAS).
+#define MARGIN_CANVAS   UNIT
+#define MARGIN_DIGIT    UNIT
+#define MARGIN_OUTER    (MARGIN_CANVAS + MARGIN_DIGIT)  // convenience alias = 2u
 
 #define HALF_SLOT_PAD   (UNIT / 2)
 #define GLYPH_W         (UNIT * 4)
 #define H_MIN           (UNIT * 11)
-#define MARGIN_OUTER    (UNIT * 2)
 #define INFO_LINES_MAX  8
 
 #define ANIM_STEP_PX    8
@@ -95,20 +106,20 @@ static int s_layout = LAYOUT_FULL;
 
 typedef enum { CD_SHRINK, CD_HOLD_MIN, CD_EXPAND, CD_HOLD_MAX } CdSubPhase;
 
-// Height of a block of n wide info lines with 1u gaps between them
 static int prv_info_block_h(int n) {
   if (n <= 0) return 0;
   return INFO_GLYPH_H + (n - 1) * INFO_LINE_STEP;
 }
 
-// Time height for info overlay: glyphs at MARGIN_OUTER from each edge,
-// with UNIT gap between last glyph and time block on each side.
-static int prv_compute_target_h_info(int ub_h, int above, int below) {
+// Time height for full-screen: use MARGIN_DIGIT only (not MARGIN_CANVAS)
+// so quick-look bar gives 1u gap between bar and digits.
+static int prv_compute_target_h(int ub_h, int lines_total) {
+  if (lines_total == 0) return ub_h - 2 * MARGIN_DIGIT;
+  // Info overlay: info line glyphs at full MARGIN_OUTER from edges
+  int above = lines_total / 2, below = lines_total / 2;
   int reserved = 0;
-  // above: from MARGIN_OUTER at top to bottom of last glyph + UNIT gap
   if (above > 0) reserved += MARGIN_OUTER + prv_info_block_h(above) + UNIT;
   else           reserved += MARGIN_OUTER;
-  // below: UNIT gap + block + MARGIN_OUTER at bottom
   if (below > 0) reserved += UNIT + prv_info_block_h(below) + MARGIN_OUTER;
   else           reserved += MARGIN_OUTER;
   int h = ub_h - reserved;
@@ -116,14 +127,9 @@ static int prv_compute_target_h_info(int ub_h, int above, int below) {
   return h;
 }
 
-static int prv_compute_target_h(int ub_h, int lines_total) {
-  if (lines_total == 0) return ub_h - 2 * MARGIN_OUTER;
-  int half = lines_total / 2;
-  return prv_compute_target_h_info(ub_h, half, half);
-}
-
 static int prv_compute_stacked_h(int ub_h) {
-  int h = (ub_h - 2 * MARGIN_OUTER - UNIT) / 2;
+  // Stacked digit height uses MARGIN_DIGIT for digit padding
+  int h = (ub_h - 2 * MARGIN_DIGIT - UNIT) / 2;
   if (h < H_MIN) h = H_MIN;
   return h;
 }
@@ -232,9 +238,12 @@ static void fill_arc(GContext *ctx, int cx, int cy, int ro, int ri, int a0, int 
 }
 
 #if defined(PBL_PLATFORM_EMERY)
+// Border: 1u stroke rounded rect. BORDER_RADIUS = 4u outer, 3u inner.
+// Bars span screen edge to edge minus BORDER_RADIUS at each end.
+// Arc centers at (BORDER_RADIUS, BORDER_RADIUS) etc.
 static void draw_border(GContext *ctx) {
-  const int ro = UNIT * 2;
-  const int ri = UNIT * 1;
+  const int ro = BORDER_RADIUS;       // 32px = 4u
+  const int ri = BORDER_RADIUS - UNIT; // 24px = 3u
   const int sw = UNIT;
   graphics_context_set_fill_color(ctx, s_fg);
   graphics_fill_rect(ctx, GRect(ro, 0,             SCREEN_W - ro*2, sw), 0, GCornerNone);
@@ -559,13 +568,9 @@ static int build_info_lines_stacked(char lines[][32], int max_lines, struct tm *
 
 static GFont prv_info_font(void) { return fonts_get_system_font(INFO_FONT_KEY); }
 
-// Draw text with optional debug rect. glyph_y is where the TOP OF THE GLYPH
-// should visually appear. Rect is shifted up by INFO_TOP_PAD to compensate
-// for the font's internal top padding.
 static void draw_text_at_glyph_y(GContext *ctx, const char *text,
                                  int x, int glyph_y, int width) {
-  int rect_y = glyph_y - INFO_TOP_PAD;
-  GRect r = GRect(x, rect_y, width, INFO_LINE_H);
+  GRect r = GRect(x, glyph_y - INFO_TOP_PAD, width, INFO_LINE_H);
 #if defined(DEBUG_TEXT_BOXES)
   graphics_context_set_fill_color(ctx, GColorMagenta);
   graphics_fill_rect(ctx, r, 0, GCornerNone);
@@ -575,28 +580,21 @@ static void draw_text_at_glyph_y(GContext *ctx, const char *text,
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 }
 
-// Stacked: n lines distributed evenly.
-// First glyph at ub_top + MARGIN_OUTER, last glyph bottom at ub_bot - MARGIN_OUTER.
-// avail_h spans from first glyph top to last glyph bottom.
-// slot_h = avail_h / n — text rect shifted up by INFO_TOP_PAD within each slot.
 static void draw_info_column(GContext *ctx, GRect area, struct tm *t) {
   char lines[INFO_LINES_MAX][32];
   int n = build_info_lines_stacked(lines, INFO_LINES_MAX, t);
   if (!n) return;
 
-  // glyph extents within the column
   int glyph_top = area.origin.y + MARGIN_OUTER;
   int glyph_bot = area.origin.y + area.size.h - MARGIN_OUTER;
   int avail_h   = glyph_bot - glyph_top;
   int slot_h    = avail_h / n;
 
-  for (int i = 0; i < n; i++) {
-    int glyph_y = glyph_top + i * slot_h;
-    draw_text_at_glyph_y(ctx, lines[i], area.origin.x, glyph_y, area.size.w);
-  }
+  for (int i = 0; i < n; i++)
+    draw_text_at_glyph_y(ctx, lines[i], area.origin.x,
+                         glyph_top + i * slot_h, area.size.w);
 }
 
-// Wide top block: first glyph at glyph_y_start, subsequent lines at +INFO_LINE_STEP
 static void draw_info_block_down(GContext *ctx, char lines[][32], int n,
                                  int glyph_y_start, int width, int x) {
   for (int i = 0; i < n; i++)
@@ -604,12 +602,9 @@ static void draw_info_block_down(GContext *ctx, char lines[][32], int n,
                          glyph_y_start + i * INFO_LINE_STEP, width);
 }
 
-// Wide bottom block: last glyph BOTTOM at glyph_bot, lines go upward
 static void draw_info_block_up(GContext *ctx, char lines[][32],
                                int first_idx, int n,
                                int glyph_bot, int width, int x) {
-  // last line: glyph_y = glyph_bot - INFO_GLYPH_H
-  // prev line: glyph_y -= INFO_LINE_STEP, etc.
   for (int i = n - 1; i >= 0; i--) {
     int glyph_y = glyph_bot - (n - i) * INFO_GLYPH_H - (n - 1 - i) * UNIT;
     draw_text_at_glyph_y(ctx, lines[first_idx + i], x, glyph_y, width);
@@ -631,12 +626,15 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   s_fg = GColorWhite;
 #endif
 
+  // 1. Full canvas black — corners outside border always black
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 
 #if defined(PBL_PLATFORM_EMERY)
+  // 2. Bg color as rounded rect with BORDER_RADIUS (4u) — clips corners
   graphics_context_set_fill_color(ctx, bg);
-  graphics_fill_rect(ctx, bounds, UNIT * 2, GCornersAll);
+  graphics_fill_rect(ctx, bounds, BORDER_RADIUS, GCornersAll);
+  // 3. Border (drawn before content so content is on top)
   draw_border(ctx);
 #else
   graphics_context_set_fill_color(ctx, bg);
@@ -662,14 +660,11 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int lines_above = (s_layout == LAYOUT_INFO_1) ? 1 : 2;
     int lines_below = lines_above;
 
-    // glyph positions anchored to MARGIN_OUTER from each screen edge
     int above_glyph_start = ub_top + MARGIN_OUTER;
     int above_glyph_end   = above_glyph_start + prv_info_block_h(lines_above);
-
     int below_glyph_end   = ub_bot - MARGIN_OUTER;
     int below_glyph_start = below_glyph_end - prv_info_block_h(lines_below);
 
-    // time occupies the space between the two glyph blocks + UNIT gap each side
     int time_top = above_glyph_end + UNIT;
     int time_bot = below_glyph_start - UNIT;
     int time_cy  = (time_top + time_bot) / 2;
@@ -681,7 +676,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
       int above_n = lines_above < total ? lines_above : total;
       draw_info_block_down(ctx, all_lines, above_n,
                            above_glyph_start, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
-
       int below_n = total - lines_above;
       if (below_n > lines_below) below_n = lines_below;
       if (below_n > 0)
@@ -693,8 +687,10 @@ static void draw_layer(Layer *layer, GContext *ctx) {
 
   } else {
     int dh    = prv_compute_stacked_h(ub_h);
-    int h_cy  = ub_top + MARGIN_OUTER + dh / 2;
-    int m_cy  = ub_top + ub_h - MARGIN_OUTER - dh / 2;
+    // Stacked digit centers use MARGIN_DIGIT (not MARGIN_OUTER)
+    // so quick-look bar gives 1u gap instead of 2u
+    int h_cy  = ub_top + MARGIN_DIGIT + dh / 2;
+    int m_cy  = ub_top + ub_h - MARGIN_DIGIT - dh / 2;
     int tens_x, ones_x, info_x, info_w;
 
     if (s_layout == LAYOUT_STACK_R) {
