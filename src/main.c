@@ -1,29 +1,14 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.36
-//
-// v3.36: spacing corrections
-//
-// STACKED info column:
-//   avail_top = MARGIN_OUTER + HALF_UNIT  (was +HALF_UNIT+UNIT)
-//   avail_bot = area.h - MARGIN_OUTER - HALF_UNIT (was -UNIT-HALF_UNIT)
-//   → net correction: ~½u top, ~½u bottom (halved from v3.35a)
-//   Safety fallback removed — 8 lines always render regardless of slot_h
-//
-// WIDE info overlay:
-//   Lines anchor from the edges inward; time fills the middle.
-//   Layout now accepts asymmetric above/below counts.
-//   Above block: starts at ub_top + UNIT, lines spaced INFO_LINE_H + UNIT apart
-//   Below block: ends at ub_bot - UNIT, lines spaced upward from there
-//   Time: fills exactly what's left between the two blocks
-//   prv_compute_target_h updated to use above+below independently
-//
-// LAYOUTS still:
-//   LAYOUT_INFO_1: 1 above + 1 below (symmetric, as before)
-//   LAYOUT_INFO_2: 2 above + 2 below (symmetric, as before)
-//   Future: arbitrary above/below counts when config page lands
+// TallBoy -- main.c  v3.36a
+// Debug: DEBUG_TEXT_BOXES fills every text rect with GColorMagenta
+// before drawing text. Same GRect used for both fill and draw_text
+// — shows exactly how much internal font padding exists around glyphs.
+// Comment out #define to disable.
 // ============================================================
+
+#define DEBUG_TEXT_BOXES
 
 #define LAYOUT_FULL      0
 #define LAYOUT_INFO_1    1
@@ -84,24 +69,15 @@ static int s_layout = LAYOUT_FULL;
 
 typedef enum { CD_SHRINK, CD_HOLD_MIN, CD_EXPAND, CD_HOLD_MAX } CdSubPhase;
 
-// Height of an info block of n lines:
-// n lines of INFO_LINE_H with UNIT gaps between them, plus UNIT outer gap on each side
-// block_h(n) = n * INFO_LINE_H + (n-1) * UNIT
-// total reserved for above+below: UNIT + block_h(above) + UNIT + UNIT + block_h(below) + UNIT
-//           = 4*UNIT + above*INFO_LINE_H + (above-1)*UNIT + below*INFO_LINE_H + (below-1)*UNIT
-//           = (above+below)*(INFO_LINE_H+UNIT) + 2*UNIT  [simplified]
 static int prv_info_block_h(int n) {
   if (n <= 0) return 0;
   return n * INFO_LINE_H + (n - 1) * UNIT;
 }
 
-// Compute time height for info overlay layouts.
-// above, below = number of info lines on each side.
-// Time is bounded by: UNIT outer + block + UNIT gap on each side.
 static int prv_compute_target_h_info(int ub_h, int above, int below) {
   int reserved = 0;
   if (above > 0) reserved += UNIT + prv_info_block_h(above) + UNIT;
-  else           reserved += UNIT;  // just the outer gap
+  else           reserved += UNIT;
   if (below > 0) reserved += UNIT + prv_info_block_h(below) + UNIT;
   else           reserved += UNIT;
   int h = ub_h - reserved;
@@ -552,17 +528,21 @@ static int build_info_lines_stacked(char lines[][32], int max_lines, struct tm *
 
 static GFont prv_info_font(void) { return fonts_get_system_font(INFO_FONT_KEY); }
 
-static void draw_info_line(GContext *ctx, const char *text, int x, int y,
-                           int width, int slot_h) {
+// Core text drawing primitive — always use this instead of graphics_draw_text directly.
+// When DEBUG_TEXT_BOXES is defined, fills rect with magenta first so you can see
+// exactly what space the engine allocates, including internal font padding.
+// The fill and draw_text use the SAME GRect — no approximation.
+static void draw_text_box(GContext *ctx, const char *text, GRect r) {
+#if defined(DEBUG_TEXT_BOXES)
+  graphics_context_set_fill_color(ctx, GColorMagenta);
+  graphics_fill_rect(ctx, r, 0, GCornerNone);
+#endif
   graphics_context_set_text_color(ctx, s_fg);
-  graphics_draw_text(ctx, text, prv_info_font(), GRect(x, y, width, slot_h),
+  graphics_draw_text(ctx, text, prv_info_font(), r,
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 }
 
-// Stacked info column: distribute n lines evenly within 2u margins.
-// Corrected top: MARGIN_OUTER + HALF_UNIT (font has internal top padding)
-// Corrected bot: area.h - MARGIN_OUTER - HALF_UNIT (slight overshoot correction)
-// No safety fallback — all n lines always render.
+// Stacked: n lines distributed evenly between MARGIN_OUTER + HALF_UNIT margins
 static void draw_info_column(GContext *ctx, GRect area, struct tm *t) {
   char lines[INFO_LINES_MAX][32];
   int n = build_info_lines_stacked(lines, INFO_LINES_MAX, t);
@@ -574,37 +554,26 @@ static void draw_info_column(GContext *ctx, GRect area, struct tm *t) {
   int slot_h    = avail_h / n;
 
   for (int i = 0; i < n; i++)
-    draw_info_line(ctx, lines[i], area.origin.x, avail_top + i * slot_h,
-                   area.size.w, slot_h);
+    draw_text_box(ctx, lines[i],
+                  GRect(area.origin.x, avail_top + i * slot_h, area.size.w, slot_h));
 }
 
-// Draw a block of n wide info lines anchored from a y origin, downward.
-// Lines spaced INFO_LINE_H apart with UNIT gap between them.
+// Wide: lines anchored from top edge downward
 static void draw_info_block_down(GContext *ctx, char lines[][32], int n,
                                  int y_start, int width, int x) {
-  GFont font = prv_info_font();
-  graphics_context_set_text_color(ctx, s_fg);
-  for (int i = 0; i < n; i++) {
-    int y = y_start + i * (INFO_LINE_H + UNIT);
-    graphics_draw_text(ctx, lines[i], font, GRect(x, y, width, INFO_LINE_H),
-                       GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
-  }
+  for (int i = 0; i < n; i++)
+    draw_text_box(ctx, lines[i],
+                  GRect(x, y_start + i * (INFO_LINE_H + UNIT), width, INFO_LINE_H));
 }
 
-// Draw a block of n wide info lines anchored from a y bottom, upward.
-static void draw_info_block_up(GContext *ctx, char lines[][32], int n_total,
+// Wide: lines anchored from bottom edge upward
+static void draw_info_block_up(GContext *ctx, char lines[][32],
                                int first_idx, int n,
                                int y_bot, int width, int x) {
-  if (n <= 0) return;
-  GFont font = prv_info_font();
-  graphics_context_set_text_color(ctx, s_fg);
-  // y_bot is the bottom edge of the last line
-  // last line top = y_bot - INFO_LINE_H
-  for (int i = n - 1; i >= 0; i--) {
-    int y = y_bot - (n - i) * INFO_LINE_H - (n - 1 - i) * UNIT;
-    graphics_draw_text(ctx, lines[first_idx + i], font, GRect(x, y, width, INFO_LINE_H),
-                       GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
-  }
+  for (int i = n - 1; i >= 0; i--)
+    draw_text_box(ctx, lines[first_idx + i],
+                  GRect(x, y_bot - (n - i) * INFO_LINE_H - (n - 1 - i) * UNIT,
+                        width, INFO_LINE_H));
 }
 
 static void draw_layer(Layer *layer, GContext *ctx) {
@@ -638,9 +607,8 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   int h_tens = hr/10, h_ones = hr%10, m_tens = s_minute/10, m_ones = s_minute%10;
 
   if (s_phase == PHASE_COUNTDOWN) {
-    int cy = ub_top + ub_h / 2;
     draw_digits_vec(ctx, s_countdown_digit, s_countdown_digit,
-                    s_countdown_digit, s_countdown_digit, s_h, cy);
+                    s_countdown_digit, s_countdown_digit, s_h, ub_top + ub_h / 2);
     return;
   }
 
@@ -652,43 +620,33 @@ static void draw_layer(Layer *layer, GContext *ctx) {
 
   } else if (s_layout == LAYOUT_INFO_1 || s_layout == LAYOUT_INFO_2) {
     int lines_above = (s_layout == LAYOUT_INFO_1) ? 1 : 2;
-    int lines_below = lines_above;  // symmetric for now; asymmetric ready for config
+    int lines_below = lines_above;
 
-    // Above block: anchored to ub_top + UNIT, grows downward
     int above_start = ub_top + UNIT;
-    int above_end   = above_start + prv_info_block_h(lines_above);  // bottom of last above line
-
-    // Below block: anchored to ub_bot - UNIT, grows upward
+    int above_end   = above_start + prv_info_block_h(lines_above);
     int below_end   = ub_bot - UNIT;
-    int below_start = below_end - prv_info_block_h(lines_below);    // top of first below line
+    int below_start = below_end - prv_info_block_h(lines_below);
+    int time_top    = above_end + UNIT;
+    int time_bot    = below_start - UNIT;
+    int time_cy     = (time_top + time_bot) / 2;
 
-    // Time fills exactly between above_end + UNIT gap and below_start - UNIT gap
-    int time_top = above_end + UNIT;
-    int time_bot = below_start - UNIT;
-    int time_cy  = (time_top + time_bot) / 2;
-
-    // Build all info lines
     char all_lines[INFO_LINES_MAX][32];
     int total = tm ? build_info_lines_wide(all_lines, lines_above + lines_below, tm) : 0;
 
-    // Draw info lines before digits (digits on top)
     if (total > 0) {
       int above_n = lines_above < total ? lines_above : total;
       draw_info_block_down(ctx, all_lines, above_n,
                            above_start, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
-
       int below_n = total - lines_above;
       if (below_n > lines_below) below_n = lines_below;
       if (below_n > 0)
-        draw_info_block_up(ctx, all_lines, total, lines_above, below_n,
+        draw_info_block_up(ctx, all_lines, lines_above, below_n,
                            below_end, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
     }
 
-    // Time draws last = front layer
     draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy);
 
   } else {
-    // Stacked layouts
     int dh    = prv_compute_stacked_h(ub_h);
     int h_cy  = ub_top + MARGIN_OUTER + dh / 2;
     int m_cy  = ub_top + ub_h - MARGIN_OUTER - dh / 2;
