@@ -1,14 +1,36 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.36a
-// Debug: DEBUG_TEXT_BOXES fills every text rect with GColorMagenta
-// before drawing text. Same GRect used for both fill and draw_text
-// — shows exactly how much internal font padding exists around glyphs.
-// Comment out #define to disable.
+// TallBoy -- main.c  v3.37
+//
+// Font metrics locked in from device measurement (emery, Gothic 24 Bold):
+//   INFO_LINE_H    = 28px  full cell height
+//   INFO_GLYPH_H   = 18px  actual rendered glyph height
+//   INFO_TOP_PAD   = 10px  internal top padding (dead space above glyph)
+//   INFO_BOT_PAD   =  0px  internal bottom padding
+//   INFO_LINE_STEP = 26px  rect-top-to-rect-top for 1u (8px) glyph gap
+//                        = INFO_GLYPH_H + UNIT = 18 + 8
+//
+// Positioning rule: to place a glyph visually at pixel Y,
+//   set rect.origin.y = Y - INFO_TOP_PAD
+//
+// Wide mode:
+//   Top block first glyph at ub_top + MARGIN_OUTER (2u from edge)
+//     → rect starts at ub_top + MARGIN_OUTER - INFO_TOP_PAD
+//   Bottom block last glyph bottom at ub_bot - MARGIN_OUTER
+//     → last rect bottom = ub_bot - MARGIN_OUTER (no bot padding)
+//     → last rect top = ub_bot - MARGIN_OUTER - INFO_LINE_H
+//   Lines spaced INFO_LINE_STEP apart (1u between glyphs)
+//
+// Stacked mode:
+//   First glyph at ub_top + MARGIN_OUTER
+//     → first rect top = MARGIN_OUTER - INFO_TOP_PAD = UNIT - 2px
+//   n lines distributed: slot_h = avail_h / n
+//   avail_h = (ub_bot - MARGIN_OUTER) - (ub_top + MARGIN_OUTER - INFO_TOP_PAD)
+//
 // ============================================================
 
-#define DEBUG_TEXT_BOXES
+// #define DEBUG_TEXT_BOXES   // uncomment to show magenta rects behind text
 
 #define LAYOUT_FULL      0
 #define LAYOUT_INFO_1    1
@@ -19,35 +41,39 @@
 static int s_layout = LAYOUT_FULL;
 
 #if defined(PBL_PLATFORM_EMERY)
-  #define SCREEN_W      200
-  #define SCREEN_H      228
-  #define SLOT_W         40
-  #define COLON_SLOT_X   80
-  #define SLOT_H_TENS    12
-  #define SLOT_H_ONES    52
-  #define SLOT_M_TENS   108
-  #define SLOT_M_ONES   148
-  #define SIDE_MARGIN    12
-  #define HALF_UNIT       4
-  #define INFO_FONT_H    24
-  #define INFO_LINE_H    28
-  #define INFO_FONT_KEY  FONT_KEY_GOTHIC_24_BOLD
-  #define UNIT            8
+  #define SCREEN_W        200
+  #define SCREEN_H        228
+  #define SLOT_W           40
+  #define COLON_SLOT_X     80
+  #define SLOT_H_TENS      12
+  #define SLOT_H_ONES      52
+  #define SLOT_M_TENS     108
+  #define SLOT_M_ONES     148
+  #define SIDE_MARGIN      12
+  #define HALF_UNIT         4
+  #define INFO_LINE_H      28   // full font cell height
+  #define INFO_GLYPH_H     18   // actual glyph height (measured on device)
+  #define INFO_TOP_PAD     10   // dead space above glyph inside cell
+  #define INFO_LINE_STEP   26   // rect-to-rect step for 1u glyph gap (GLYPH_H + UNIT)
+  #define INFO_FONT_KEY    FONT_KEY_GOTHIC_24_BOLD
+  #define UNIT              8
 #else
-  #define SCREEN_W      144
-  #define SCREEN_H      168
-  #define SLOT_W         30
-  #define COLON_SLOT_X   57
-  #define SLOT_H_TENS     6
-  #define SLOT_H_ONES    36
-  #define SLOT_M_TENS    78
-  #define SLOT_M_ONES   108
-  #define SIDE_MARGIN     6
-  #define HALF_UNIT       3
-  #define INFO_FONT_H    18
-  #define INFO_LINE_H    20
-  #define INFO_FONT_KEY  FONT_KEY_GOTHIC_18_BOLD
-  #define UNIT            6
+  #define SCREEN_W        144
+  #define SCREEN_H        168
+  #define SLOT_W           30
+  #define COLON_SLOT_X     57
+  #define SLOT_H_TENS       6
+  #define SLOT_H_ONES      36
+  #define SLOT_M_TENS      78
+  #define SLOT_M_ONES     108
+  #define SIDE_MARGIN       6
+  #define HALF_UNIT         3
+  #define INFO_LINE_H      20   // estimated — not yet measured on flint
+  #define INFO_GLYPH_H     14
+  #define INFO_TOP_PAD      6
+  #define INFO_LINE_STEP   20
+  #define INFO_FONT_KEY    FONT_KEY_GOTHIC_18_BOLD
+  #define UNIT              6
 #endif
 
 #define HALF_SLOT_PAD   (UNIT / 2)
@@ -69,17 +95,22 @@ static int s_layout = LAYOUT_FULL;
 
 typedef enum { CD_SHRINK, CD_HOLD_MIN, CD_EXPAND, CD_HOLD_MAX } CdSubPhase;
 
+// Height of a block of n wide info lines with 1u gaps between them
 static int prv_info_block_h(int n) {
   if (n <= 0) return 0;
-  return n * INFO_LINE_H + (n - 1) * UNIT;
+  return INFO_GLYPH_H + (n - 1) * INFO_LINE_STEP;
 }
 
+// Time height for info overlay: glyphs at MARGIN_OUTER from each edge,
+// with UNIT gap between last glyph and time block on each side.
 static int prv_compute_target_h_info(int ub_h, int above, int below) {
   int reserved = 0;
-  if (above > 0) reserved += UNIT + prv_info_block_h(above) + UNIT;
-  else           reserved += UNIT;
-  if (below > 0) reserved += UNIT + prv_info_block_h(below) + UNIT;
-  else           reserved += UNIT;
+  // above: from MARGIN_OUTER at top to bottom of last glyph + UNIT gap
+  if (above > 0) reserved += MARGIN_OUTER + prv_info_block_h(above) + UNIT;
+  else           reserved += MARGIN_OUTER;
+  // below: UNIT gap + block + MARGIN_OUTER at bottom
+  if (below > 0) reserved += UNIT + prv_info_block_h(below) + MARGIN_OUTER;
+  else           reserved += MARGIN_OUTER;
   int h = ub_h - reserved;
   if (h < H_MIN) h = H_MIN;
   return h;
@@ -528,11 +559,13 @@ static int build_info_lines_stacked(char lines[][32], int max_lines, struct tm *
 
 static GFont prv_info_font(void) { return fonts_get_system_font(INFO_FONT_KEY); }
 
-// Core text drawing primitive — always use this instead of graphics_draw_text directly.
-// When DEBUG_TEXT_BOXES is defined, fills rect with magenta first so you can see
-// exactly what space the engine allocates, including internal font padding.
-// The fill and draw_text use the SAME GRect — no approximation.
-static void draw_text_box(GContext *ctx, const char *text, GRect r) {
+// Draw text with optional debug rect. glyph_y is where the TOP OF THE GLYPH
+// should visually appear. Rect is shifted up by INFO_TOP_PAD to compensate
+// for the font's internal top padding.
+static void draw_text_at_glyph_y(GContext *ctx, const char *text,
+                                 int x, int glyph_y, int width) {
+  int rect_y = glyph_y - INFO_TOP_PAD;
+  GRect r = GRect(x, rect_y, width, INFO_LINE_H);
 #if defined(DEBUG_TEXT_BOXES)
   graphics_context_set_fill_color(ctx, GColorMagenta);
   graphics_fill_rect(ctx, r, 0, GCornerNone);
@@ -542,38 +575,45 @@ static void draw_text_box(GContext *ctx, const char *text, GRect r) {
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 }
 
-// Stacked: n lines distributed evenly between MARGIN_OUTER + HALF_UNIT margins
+// Stacked: n lines distributed evenly.
+// First glyph at ub_top + MARGIN_OUTER, last glyph bottom at ub_bot - MARGIN_OUTER.
+// avail_h spans from first glyph top to last glyph bottom.
+// slot_h = avail_h / n — text rect shifted up by INFO_TOP_PAD within each slot.
 static void draw_info_column(GContext *ctx, GRect area, struct tm *t) {
   char lines[INFO_LINES_MAX][32];
   int n = build_info_lines_stacked(lines, INFO_LINES_MAX, t);
   if (!n) return;
 
-  int avail_top = area.origin.y + MARGIN_OUTER + HALF_UNIT;
-  int avail_bot = area.origin.y + area.size.h - MARGIN_OUTER - HALF_UNIT;
-  int avail_h   = avail_bot - avail_top;
+  // glyph extents within the column
+  int glyph_top = area.origin.y + MARGIN_OUTER;
+  int glyph_bot = area.origin.y + area.size.h - MARGIN_OUTER;
+  int avail_h   = glyph_bot - glyph_top;
   int slot_h    = avail_h / n;
 
-  for (int i = 0; i < n; i++)
-    draw_text_box(ctx, lines[i],
-                  GRect(area.origin.x, avail_top + i * slot_h, area.size.w, slot_h));
+  for (int i = 0; i < n; i++) {
+    int glyph_y = glyph_top + i * slot_h;
+    draw_text_at_glyph_y(ctx, lines[i], area.origin.x, glyph_y, area.size.w);
+  }
 }
 
-// Wide: lines anchored from top edge downward
+// Wide top block: first glyph at glyph_y_start, subsequent lines at +INFO_LINE_STEP
 static void draw_info_block_down(GContext *ctx, char lines[][32], int n,
-                                 int y_start, int width, int x) {
+                                 int glyph_y_start, int width, int x) {
   for (int i = 0; i < n; i++)
-    draw_text_box(ctx, lines[i],
-                  GRect(x, y_start + i * (INFO_LINE_H + UNIT), width, INFO_LINE_H));
+    draw_text_at_glyph_y(ctx, lines[i], x,
+                         glyph_y_start + i * INFO_LINE_STEP, width);
 }
 
-// Wide: lines anchored from bottom edge upward
+// Wide bottom block: last glyph BOTTOM at glyph_bot, lines go upward
 static void draw_info_block_up(GContext *ctx, char lines[][32],
                                int first_idx, int n,
-                               int y_bot, int width, int x) {
-  for (int i = n - 1; i >= 0; i--)
-    draw_text_box(ctx, lines[first_idx + i],
-                  GRect(x, y_bot - (n - i) * INFO_LINE_H - (n - 1 - i) * UNIT,
-                        width, INFO_LINE_H));
+                               int glyph_bot, int width, int x) {
+  // last line: glyph_y = glyph_bot - INFO_GLYPH_H
+  // prev line: glyph_y -= INFO_LINE_STEP, etc.
+  for (int i = n - 1; i >= 0; i--) {
+    int glyph_y = glyph_bot - (n - i) * INFO_GLYPH_H - (n - 1 - i) * UNIT;
+    draw_text_at_glyph_y(ctx, lines[first_idx + i], x, glyph_y, width);
+  }
 }
 
 static void draw_layer(Layer *layer, GContext *ctx) {
@@ -622,13 +662,17 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int lines_above = (s_layout == LAYOUT_INFO_1) ? 1 : 2;
     int lines_below = lines_above;
 
-    int above_start = ub_top + UNIT;
-    int above_end   = above_start + prv_info_block_h(lines_above);
-    int below_end   = ub_bot - UNIT;
-    int below_start = below_end - prv_info_block_h(lines_below);
-    int time_top    = above_end + UNIT;
-    int time_bot    = below_start - UNIT;
-    int time_cy     = (time_top + time_bot) / 2;
+    // glyph positions anchored to MARGIN_OUTER from each screen edge
+    int above_glyph_start = ub_top + MARGIN_OUTER;
+    int above_glyph_end   = above_glyph_start + prv_info_block_h(lines_above);
+
+    int below_glyph_end   = ub_bot - MARGIN_OUTER;
+    int below_glyph_start = below_glyph_end - prv_info_block_h(lines_below);
+
+    // time occupies the space between the two glyph blocks + UNIT gap each side
+    int time_top = above_glyph_end + UNIT;
+    int time_bot = below_glyph_start - UNIT;
+    int time_cy  = (time_top + time_bot) / 2;
 
     char all_lines[INFO_LINES_MAX][32];
     int total = tm ? build_info_lines_wide(all_lines, lines_above + lines_below, tm) : 0;
@@ -636,12 +680,13 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     if (total > 0) {
       int above_n = lines_above < total ? lines_above : total;
       draw_info_block_down(ctx, all_lines, above_n,
-                           above_start, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
+                           above_glyph_start, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
+
       int below_n = total - lines_above;
       if (below_n > lines_below) below_n = lines_below;
       if (below_n > 0)
         draw_info_block_up(ctx, all_lines, lines_above, below_n,
-                           below_end, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
+                           below_glyph_end, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
     }
 
     draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy);
