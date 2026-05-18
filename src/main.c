@@ -1,14 +1,14 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.34c
-// Hotfix: border corner arc angles corrected.
-// Pebble angles: 0=12-o'clock, clockwise.
-// Arc fills the pie slice pointing INTO the corner:
-//   top-left     (ro,ro):     270→360
-//   top-right    (W-ro,ro):   360→450 (= 0→90)
-//   bottom-left  (ro,H-ro):   180→270
-//   bottom-right (W-ro,H-ro):  90→180
+// TallBoy -- main.c  v3.35
+//
+// v3.35:
+//   1. Stacked info column spacing: 8 lines distributed evenly
+//      within 2u top/bottom margins. slot_h = available/n,
+//      text rect fills the slot — no fixed INFO_LINE_H gaps.
+//   2. Green background → dark fg (GColorBlack)
+//   3. Time draws last in stacked layouts (front layer)
 // ============================================================
 
 #define LAYOUT_FULL      0
@@ -31,7 +31,7 @@ static int s_layout = LAYOUT_FULL;
   #define SIDE_MARGIN    12
   #define HALF_UNIT       4
   #define INFO_FONT_H    24
-  #define INFO_LINE_H    28
+  #define INFO_LINE_H    28  // used for wide/info overlay layouts only
   #define INFO_FONT_KEY  FONT_KEY_GOTHIC_24_BOLD
   #define UNIT            8
 #else
@@ -127,8 +127,9 @@ static GColor prv_pace_color(int steps_today, int steps_expected) {
   return GColorBlack;
 }
 
+// Yellow and green are light enough to need black fg
 static bool prv_bg_needs_dark_fg(GColor bg) {
-  return gcolor_equal(bg, GColorYellow);
+  return gcolor_equal(bg, GColorYellow) || gcolor_equal(bg, GColorGreen);
 }
 #endif
 
@@ -192,25 +193,15 @@ static void draw_border(GContext *ctx) {
   const int ro = UNIT * 2;
   const int ri = UNIT * 1;
   const int sw = UNIT;
-
   graphics_context_set_fill_color(ctx, s_fg);
-
-  // Bars flush to screen edges, shortened by ro at each end
-  graphics_fill_rect(ctx, GRect(ro, 0,             SCREEN_W - ro*2, sw), 0, GCornerNone); // top
-  graphics_fill_rect(ctx, GRect(ro, SCREEN_H - sw, SCREEN_W - ro*2, sw), 0, GCornerNone); // bottom
-  graphics_fill_rect(ctx, GRect(0,  ro,             sw, SCREEN_H - ro*2), 0, GCornerNone); // left
-  graphics_fill_rect(ctx, GRect(SCREEN_W - sw, ro,  sw, SCREEN_H - ro*2), 0, GCornerNone); // right
-
-  // Quarter-circle corners — arc fills the pie slice pointing INTO the corner.
-  // Pebble angles: 0=12-o'clock, clockwise.
-  //   top-left     center (ro,ro):         sweep 270→360 (left→top quadrant)
-  //   top-right    center (W-ro,ro):       sweep 360→450 (top→right quadrant)
-  //   bottom-left  center (ro,H-ro):       sweep 180→270 (bottom→left quadrant)
-  //   bottom-right center (W-ro,H-ro):     sweep  90→180 (right→bottom quadrant)
-  fill_arc(ctx, ro,          ro,          ro, ri, 270, 360); // top-left
-  fill_arc(ctx, SCREEN_W-ro, ro,          ro, ri, 360, 450); // top-right
-  fill_arc(ctx, ro,          SCREEN_H-ro, ro, ri, 180, 270); // bottom-left
-  fill_arc(ctx, SCREEN_W-ro, SCREEN_H-ro, ro, ri,  90, 180); // bottom-right
+  graphics_fill_rect(ctx, GRect(ro, 0,             SCREEN_W - ro*2, sw), 0, GCornerNone);
+  graphics_fill_rect(ctx, GRect(ro, SCREEN_H - sw, SCREEN_W - ro*2, sw), 0, GCornerNone);
+  graphics_fill_rect(ctx, GRect(0,  ro,             sw, SCREEN_H - ro*2), 0, GCornerNone);
+  graphics_fill_rect(ctx, GRect(SCREEN_W - sw, ro,  sw, SCREEN_H - ro*2), 0, GCornerNone);
+  fill_arc(ctx, ro,          ro,          ro, ri, 270, 360);
+  fill_arc(ctx, SCREEN_W-ro, ro,          ro, ri, 360, 450);
+  fill_arc(ctx, ro,          SCREEN_H-ro, ro, ri, 180, 270);
+  fill_arc(ctx, SCREEN_W-ro, SCREEN_H-ro, ro, ri,  90, 180);
 }
 #endif
 
@@ -538,6 +529,44 @@ static int build_info_lines_stacked(char lines[][32], int max_lines, struct tm *
 
 static GFont prv_info_font(void) { return fonts_get_system_font(INFO_FONT_KEY); }
 
+// Draw a single text line centered in its slot rect.
+// slot_h is the full allocated height per line (available_h / n_lines).
+// Text renders from top of rect; Pebble font has ~2-3px internal top padding
+// which provides natural centering at these slot sizes.
+static void draw_info_line(GContext *ctx, const char *text, int x, int y,
+                           int width, int slot_h) {
+  GFont font = prv_info_font();
+  graphics_context_set_text_color(ctx, s_fg);
+  GRect r = GRect(x, y, width, slot_h);
+  graphics_draw_text(ctx, text, font, r,
+                     GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+}
+
+// Draw n stacked info lines evenly distributed within [area.origin.y + MARGIN_OUTER,
+// area.origin.y + area.size.h - MARGIN_OUTER]. slot_h = available / n.
+static void draw_info_column(GContext *ctx, GRect area, struct tm *t) {
+  char lines[INFO_LINES_MAX][32];
+  // Temporarily allow all lines — we'll clip to what fits after measuring slot_h
+  int n = build_info_lines_stacked(lines, INFO_LINES_MAX, t);
+  if (!n) return;
+
+  int avail_top  = area.origin.y + MARGIN_OUTER;
+  int avail_h    = area.size.h - 2 * MARGIN_OUTER;
+  int slot_h     = avail_h / n;
+
+  // If slot is too small for the font, reduce line count until it fits
+  while (n > 1 && slot_h < INFO_FONT_H) {
+    n--;
+    slot_h = avail_h / n;
+  }
+
+  for (int i = 0; i < n; i++) {
+    int y = avail_top + i * slot_h;
+    draw_info_line(ctx, lines[i], area.origin.x, y, area.size.w, slot_h);
+  }
+}
+
+// Draw n wide info lines with fixed INFO_LINE_H spacing, starting at y.
 static void draw_info_row(GContext *ctx, char lines[][32], int n,
                           int y, int width, int x_offset) {
   GFont font = prv_info_font();
@@ -547,16 +576,6 @@ static void draw_info_row(GContext *ctx, char lines[][32], int n,
     graphics_draw_text(ctx, lines[i], font, r,
                        GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
   }
-}
-
-static void draw_info_column(GContext *ctx, GRect area, struct tm *t) {
-  char lines[INFO_LINES_MAX][32];
-  int max = area.size.h / INFO_LINE_H;
-  if (max > INFO_LINES_MAX) max = INFO_LINES_MAX;
-  int n = build_info_lines_stacked(lines, max, t);
-  if (!n) return;
-  int start_y = area.origin.y + (area.size.h - n * INFO_LINE_H) / 2;
-  draw_info_row(ctx, lines, n, start_y, area.size.w, area.origin.x);
 }
 
 static void draw_layer(Layer *layer, GContext *ctx) {
@@ -573,16 +592,15 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   s_fg = GColorWhite;
 #endif
 
-  // 1. Entire canvas black — corners outside border stay black always
+  // 1. Entire canvas black — corners outside border stay black
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 
 #if defined(PBL_PLATFORM_EMERY)
-  // 2. Bg color as rounded rect — clips corners, bg only fills content area
+  // 2. Bg color as rounded rect — clips corners to content area
   graphics_context_set_fill_color(ctx, bg);
   graphics_fill_rect(ctx, bounds, UNIT * 2, GCornersAll);
-
-  // 3. Border reinforces the edge
+  // 3. Border
   draw_border(ctx);
 #else
   graphics_context_set_fill_color(ctx, bg);
@@ -614,8 +632,7 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int time_bot = ub_top + ub_h - UNIT - lines_per_side * (INFO_LINE_H + UNIT);
     int time_cy  = (time_top + time_bot) / 2;
 
-    draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy);
-
+    // Info lines drawn first, time on top
     if (tm) {
       int lines_total = lines_per_side * 2;
       char all_lines[INFO_LINES_MAX][32];
@@ -637,7 +654,11 @@ static void draw_layer(Layer *layer, GContext *ctx) {
       }
     }
 
+    // Time draws last = front layer
+    draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy);
+
   } else {
+    // Stacked layouts: info column first, digits on top
     int dh    = prv_compute_stacked_h(ub_h);
     int h_cy  = ub_top + MARGIN_OUTER + dh / 2;
     int m_cy  = ub_top + ub_h - MARGIN_OUTER - dh / 2;
@@ -655,10 +676,13 @@ static void draw_layer(Layer *layer, GContext *ctx) {
       info_w = SCREEN_W - info_x - SIDE_MARGIN;
     }
 
-    draw_stacked_vec(ctx, h_tens, h_ones, m_tens, m_ones, dh,
-                     tens_x, ones_x, h_cy, m_cy);
+    // Info drawn first
     if (tm && info_w > 20)
       draw_info_column(ctx, GRect(info_x, ub_top, info_w, ub_h), tm);
+
+    // Digits drawn last = front layer
+    draw_stacked_vec(ctx, h_tens, h_ones, m_tens, m_ones, dh,
+                     tens_x, ones_x, h_cy, m_cy);
   }
 }
 
