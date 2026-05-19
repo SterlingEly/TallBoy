@@ -1,34 +1,36 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.38a
+// TallBoy -- main.c  v3.38b
 //
-// Hotfix: restore MARGIN_OUTER (2u) for full-screen digit sizing.
-// v3.38 incorrectly used MARGIN_DIGIT (1u) for lines_total==0,
-// giving only 1u vertical margin on the main watchface.
-// MARGIN_DIGIT is reserved for future quick-look-specific tuning.
+// v3.38b changes:
+//   1. DRAW_BORDER toggle: #define to show outline, comment out to
+//      show rounded-rect background only (no stroke). Default off
+//      so we can evaluate 4u rounded corners without the border.
 //
-// Font metrics notes (emery, Gothic 24 Bold, measured on device):
-//   INFO_LINE_H       = 28px  — full font cell height (rect passed to draw_text)
-//   INFO_TOP_PAD      = 10px  — dead space above glyph inside cell
-//   INFO_GLYPH_H      = 18px  — full glyph space (cap top to descender bottom)
-//   INFO_DESCENDER    =  4px  — descender depth (g, y, comma below baseline)
-//   INFO_CAP_OFFSET   =  3px  — caps extend ~3px above lowercase top (x-height)
-//                               net visual center of mass is close to geometric,
-//                               within 1-2px — not worth correcting for now.
-//   INFO_BOT_PAD      =  0px  — glyph touches bottom of cell
-//   INFO_LINE_STEP    = 26px  — rect-top to rect-top spacing for 1u glyph gap
-//                             = INFO_GLYPH_H + UNIT = 18 + 8
+//   2. Quick-look bottom margin: stacked m_cy now uses MARGIN_DIGIT
+//      (1u) instead of MARGIN_OUTER (2u) for bottom digit center,
+//      giving correct 1u gap to quick-look bar.
+//      Full-screen LAYOUT_FULL centering unchanged (symmetric ub).
 //
-// Margin architecture:
-//   MARGIN_CANVAS = 1u  screen edge → border/canvas boundary
-//   MARGIN_DIGIT  = 1u  canvas boundary → digit content
-//   MARGIN_OUTER  = 2u  convenience alias = MARGIN_CANVAS + MARGIN_DIGIT
-//   All digit sizing uses MARGIN_OUTER. MARGIN_DIGIT split preserved for
-//   future use (e.g. per-side asymmetric tuning, quick-look adjustments).
+//   3. Stacked info column margins adjusted:
+//      glyph_top: MARGIN_OUTER - HALF_UNIT  (up ½u from before)
+//      glyph_bot: area.h - MARGIN_OUTER + INFO_GLYPH_H  (down 18px,
+//                 puts last glyph ½u above the 2u margin)
+//
+// Font metrics (emery, Gothic 24 Bold, measured):
+//   INFO_LINE_H    = 28px  total cell height
+//   INFO_TOP_PAD   = 10px  dead space above glyph top
+//   INFO_GLYPH_H   = 18px  full glyph space (cap top → descender bottom)
+//   INFO_DESCENDER =  4px  descender depth (g, y, comma below baseline)
+//   INFO_CAP_OFFSET =  3px  cap height above x-height
+//   INFO_BOT_PAD   =  0px  glyph touches bottom of cell
+//   INFO_LINE_STEP = 26px  rect-top to rect-top for 1u glyph gap
+//   INFO_BOT_ADJUST =  2px  half descender — available, not yet applied
 // ============================================================
 
-// #define DEBUG_TEXT_BOXES   // uncomment to show magenta rects behind text
+// #define DRAW_BORDER   // comment out for rounded-rect bg only, no stroke
+// #define DEBUG_TEXT_BOXES   // magenta rects behind text
 
 #define LAYOUT_FULL      0
 #define LAYOUT_INFO_1    1
@@ -54,11 +56,11 @@ static int s_layout = LAYOUT_FULL;
   #define INFO_TOP_PAD       10
   #define INFO_DESCENDER      4
   #define INFO_CAP_OFFSET     3
-  #define INFO_BOT_ADJUST     2   // half descender — available but not yet applied
-  #define INFO_LINE_STEP     26   // = INFO_GLYPH_H + UNIT
+  #define INFO_BOT_ADJUST     2
+  #define INFO_LINE_STEP     26
   #define INFO_FONT_KEY    FONT_KEY_GOTHIC_24_BOLD
   #define UNIT                8
-  #define BORDER_RADIUS      32   // 4u outer radius for border and bg fill
+  #define BORDER_RADIUS      32   // 4u
 #else
   #define SCREEN_W          144
   #define SCREEN_H          168
@@ -110,7 +112,7 @@ static int prv_info_block_h(int n) {
 }
 
 static int prv_compute_target_h(int ub_h, int lines_total) {
-  if (lines_total == 0) return ub_h - 2 * MARGIN_OUTER;  // full screen: 2u each side
+  if (lines_total == 0) return ub_h - 2 * MARGIN_OUTER;
   int above = lines_total / 2, below = lines_total / 2;
   int reserved = 0;
   if (above > 0) reserved += MARGIN_OUTER + prv_info_block_h(above) + UNIT;
@@ -571,13 +573,16 @@ static void draw_text_at_glyph_y(GContext *ctx, const char *text,
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 }
 
+// Stacked info column:
+//   glyph_top: MARGIN_OUTER - HALF_UNIT  (½u above 2u margin → glyph at 1.5u)
+//   glyph_bot: area.h - MARGIN_OUTER + INFO_GLYPH_H  (last glyph ½u above 2u margin)
 static void draw_info_column(GContext *ctx, GRect area, struct tm *t) {
   char lines[INFO_LINES_MAX][32];
   int n = build_info_lines_stacked(lines, INFO_LINES_MAX, t);
   if (!n) return;
 
-  int glyph_top = area.origin.y + MARGIN_OUTER;
-  int glyph_bot = area.origin.y + area.size.h - MARGIN_OUTER;
+  int glyph_top = area.origin.y + MARGIN_OUTER - HALF_UNIT;
+  int glyph_bot = area.origin.y + area.size.h - MARGIN_OUTER + INFO_GLYPH_H;
   int avail_h   = glyph_bot - glyph_top;
   int slot_h    = avail_h / n;
 
@@ -617,13 +622,18 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   s_fg = GColorWhite;
 #endif
 
+  // 1. Full canvas black
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 
 #if defined(PBL_PLATFORM_EMERY)
+  // 2. Bg color as rounded rect (BORDER_RADIUS corners, always present)
   graphics_context_set_fill_color(ctx, bg);
   graphics_fill_rect(ctx, bounds, BORDER_RADIUS, GCornersAll);
+  // 3. Border stroke — toggle with DRAW_BORDER
+#if defined(DRAW_BORDER)
   draw_border(ctx);
+#endif
 #else
   graphics_context_set_fill_color(ctx, bg);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
@@ -676,7 +686,8 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   } else {
     int dh    = prv_compute_stacked_h(ub_h);
     int h_cy  = ub_top + MARGIN_OUTER + dh / 2;
-    int m_cy  = ub_top + ub_h - MARGIN_OUTER - dh / 2;
+    // Bottom digit: MARGIN_DIGIT (1u) from ub_bot for correct quick-look gap
+    int m_cy  = ub_bot - MARGIN_DIGIT - dh / 2;
     int tens_x, ones_x, info_x, info_w;
 
     if (s_layout == LAYOUT_STACK_R) {
