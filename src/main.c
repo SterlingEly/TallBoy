@@ -1,30 +1,31 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.38
+// TallBoy -- main.c  v3.38a
 //
-// v3.38:
-//   1. Border radius 4u (was 2u). draw_border uses BORDER_RADIUS=4u
-//      for arc centers and bar insets. bg rounded-rect fill matches.
-//      Corner arcs now 4u outer / 3u inner (1u stroke preserved).
+// Hotfix: restore MARGIN_OUTER (2u) for full-screen digit sizing.
+// v3.38 incorrectly used MARGIN_DIGIT (1u) for lines_total==0,
+// giving only 1u vertical margin on the main watchface.
+// MARGIN_DIGIT is reserved for future quick-look-specific tuning.
 //
-//   2. Margin split: MARGIN_CANVAS vs MARGIN_DIGIT
-//      MARGIN_CANVAS = 1u — screen edge to canvas boundary (border lives here)
-//      MARGIN_DIGIT  = 1u — canvas boundary to digit content
-//      Previously MARGIN_OUTER = 2u served both roles, causing 2u gap
-//      between quick-look bar and digits. Now prv_compute_target_h uses
-//      only MARGIN_DIGIT, so quick-look gives correct 1u gap.
-//      Info line placement still anchors to MARGIN_CANVAS + MARGIN_DIGIT = 2u
-//      from screen edge, so info layout is unchanged.
+// Font metrics notes (emery, Gothic 24 Bold, measured on device):
+//   INFO_LINE_H       = 28px  — full font cell height (rect passed to draw_text)
+//   INFO_TOP_PAD      = 10px  — dead space above glyph inside cell
+//   INFO_GLYPH_H      = 18px  — full glyph space (cap top to descender bottom)
+//   INFO_DESCENDER    =  4px  — descender depth (g, y, comma below baseline)
+//   INFO_CAP_OFFSET   =  3px  — caps extend ~3px above lowercase top (x-height)
+//                               net visual center of mass is close to geometric,
+//                               within 1-2px — not worth correcting for now.
+//   INFO_BOT_PAD      =  0px  — glyph touches bottom of cell
+//   INFO_LINE_STEP    = 26px  — rect-top to rect-top spacing for 1u glyph gap
+//                             = INFO_GLYPH_H + UNIT = 18 + 8
 //
-//   3. Descender constant documented: INFO_DESCENDER = 4px (measured).
-//      INFO_BOT_ADJUST = 2 available for future bottom-margin tweaking.
-//      Not applied yet.
-//
-// Font metrics (emery, Gothic 24 Bold, measured):
-//   INFO_LINE_H   = 28px  INFO_GLYPH_H = 18px  INFO_TOP_PAD = 10px
-//   INFO_LINE_STEP = 26px (= INFO_GLYPH_H + UNIT = 18 + 8)
-//   INFO_DESCENDER = 4px  (g, y, comma tails below baseline)
+// Margin architecture:
+//   MARGIN_CANVAS = 1u  screen edge → border/canvas boundary
+//   MARGIN_DIGIT  = 1u  canvas boundary → digit content
+//   MARGIN_OUTER  = 2u  convenience alias = MARGIN_CANVAS + MARGIN_DIGIT
+//   All digit sizing uses MARGIN_OUTER. MARGIN_DIGIT split preserved for
+//   future use (e.g. per-side asymmetric tuning, quick-look adjustments).
 // ============================================================
 
 // #define DEBUG_TEXT_BOXES   // uncomment to show magenta rects behind text
@@ -51,12 +52,13 @@ static int s_layout = LAYOUT_FULL;
   #define INFO_LINE_H        28
   #define INFO_GLYPH_H       18
   #define INFO_TOP_PAD       10
-  #define INFO_DESCENDER      4   // px below baseline (g, y, comma) — not yet used
-  #define INFO_BOT_ADJUST     2   // potential bottom-margin reduction — not yet applied
+  #define INFO_DESCENDER      4
+  #define INFO_CAP_OFFSET     3
+  #define INFO_BOT_ADJUST     2   // half descender — available but not yet applied
   #define INFO_LINE_STEP     26   // = INFO_GLYPH_H + UNIT
   #define INFO_FONT_KEY    FONT_KEY_GOTHIC_24_BOLD
   #define UNIT                8
-  #define BORDER_RADIUS      32   // 4u — corner arc outer radius for border and bg fill
+  #define BORDER_RADIUS      32   // 4u outer radius for border and bg fill
 #else
   #define SCREEN_W          144
   #define SCREEN_H          168
@@ -72,21 +74,17 @@ static int s_layout = LAYOUT_FULL;
   #define INFO_GLYPH_H       14
   #define INFO_TOP_PAD        6
   #define INFO_DESCENDER      3
+  #define INFO_CAP_OFFSET     2
   #define INFO_BOT_ADJUST     1
   #define INFO_LINE_STEP     20
   #define INFO_FONT_KEY    FONT_KEY_GOTHIC_18_BOLD
   #define UNIT                6
-  #define BORDER_RADIUS      (UNIT * 2)  // non-emery has no border but keep consistent
+  #define BORDER_RADIUS      (UNIT * 2)
 #endif
 
-// MARGIN_CANVAS: screen edge → canvas boundary (border stroke, rounded bg)
-// MARGIN_DIGIT:  canvas boundary → digit/content area
-// Together they equal the old MARGIN_OUTER = 2u.
-// Splitting allows quick-look bar to give 1u gap (MARGIN_DIGIT only)
-// while the border still occupies its own 1u outer zone (MARGIN_CANVAS).
 #define MARGIN_CANVAS   UNIT
 #define MARGIN_DIGIT    UNIT
-#define MARGIN_OUTER    (MARGIN_CANVAS + MARGIN_DIGIT)  // convenience alias = 2u
+#define MARGIN_OUTER    (MARGIN_CANVAS + MARGIN_DIGIT)
 
 #define HALF_SLOT_PAD   (UNIT / 2)
 #define GLYPH_W         (UNIT * 4)
@@ -111,11 +109,8 @@ static int prv_info_block_h(int n) {
   return INFO_GLYPH_H + (n - 1) * INFO_LINE_STEP;
 }
 
-// Time height for full-screen: use MARGIN_DIGIT only (not MARGIN_CANVAS)
-// so quick-look bar gives 1u gap between bar and digits.
 static int prv_compute_target_h(int ub_h, int lines_total) {
-  if (lines_total == 0) return ub_h - 2 * MARGIN_DIGIT;
-  // Info overlay: info line glyphs at full MARGIN_OUTER from edges
+  if (lines_total == 0) return ub_h - 2 * MARGIN_OUTER;  // full screen: 2u each side
   int above = lines_total / 2, below = lines_total / 2;
   int reserved = 0;
   if (above > 0) reserved += MARGIN_OUTER + prv_info_block_h(above) + UNIT;
@@ -128,8 +123,7 @@ static int prv_compute_target_h(int ub_h, int lines_total) {
 }
 
 static int prv_compute_stacked_h(int ub_h) {
-  // Stacked digit height uses MARGIN_DIGIT for digit padding
-  int h = (ub_h - 2 * MARGIN_DIGIT - UNIT) / 2;
+  int h = (ub_h - 2 * MARGIN_OUTER - UNIT) / 2;
   if (h < H_MIN) h = H_MIN;
   return h;
 }
@@ -238,12 +232,9 @@ static void fill_arc(GContext *ctx, int cx, int cy, int ro, int ri, int a0, int 
 }
 
 #if defined(PBL_PLATFORM_EMERY)
-// Border: 1u stroke rounded rect. BORDER_RADIUS = 4u outer, 3u inner.
-// Bars span screen edge to edge minus BORDER_RADIUS at each end.
-// Arc centers at (BORDER_RADIUS, BORDER_RADIUS) etc.
 static void draw_border(GContext *ctx) {
-  const int ro = BORDER_RADIUS;       // 32px = 4u
-  const int ri = BORDER_RADIUS - UNIT; // 24px = 3u
+  const int ro = BORDER_RADIUS;
+  const int ri = BORDER_RADIUS - UNIT;
   const int sw = UNIT;
   graphics_context_set_fill_color(ctx, s_fg);
   graphics_fill_rect(ctx, GRect(ro, 0,             SCREEN_W - ro*2, sw), 0, GCornerNone);
@@ -626,15 +617,12 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   s_fg = GColorWhite;
 #endif
 
-  // 1. Full canvas black — corners outside border always black
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 
 #if defined(PBL_PLATFORM_EMERY)
-  // 2. Bg color as rounded rect with BORDER_RADIUS (4u) — clips corners
   graphics_context_set_fill_color(ctx, bg);
   graphics_fill_rect(ctx, bounds, BORDER_RADIUS, GCornersAll);
-  // 3. Border (drawn before content so content is on top)
   draw_border(ctx);
 #else
   graphics_context_set_fill_color(ctx, bg);
@@ -687,10 +675,8 @@ static void draw_layer(Layer *layer, GContext *ctx) {
 
   } else {
     int dh    = prv_compute_stacked_h(ub_h);
-    // Stacked digit centers use MARGIN_DIGIT (not MARGIN_OUTER)
-    // so quick-look bar gives 1u gap instead of 2u
-    int h_cy  = ub_top + MARGIN_DIGIT + dh / 2;
-    int m_cy  = ub_top + ub_h - MARGIN_DIGIT - dh / 2;
+    int h_cy  = ub_top + MARGIN_OUTER + dh / 2;
+    int m_cy  = ub_top + ub_h - MARGIN_OUTER - dh / 2;
     int tens_x, ones_x, info_x, info_w;
 
     if (s_layout == LAYOUT_STACK_R) {
