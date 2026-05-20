@@ -1,28 +1,14 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.39a
+// TallBoy -- main.c  v3.39b
 //
-// v3.39a:
-//   1. Wide info lines: bottom block now correctly anchors to
-//      ub_bot (screen bottom), not relative to digit position.
-//      below_glyph_end was being computed correctly but the
-//      draw_info_block_up call was using the wrong anchor.
-//      Added explicit debug to verify.
-//
-//   2. build_info_lines_wide: always generates exactly
-//      lines_above + lines_below lines regardless of data
-//      availability, using static debug fallbacks so 3/3
-//      always shows all 6 lines.
-//
-//   3. Same for build_info_lines_wide bottom half — guaranteed
-//      3 lines below using fallback strings.
-//
-// Spacing rule (wide):
-//   Above block: first glyph at ub_top + UNIT (1u from top)
-//   Below block: last glyph bottom at ub_bot - bot_margin
-//   Both blocks anchor to screen edges, digits fill middle.
-//   Gap between block and digits = UNIT (1u) each side.
+// v3.39b: Touch to cycle bg corner radius (emery only).
+//   Tap the screen to cycle through radius options:
+//     UNIT*2 (16px = 2u) → UNIT*3 (24px = 3u) → UNIT*4 (32px = 4u) → wrap
+//   Uses touch service (PBL_TOUCH, emery/gabbro only).
+//   Shake still cycles layout as before.
+//   s_bg_radius tracks current radius; used in draw_layer bg fill.
 // ============================================================
 
 // #define DEBUG_TEXT_BOXES
@@ -56,7 +42,6 @@ static int s_layout = LAYOUT_FULL;
   #define INFO_LINE_STEP     26
   #define INFO_FONT_KEY    FONT_KEY_GOTHIC_24_BOLD
   #define UNIT                8
-  #define BORDER_RADIUS      32
 #else
   #define SCREEN_W          144
   #define SCREEN_H          168
@@ -77,8 +62,12 @@ static int s_layout = LAYOUT_FULL;
   #define INFO_LINE_STEP     20
   #define INFO_FONT_KEY    FONT_KEY_GOTHIC_18_BOLD
   #define UNIT                6
-  #define BORDER_RADIUS      (UNIT * 2)
 #endif
+
+// Radius options for bg rounded rect (emery only): 2u, 3u, 4u
+static const uint16_t s_radius_opts[] = {UNIT*2, UNIT*3, UNIT*4};
+#define RADIUS_COUNT 3
+static int s_radius_idx = 0;  // current index, cycles on touch
 
 #define MARGIN_CANVAS   UNIT
 #define MARGIN_DIGIT    UNIT
@@ -310,93 +299,55 @@ static void prv_fmt_bat_bt(char *buf, int len) {
   else snprintf(buf,len,"%d%% bat",s_battery_pct);
 }
 
-// Wide info lines — always fills exactly max_lines slots.
-// Uses real data when available, static fallback strings otherwise,
-// so all requested lines are always visible for layout debugging.
 static int build_info_lines_wide(char lines[][32], int max_lines, struct tm *t) {
   int n = 0;
-
-  // --- ABOVE block (first max_lines/2 lines) ---
-
-  // Line A1: day & date — always available
   if (n < max_lines && t)
     snprintf(lines[n++], 32, "%s, %s %d",
              s_day_names_full[t->tm_wday], s_month_names[t->tm_mon], t->tm_mday);
-  else if (n < max_lines)
-    snprintf(lines[n++], 32, "Mon, Jan 1");
+  else if (n < max_lines) snprintf(lines[n++], 32, "Mon, Jan 1");
 
-  // Line A2: weather
   if (n < max_lines) {
-    if (s_weather_temp[0] && s_weather_desc[0])
-      snprintf(lines[n++], 32, "%s & %s", s_weather_temp, s_weather_desc);
-    else if (s_weather_temp[0])
-      snprintf(lines[n++], 32, "%s", s_weather_temp);
-    else
-      snprintf(lines[n++], 32, "72 F & sunny");  // debug fallback
+    if (s_weather_temp[0] && s_weather_desc[0]) snprintf(lines[n++], 32, "%s & %s", s_weather_temp, s_weather_desc);
+    else if (s_weather_temp[0]) snprintf(lines[n++], 32, "%s", s_weather_temp);
+    else snprintf(lines[n++], 32, "72 F & sunny");
   }
-
-  // Line A3: sunrise/sunset
   if (n < max_lines) {
     if (s_sunrise_min >= 0 || s_sunset_min >= 0) {
       char rise[12], set[12];
       prv_fmt_time_min(rise, sizeof(rise), s_sunrise_min);
       prv_fmt_time_min(set,  sizeof(set),  s_sunset_min);
       snprintf(lines[n++], 32, "%s" DOT "%s", rise, set);
-    } else {
-      snprintf(lines[n++], 32, "6:02am" DOT "8:14pm");  // debug fallback
-    }
+    } else snprintf(lines[n++], 32, "6:02am" DOT "8:14pm");
   }
-
-  // --- BELOW block (remaining lines) ---
-
-  // Line B1: steps & distance
   if (n < max_lines) {
 #if defined(PBL_HEALTH)
     char sbuf[16]; prv_fmt_steps_long(sbuf, sizeof(sbuf), s_steps);
-    if (s_distance_m > 0) {
-      char dbuf[16]; prv_fmt_distance(dbuf, sizeof(dbuf));
-      snprintf(lines[n++], 32, "%s steps" DOT "%s", sbuf, dbuf);
-    } else snprintf(lines[n++], 32, "%s steps", sbuf);
+    if (s_distance_m > 0) { char dbuf[16]; prv_fmt_distance(dbuf, sizeof(dbuf)); snprintf(lines[n++], 32, "%s steps" DOT "%s", sbuf, dbuf); }
+    else snprintf(lines[n++], 32, "%s steps", sbuf);
 #else
     snprintf(lines[n++], 32, "3,500 steps" DOT "2.1 mi");
 #endif
   }
-
-  // Line B2: expected steps & %
   if (n < max_lines) {
 #if defined(PBL_HEALTH)
-    if (s_steps_expected > 0) {
-      char ebuf[16]; prv_fmt_steps_long(ebuf, sizeof(ebuf), s_steps_expected);
-      snprintf(lines[n++], 32, "exp %s" DOT "%d%%", ebuf, (s_steps * 100) / s_steps_expected);
-    } else snprintf(lines[n++], 32, "exp --" DOT "--%");
+    if (s_steps_expected > 0) { char ebuf[16]; prv_fmt_steps_long(ebuf, sizeof(ebuf), s_steps_expected); snprintf(lines[n++], 32, "exp %s" DOT "%d%%", ebuf, (s_steps * 100) / s_steps_expected); }
+    else snprintf(lines[n++], 32, "exp --" DOT "--%");
 #else
     snprintf(lines[n++], 32, "exp 3,500" DOT "100%%");
 #endif
   }
-
-  // Line B3: heart rate & calories (always shows something)
   if (n < max_lines) {
 #if defined(PBL_HEALTH)
     bool has_hr = s_heart_rate > 0, has_cal = s_calories > 0;
-    if (has_hr && has_cal)
-      snprintf(lines[n++], 32, "%d bpm" DOT "%d cal", s_heart_rate, s_calories);
-    else if (has_hr)
-      snprintf(lines[n++], 32, "%d bpm", s_heart_rate);
-    else if (has_cal)
-      snprintf(lines[n++], 32, "%d cal", s_calories);
-    else
-      snprintf(lines[n++], 32, "-- bpm" DOT "-- cal");  // debug fallback
+    if (has_hr && has_cal) snprintf(lines[n++], 32, "%d bpm" DOT "%d cal", s_heart_rate, s_calories);
+    else if (has_hr) snprintf(lines[n++], 32, "%d bpm", s_heart_rate);
+    else if (has_cal) snprintf(lines[n++], 32, "%d cal", s_calories);
+    else snprintf(lines[n++], 32, "-- bpm" DOT "-- cal");
 #else
     snprintf(lines[n++], 32, "72 bpm" DOT "212 cal");
 #endif
   }
-
-  // Line B4+: battery (if more slots requested)
-  if (n < max_lines) {
-    char bbuf[24]; prv_fmt_bat_bt(bbuf, sizeof(bbuf));
-    snprintf(lines[n++], 32, "%s", bbuf);
-  }
-
+  if (n < max_lines) { char bbuf[24]; prv_fmt_bat_bt(bbuf, sizeof(bbuf)); snprintf(lines[n++], 32, "%s", bbuf); }
   return n;
 }
 
@@ -446,9 +397,6 @@ static void draw_info_column(GContext *ctx, GRect area, struct tm *t) {
                          glyph_top + i * slot_h, area.size.w);
 }
 
-// Wide blocks: both anchor to screen edges.
-// above: line 0 glyph at glyph_y_start, each subsequent +INFO_LINE_STEP down
-// below: line n-1 glyph bottom at glyph_bot, each preceding line -INFO_LINE_STEP up
 static void draw_info_block_down(GContext *ctx, char lines[][32], int n,
                                  int glyph_y_start, int width, int x) {
   for (int i = 0; i < n; i++)
@@ -458,8 +406,6 @@ static void draw_info_block_down(GContext *ctx, char lines[][32], int n,
 static void draw_info_block_up(GContext *ctx, char lines[][32],
                                int first_idx, int n, int glyph_bot, int width, int x) {
   if (n <= 0) return;
-  // last line: glyph bottom = glyph_bot, so glyph top = glyph_bot - INFO_GLYPH_H
-  // each preceding line is INFO_LINE_STEP higher
   for (int i = 0; i < n; i++) {
     int glyph_y = glyph_bot - INFO_GLYPH_H - (n - 1 - i) * INFO_LINE_STEP;
     draw_text_at_glyph_y(ctx, lines[first_idx + i], x, glyph_y, width);
@@ -482,9 +428,11 @@ static void draw_layer(Layer *layer, GContext *ctx) {
 
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+
 #if defined(PBL_PLATFORM_EMERY)
+  // Use current radius from touch-cycled index
   graphics_context_set_fill_color(ctx, bg);
-  graphics_fill_rect(ctx, bounds, BORDER_RADIUS, GCornersAll);
+  graphics_fill_rect(ctx, bounds, s_radius_opts[s_radius_idx], GCornersAll);
 #else
   graphics_context_set_fill_color(ctx, bg);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
@@ -510,35 +458,25 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int lines_above, lines_below;
     prv_layout_lines(&lines_above, &lines_below);
 
-    // Above block: first glyph at ub_top + UNIT (1u from top edge)
     int above_glyph_start = ub_top + UNIT;
     int above_glyph_end   = above_glyph_start + prv_info_block_h(lines_above);
-
-    // Below block: last glyph bottom at ub_bot - bot_margin
-    // Anchor is the screen bottom edge, independent of digit position.
     int below_glyph_end   = ub_bot - bot_margin;
     int below_glyph_start = below_glyph_end - prv_info_block_h(lines_below);
-
-    // Time fills between the two blocks with 1u gap each side
     int time_top = above_glyph_end + UNIT;
     int time_bot = below_glyph_start - UNIT;
     int time_cy  = (time_top + time_bot) / 2;
 
     char all_lines[INFO_LINES_MAX][32];
-    // Always request full line count — build function guarantees all slots filled
-    int total = build_info_lines_wide(all_lines, lines_above + lines_below,
-                                      tm_now ? tm_now : NULL);
+    int total = build_info_lines_wide(all_lines, lines_above + lines_below, tm_now);
 
     int above_n = lines_above < total ? lines_above : total;
     draw_info_block_down(ctx, all_lines, above_n,
                          above_glyph_start, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
-
     int below_n = total - lines_above;
     if (below_n > lines_below) below_n = lines_below;
     if (below_n > 0)
       draw_info_block_up(ctx, all_lines, lines_above, below_n,
                          below_glyph_end, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
-
     draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy);
 
   } else {
@@ -640,6 +578,16 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   layer_mark_dirty(s_canvas_layer);
 }
 
+// Touch handler: cycle bg corner radius through 2u → 3u → 4u → 2u
+// Only fires on touch-down to avoid double-firing on release.
+#if defined(PBL_TOUCH)
+static void touch_handler(TouchEvent *event) {
+  if (event->type != TOUCH_EVENT_TYPE_DOWN) return;
+  s_radius_idx = (s_radius_idx + 1) % RADIUS_COUNT;
+  layer_mark_dirty(s_canvas_layer);
+}
+#endif
+
 static void tick_handler(struct tm *t, TimeUnits units) {
   bool anim = (s_layout==LAYOUT_FULL||s_layout==LAYOUT_INFO_1||s_layout==LAYOUT_INFO_2||s_layout==LAYOUT_INFO_3);
   if (s_phase == PHASE_DONE && anim) {
@@ -684,12 +632,19 @@ static void window_load(Window *window) {
   UnobstructedAreaHandlers ua = {.change = unobstructed_change};
   unobstructed_area_service_subscribe(ua, NULL);
   accel_tap_service_subscribe(accel_tap_handler);
+#if defined(PBL_TOUCH)
+  touch_service_subscribe(touch_handler);
+#endif
   s_phase = PHASE_COUNTDOWN; s_countdown_digit = 9; s_overshot = false; s_cd_sub = CD_HOLD_MAX;
   layer_mark_dirty(s_canvas_layer); schedule(COUNTDOWN_HOLD_MS);
 }
 
 static void window_unload(Window *window) {
-  unobstructed_area_service_unsubscribe(); accel_tap_service_unsubscribe();
+  unobstructed_area_service_unsubscribe();
+  accel_tap_service_unsubscribe();
+#if defined(PBL_TOUCH)
+  touch_service_unsubscribe();
+#endif
   if (s_timer) { app_timer_cancel(s_timer); s_timer = NULL; }
   layer_destroy(s_canvas_layer);
 }
