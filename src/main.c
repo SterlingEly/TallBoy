@@ -1,14 +1,29 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.39b
+// TallBoy -- main.c  v3.39c
 //
-// v3.39b: Touch to cycle bg corner radius (emery only).
-//   Tap the screen to cycle through radius options:
-//     UNIT*2 (16px = 2u) → UNIT*3 (24px = 3u) → UNIT*4 (32px = 4u) → wrap
-//   Uses touch service (PBL_TOUCH, emery/gabbro only).
-//   Shake still cycles layout as before.
-//   s_bg_radius tracks current radius; used in draw_layer bg fill.
+// v3.39c: build fixes from v3.39b
+//   1. s_radius_opts / s_radius_idx wrapped in PBL_PLATFORM_EMERY
+//      guard — they were triggering "unused variable" errors on
+//      flint (which has -Werror=unused-const-variable).
+//
+//   2. "exp --" DOT "--%"  →  "exp -- · --"  (no % in literal)
+//      -Werror=format= rejects % in format strings with no args.
+//
+//   3. info line buffers widened from [32] to [40] to satisfy
+//      -Werror=format-truncation. snprintf still caps at 40 chars;
+//      the on-screen text is the same since the font is narrow.
+//      (Strings longer than ~32 chars truncate with "..." anyway.)
+//
+//   4. touch_handler signature: using void* context pattern since
+//      the exact TouchEvent struct fields aren't in the local SDK
+//      headers. Using touch_service_subscribe(handler) where handler
+//      takes no args — if this doesn't match actual API, see note below.
+//      TODO: confirm TouchEvent struct once touch guide is accessible.
+//      Likely: event->type (TOUCH_EVENT_TYPE_DOWN/UP/MOVE) and
+//              event->touch.x / event->touch.y (int16_t coordinates)
+//      Easter egg idea: touch x/y to "squish" individual digits.
 // ============================================================
 
 // #define DEBUG_TEXT_BOXES
@@ -42,6 +57,12 @@ static int s_layout = LAYOUT_FULL;
   #define INFO_LINE_STEP     26
   #define INFO_FONT_KEY    FONT_KEY_GOTHIC_24_BOLD
   #define UNIT                8
+
+  // Radius options for bg rounded rect: 2u, 3u, 4u — cycled by touch
+  static const uint16_t s_radius_opts[] = {UNIT*2, UNIT*3, UNIT*4};
+  #define RADIUS_COUNT 3
+  static int s_radius_idx = 0;
+
 #else
   #define SCREEN_W          144
   #define SCREEN_H          168
@@ -64,11 +85,6 @@ static int s_layout = LAYOUT_FULL;
   #define UNIT                6
 #endif
 
-// Radius options for bg rounded rect (emery only): 2u, 3u, 4u
-static const uint16_t s_radius_opts[] = {UNIT*2, UNIT*3, UNIT*4};
-#define RADIUS_COUNT 3
-static int s_radius_idx = 0;  // current index, cycles on touch
-
 #define MARGIN_CANVAS   UNIT
 #define MARGIN_DIGIT    UNIT
 #define MARGIN_OUTER    (MARGIN_CANVAS + MARGIN_DIGIT)
@@ -77,6 +93,7 @@ static int s_radius_idx = 0;  // current index, cycles on touch
 #define GLYPH_W         (UNIT * 4)
 #define H_MIN           (UNIT * 11)
 #define INFO_LINES_MAX  8
+#define INFO_LINE_BUF   40   // wider than on-screen max; avoids format-truncation warnings
 
 #define ANIM_STEP_PX     8
 #define ANIM_STEP_MS    16
@@ -299,76 +316,102 @@ static void prv_fmt_bat_bt(char *buf, int len) {
   else snprintf(buf,len,"%d%% bat",s_battery_pct);
 }
 
-static int build_info_lines_wide(char lines[][32], int max_lines, struct tm *t) {
+// Wide info lines — always fills exactly max_lines slots.
+// Buffer size is INFO_LINE_BUF (40) to avoid -Werror=format-truncation.
+// On-screen text still truncates with "..." via GTextOverflowModeTrailingEllipsis.
+static int build_info_lines_wide(char lines[][INFO_LINE_BUF], int max_lines, struct tm *t) {
   int n = 0;
-  if (n < max_lines && t)
-    snprintf(lines[n++], 32, "%s, %s %d",
-             s_day_names_full[t->tm_wday], s_month_names[t->tm_mon], t->tm_mday);
-  else if (n < max_lines) snprintf(lines[n++], 32, "Mon, Jan 1");
 
   if (n < max_lines) {
-    if (s_weather_temp[0] && s_weather_desc[0]) snprintf(lines[n++], 32, "%s & %s", s_weather_temp, s_weather_desc);
-    else if (s_weather_temp[0]) snprintf(lines[n++], 32, "%s", s_weather_temp);
-    else snprintf(lines[n++], 32, "72 F & sunny");
+    if (t) snprintf(lines[n++], INFO_LINE_BUF, "%s, %s %d",
+                    s_day_names_full[t->tm_wday], s_month_names[t->tm_mon], t->tm_mday);
+    else   snprintf(lines[n++], INFO_LINE_BUF, "Mon, Jan 1");
+  }
+  if (n < max_lines) {
+    if (s_weather_temp[0] && s_weather_desc[0])
+      snprintf(lines[n++], INFO_LINE_BUF, "%.7s & %.30s", s_weather_temp, s_weather_desc);
+    else if (s_weather_temp[0])
+      snprintf(lines[n++], INFO_LINE_BUF, "%s", s_weather_temp);
+    else
+      snprintf(lines[n++], INFO_LINE_BUF, "72 F & sunny");
   }
   if (n < max_lines) {
     if (s_sunrise_min >= 0 || s_sunset_min >= 0) {
       char rise[12], set[12];
       prv_fmt_time_min(rise, sizeof(rise), s_sunrise_min);
       prv_fmt_time_min(set,  sizeof(set),  s_sunset_min);
-      snprintf(lines[n++], 32, "%s" DOT "%s", rise, set);
-    } else snprintf(lines[n++], 32, "6:02am" DOT "8:14pm");
+      snprintf(lines[n++], INFO_LINE_BUF, "%s" DOT "%s", rise, set);
+    } else {
+      snprintf(lines[n++], INFO_LINE_BUF, "6:02am" DOT "8:14pm");
+    }
   }
   if (n < max_lines) {
 #if defined(PBL_HEALTH)
     char sbuf[16]; prv_fmt_steps_long(sbuf, sizeof(sbuf), s_steps);
-    if (s_distance_m > 0) { char dbuf[16]; prv_fmt_distance(dbuf, sizeof(dbuf)); snprintf(lines[n++], 32, "%s steps" DOT "%s", sbuf, dbuf); }
-    else snprintf(lines[n++], 32, "%s steps", sbuf);
+    if (s_distance_m > 0) {
+      char dbuf[12]; prv_fmt_distance(dbuf, sizeof(dbuf));
+      snprintf(lines[n++], INFO_LINE_BUF, "%s steps" DOT "%s", sbuf, dbuf);
+    } else {
+      snprintf(lines[n++], INFO_LINE_BUF, "%s steps", sbuf);
+    }
 #else
-    snprintf(lines[n++], 32, "3,500 steps" DOT "2.1 mi");
+    snprintf(lines[n++], INFO_LINE_BUF, "3,500 steps" DOT "2.1 mi");
 #endif
   }
   if (n < max_lines) {
 #if defined(PBL_HEALTH)
-    if (s_steps_expected > 0) { char ebuf[16]; prv_fmt_steps_long(ebuf, sizeof(ebuf), s_steps_expected); snprintf(lines[n++], 32, "exp %s" DOT "%d%%", ebuf, (s_steps * 100) / s_steps_expected); }
-    else snprintf(lines[n++], 32, "exp --" DOT "--%");
+    if (s_steps_expected > 0) {
+      char ebuf[16]; prv_fmt_steps_long(ebuf, sizeof(ebuf), s_steps_expected);
+      snprintf(lines[n++], INFO_LINE_BUF, "exp %s" DOT "%d%%", ebuf, (s_steps * 100) / s_steps_expected);
+    } else {
+      snprintf(lines[n++], INFO_LINE_BUF, "exp -- " DOT " --");  // no % chars
+    }
 #else
-    snprintf(lines[n++], 32, "exp 3,500" DOT "100%%");
+    snprintf(lines[n++], INFO_LINE_BUF, "exp 3,500" DOT "100%%");
 #endif
   }
   if (n < max_lines) {
 #if defined(PBL_HEALTH)
     bool has_hr = s_heart_rate > 0, has_cal = s_calories > 0;
-    if (has_hr && has_cal) snprintf(lines[n++], 32, "%d bpm" DOT "%d cal", s_heart_rate, s_calories);
-    else if (has_hr) snprintf(lines[n++], 32, "%d bpm", s_heart_rate);
-    else if (has_cal) snprintf(lines[n++], 32, "%d cal", s_calories);
-    else snprintf(lines[n++], 32, "-- bpm" DOT "-- cal");
+    if (has_hr && has_cal)
+      snprintf(lines[n++], INFO_LINE_BUF, "%d bpm" DOT "%d cal", s_heart_rate, s_calories);
+    else if (has_hr)
+      snprintf(lines[n++], INFO_LINE_BUF, "%d bpm", s_heart_rate);
+    else if (has_cal)
+      snprintf(lines[n++], INFO_LINE_BUF, "%d cal", s_calories);
+    else
+      snprintf(lines[n++], INFO_LINE_BUF, "-- bpm" DOT "-- cal");
 #else
-    snprintf(lines[n++], 32, "72 bpm" DOT "212 cal");
+    snprintf(lines[n++], INFO_LINE_BUF, "72 bpm" DOT "212 cal");
 #endif
   }
-  if (n < max_lines) { char bbuf[24]; prv_fmt_bat_bt(bbuf, sizeof(bbuf)); snprintf(lines[n++], 32, "%s", bbuf); }
+  if (n < max_lines) {
+    char bbuf[24]; prv_fmt_bat_bt(bbuf, sizeof(bbuf));
+    snprintf(lines[n++], INFO_LINE_BUF, "%s", bbuf);
+  }
   return n;
 }
 
-static int build_info_lines_stacked(char lines[][32], int max_lines, struct tm *t) {
+static int build_info_lines_stacked(char lines[][INFO_LINE_BUF], int max_lines, struct tm *t) {
   int n = 0;
-  if (n < max_lines && s_weather_temp[0]) snprintf(lines[n++], 32, "%s", s_weather_temp);
-  else if (n < max_lines) snprintf(lines[n++], 32, "72 F");
-  if (n < max_lines && t) snprintf(lines[n++], 32, "%s", s_day_names_full[t->tm_wday]);
-  if (n < max_lines && t) snprintf(lines[n++], 32, "%s %d", s_month_names[t->tm_mon], t->tm_mday);
+  if (n < max_lines) {
+    if (s_weather_temp[0]) snprintf(lines[n++], INFO_LINE_BUF, "%s", s_weather_temp);
+    else                   snprintf(lines[n++], INFO_LINE_BUF, "72 F");
+  }
+  if (n < max_lines && t) snprintf(lines[n++], INFO_LINE_BUF, "%s", s_day_names_full[t->tm_wday]);
+  if (n < max_lines && t) snprintf(lines[n++], INFO_LINE_BUF, "%s %d", s_month_names[t->tm_mon], t->tm_mday);
 #if defined(PBL_HEALTH)
-  if (n < max_lines) { char sbuf[16]; prv_fmt_steps_short(sbuf, sizeof(sbuf), s_steps); snprintf(lines[n++], 32, "%s steps", sbuf); }
-  if (n < max_lines && s_steps_expected > 0) { char ebuf[16]; prv_fmt_steps_long(ebuf, sizeof(ebuf), s_steps_expected); snprintf(lines[n++], 32, "exp %s", ebuf); }
-  if (n < max_lines && s_steps_expected > 0) snprintf(lines[n++], 32, "%d%% exp", (s_steps * 100) / s_steps_expected);
+  if (n < max_lines) { char sbuf[16]; prv_fmt_steps_short(sbuf, sizeof(sbuf), s_steps); snprintf(lines[n++], INFO_LINE_BUF, "%s steps", sbuf); }
+  if (n < max_lines && s_steps_expected > 0) { char ebuf[16]; prv_fmt_steps_long(ebuf, sizeof(ebuf), s_steps_expected); snprintf(lines[n++], INFO_LINE_BUF, "exp %s", ebuf); }
+  if (n < max_lines && s_steps_expected > 0) snprintf(lines[n++], INFO_LINE_BUF, "%d%% exp", (s_steps * 100) / s_steps_expected);
   if (n < max_lines && s_steps_expected > 0) {
     int diff = s_steps - s_steps_expected;
-    if (diff == 0) snprintf(lines[n++], 32, "on pace");
-    else { char dbuf[16]; prv_fmt_steps_long(dbuf, sizeof(dbuf), diff < 0 ? -diff : diff); snprintf(lines[n++], 32, "%s%s steps", diff > 0 ? "+" : "-", dbuf); }
+    if (diff == 0) snprintf(lines[n++], INFO_LINE_BUF, "on pace");
+    else { char dbuf[16]; prv_fmt_steps_long(dbuf, sizeof(dbuf), diff < 0 ? -diff : diff); snprintf(lines[n++], INFO_LINE_BUF, "%s%s steps", diff > 0 ? "+" : "-", dbuf); }
   }
-  if (n < max_lines && s_distance_m > 0) prv_fmt_distance(lines[n++], 32);
+  if (n < max_lines && s_distance_m > 0) prv_fmt_distance(lines[n++], INFO_LINE_BUF);
 #endif
-  if (n < max_lines) prv_fmt_bat_bt(lines[n++], 32);
+  if (n < max_lines) prv_fmt_bat_bt(lines[n++], INFO_LINE_BUF);
   return n;
 }
 
@@ -386,7 +429,7 @@ static void draw_text_at_glyph_y(GContext *ctx, const char *text, int x, int gly
 }
 
 static void draw_info_column(GContext *ctx, GRect area, struct tm *t) {
-  char lines[INFO_LINES_MAX][32];
+  char lines[INFO_LINES_MAX][INFO_LINE_BUF];
   int n = build_info_lines_stacked(lines, INFO_LINES_MAX, t);
   if (!n) return;
   int glyph_top = area.origin.y + MARGIN_OUTER - HALF_UNIT;
@@ -397,13 +440,13 @@ static void draw_info_column(GContext *ctx, GRect area, struct tm *t) {
                          glyph_top + i * slot_h, area.size.w);
 }
 
-static void draw_info_block_down(GContext *ctx, char lines[][32], int n,
+static void draw_info_block_down(GContext *ctx, char lines[][INFO_LINE_BUF], int n,
                                  int glyph_y_start, int width, int x) {
   for (int i = 0; i < n; i++)
     draw_text_at_glyph_y(ctx, lines[i], x, glyph_y_start + i * INFO_LINE_STEP, width);
 }
 
-static void draw_info_block_up(GContext *ctx, char lines[][32],
+static void draw_info_block_up(GContext *ctx, char lines[][INFO_LINE_BUF],
                                int first_idx, int n, int glyph_bot, int width, int x) {
   if (n <= 0) return;
   for (int i = 0; i < n; i++) {
@@ -430,7 +473,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 
 #if defined(PBL_PLATFORM_EMERY)
-  // Use current radius from touch-cycled index
   graphics_context_set_fill_color(ctx, bg);
   graphics_fill_rect(ctx, bounds, s_radius_opts[s_radius_idx], GCornersAll);
 #else
@@ -466,7 +508,7 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int time_bot = below_glyph_start - UNIT;
     int time_cy  = (time_top + time_bot) / 2;
 
-    char all_lines[INFO_LINES_MAX][32];
+    char all_lines[INFO_LINES_MAX][INFO_LINE_BUF];
     int total = build_info_lines_wide(all_lines, lines_above + lines_below, tm_now);
 
     int above_n = lines_above < total ? lines_above : total;
@@ -578,10 +620,15 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   layer_mark_dirty(s_canvas_layer);
 }
 
-// Touch handler: cycle bg corner radius through 2u → 3u → 4u → 2u
-// Only fires on touch-down to avoid double-firing on release.
+// Touch: cycle bg corner radius 2u → 3u → 4u → 2u (emery only)
+// TODO: confirm exact TouchEvent struct fields when touch guide is accessible.
+// Expected API based on SDK changelog pattern:
+//   touch_service_subscribe(TouchHandler handler)
+//   typedef void (*TouchHandler)(TouchEvent *event, void *context)
+//   TouchEvent fields: .type (TOUCH_EVENT_TYPE_DOWN/UP/MOVE), .touch.x, .touch.y
+// For now using the simplest possible subscribe signature.
 #if defined(PBL_TOUCH)
-static void touch_handler(TouchEvent *event) {
+static void touch_handler(TouchEvent *event, void *context) {
   if (event->type != TOUCH_EVENT_TYPE_DOWN) return;
   s_radius_idx = (s_radius_idx + 1) % RADIUS_COUNT;
   layer_mark_dirty(s_canvas_layer);
