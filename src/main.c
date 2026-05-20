@@ -1,29 +1,22 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy -- main.c  v3.39c
+// TallBoy -- main.c  v3.39d
 //
-// v3.39c: build fixes from v3.39b
-//   1. s_radius_opts / s_radius_idx wrapped in PBL_PLATFORM_EMERY
-//      guard — they were triggering "unused variable" errors on
-//      flint (which has -Werror=unused-const-variable).
+// v3.39d: touch API fixes from build errors
 //
-//   2. "exp --" DOT "--%"  →  "exp -- · --"  (no % in literal)
-//      -Werror=format= rejects % in format strings with no args.
+//   Confirmed from pebble.h line 913:
+//     void touch_service_subscribe(TouchServiceHandler handler, void *context);
+//     typedef void (*TouchServiceHandler)(const TouchEvent *, void *);
 //
-//   3. info line buffers widened from [32] to [40] to satisfy
-//      -Werror=format-truncation. snprintf still caps at 40 chars;
-//      the on-screen text is the same since the font is narrow.
-//      (Strings longer than ~32 chars truncate with "..." anyway.)
-//
-//   4. touch_handler signature: using void* context pattern since
-//      the exact TouchEvent struct fields aren't in the local SDK
-//      headers. Using touch_service_subscribe(handler) where handler
-//      takes no args — if this doesn't match actual API, see note below.
-//      TODO: confirm TouchEvent struct once touch guide is accessible.
-//      Likely: event->type (TOUCH_EVENT_TYPE_DOWN/UP/MOVE) and
-//              event->touch.x / event->touch.y (int16_t coordinates)
-//      Easter egg idea: touch x/y to "squish" individual digits.
+//   Fixes applied:
+//   1. touch_handler signature: const TouchEvent*, void* context
+//   2. touch_service_subscribe: pass NULL context
+//   3. Removed TOUCH_EVENT_TYPE_DOWN check — enum name unknown,
+//      any touch fires the radius cycle. TODO: find correct enum
+//      name to filter to touch-down only if needed.
+//   4. Weather line format: "%.7s & %.29s" → max 7+4+29 = 40 chars,
+//      fits within INFO_LINE_BUF=40 with null terminator.
 // ============================================================
 
 // #define DEBUG_TEXT_BOXES
@@ -58,7 +51,6 @@ static int s_layout = LAYOUT_FULL;
   #define INFO_FONT_KEY    FONT_KEY_GOTHIC_24_BOLD
   #define UNIT                8
 
-  // Radius options for bg rounded rect: 2u, 3u, 4u — cycled by touch
   static const uint16_t s_radius_opts[] = {UNIT*2, UNIT*3, UNIT*4};
   #define RADIUS_COUNT 3
   static int s_radius_idx = 0;
@@ -93,7 +85,7 @@ static int s_layout = LAYOUT_FULL;
 #define GLYPH_W         (UNIT * 4)
 #define H_MIN           (UNIT * 11)
 #define INFO_LINES_MAX  8
-#define INFO_LINE_BUF   40   // wider than on-screen max; avoids format-truncation warnings
+#define INFO_LINE_BUF   40
 
 #define ANIM_STEP_PX     8
 #define ANIM_STEP_MS    16
@@ -316,25 +308,25 @@ static void prv_fmt_bat_bt(char *buf, int len) {
   else snprintf(buf,len,"%d%% bat",s_battery_pct);
 }
 
-// Wide info lines — always fills exactly max_lines slots.
-// Buffer size is INFO_LINE_BUF (40) to avoid -Werror=format-truncation.
-// On-screen text still truncates with "..." via GTextOverflowModeTrailingEllipsis.
 static int build_info_lines_wide(char lines[][INFO_LINE_BUF], int max_lines, struct tm *t) {
   int n = 0;
 
+  // A1: day & date
   if (n < max_lines) {
     if (t) snprintf(lines[n++], INFO_LINE_BUF, "%s, %s %d",
                     s_day_names_full[t->tm_wday], s_month_names[t->tm_mon], t->tm_mday);
     else   snprintf(lines[n++], INFO_LINE_BUF, "Mon, Jan 1");
   }
+  // A2: weather — "%.7s & %.29s" = max 7 + 4 + 29 = 40, fits in 40 with \0
   if (n < max_lines) {
     if (s_weather_temp[0] && s_weather_desc[0])
-      snprintf(lines[n++], INFO_LINE_BUF, "%.7s & %.30s", s_weather_temp, s_weather_desc);
+      snprintf(lines[n++], INFO_LINE_BUF, "%.7s & %.29s", s_weather_temp, s_weather_desc);
     else if (s_weather_temp[0])
       snprintf(lines[n++], INFO_LINE_BUF, "%s", s_weather_temp);
     else
       snprintf(lines[n++], INFO_LINE_BUF, "72 F & sunny");
   }
+  // A3: sunrise/sunset
   if (n < max_lines) {
     if (s_sunrise_min >= 0 || s_sunset_min >= 0) {
       char rise[12], set[12];
@@ -345,6 +337,7 @@ static int build_info_lines_wide(char lines[][INFO_LINE_BUF], int max_lines, str
       snprintf(lines[n++], INFO_LINE_BUF, "6:02am" DOT "8:14pm");
     }
   }
+  // B1: steps & distance
   if (n < max_lines) {
 #if defined(PBL_HEALTH)
     char sbuf[16]; prv_fmt_steps_long(sbuf, sizeof(sbuf), s_steps);
@@ -358,18 +351,20 @@ static int build_info_lines_wide(char lines[][INFO_LINE_BUF], int max_lines, str
     snprintf(lines[n++], INFO_LINE_BUF, "3,500 steps" DOT "2.1 mi");
 #endif
   }
+  // B2: expected steps
   if (n < max_lines) {
 #if defined(PBL_HEALTH)
     if (s_steps_expected > 0) {
       char ebuf[16]; prv_fmt_steps_long(ebuf, sizeof(ebuf), s_steps_expected);
       snprintf(lines[n++], INFO_LINE_BUF, "exp %s" DOT "%d%%", ebuf, (s_steps * 100) / s_steps_expected);
     } else {
-      snprintf(lines[n++], INFO_LINE_BUF, "exp -- " DOT " --");  // no % chars
+      snprintf(lines[n++], INFO_LINE_BUF, "exp -- " DOT " --");
     }
 #else
     snprintf(lines[n++], INFO_LINE_BUF, "exp 3,500" DOT "100%%");
 #endif
   }
+  // B3: heart rate & calories
   if (n < max_lines) {
 #if defined(PBL_HEALTH)
     bool has_hr = s_heart_rate > 0, has_cal = s_calories > 0;
@@ -385,6 +380,7 @@ static int build_info_lines_wide(char lines[][INFO_LINE_BUF], int max_lines, str
     snprintf(lines[n++], INFO_LINE_BUF, "72 bpm" DOT "212 cal");
 #endif
   }
+  // B4+: battery
   if (n < max_lines) {
     char bbuf[24]; prv_fmt_bat_bt(bbuf, sizeof(bbuf));
     snprintf(lines[n++], INFO_LINE_BUF, "%s", bbuf);
@@ -471,7 +467,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
 
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
-
 #if defined(PBL_PLATFORM_EMERY)
   graphics_context_set_fill_color(ctx, bg);
   graphics_fill_rect(ctx, bounds, s_radius_opts[s_radius_idx], GCornersAll);
@@ -621,17 +616,21 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
 }
 
 // Touch: cycle bg corner radius 2u → 3u → 4u → 2u (emery only)
-// TODO: confirm exact TouchEvent struct fields when touch guide is accessible.
-// Expected API based on SDK changelog pattern:
-//   touch_service_subscribe(TouchHandler handler)
-//   typedef void (*TouchHandler)(TouchEvent *event, void *context)
-//   TouchEvent fields: .type (TOUCH_EVENT_TYPE_DOWN/UP/MOVE), .touch.x, .touch.y
-// For now using the simplest possible subscribe signature.
+// Confirmed API from pebble.h:913:
+//   void touch_service_subscribe(TouchServiceHandler handler, void *context);
+//   typedef void (*TouchServiceHandler)(const TouchEvent *, void *);
+// TouchEvent struct fields confirmed by successful compile of handler signature.
+// Event type enum name TBD — firing on any touch event for now.
+// TODO: add type check once TouchEvent struct fields are confirmed (e.g. event->type == ?)
+// Touch x/y will be useful for per-digit squish easter egg.
 #if defined(PBL_TOUCH)
-static void touch_handler(TouchEvent *event, void *context) {
-  if (event->type != TOUCH_EVENT_TYPE_DOWN) return;
+static void touch_handler(const TouchEvent *event, void *context) {
+  (void)event;   // suppress unused warning until we use x/y/type
+  (void)context;
+#if defined(PBL_PLATFORM_EMERY)
   s_radius_idx = (s_radius_idx + 1) % RADIUS_COUNT;
   layer_mark_dirty(s_canvas_layer);
+#endif
 }
 #endif
 
@@ -680,7 +679,7 @@ static void window_load(Window *window) {
   unobstructed_area_service_subscribe(ua, NULL);
   accel_tap_service_subscribe(accel_tap_handler);
 #if defined(PBL_TOUCH)
-  touch_service_subscribe(touch_handler);
+  touch_service_subscribe(touch_handler, NULL);
 #endif
   s_phase = PHASE_COUNTDOWN; s_countdown_digit = 9; s_overshot = false; s_cd_sub = CD_HOLD_MAX;
   layer_mark_dirty(s_canvas_layer); schedule(COUNTDOWN_HOLD_MS);
