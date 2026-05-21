@@ -1,13 +1,14 @@
 # TALLBOY — CONTEXT SEED FOR NEW THREAD
-*Everything a fresh Claude session needs to resume TallBoy development*
+*Everything a fresh Claude session needs to resume TallBoy development.*  
+*Last updated: v3.40, May 2026.*
 
 ---
 
 ## 1. WHAT IS THIS PROJECT?
 
-**TallBoy** is a Pebble watchface built around oversized vector-drawn digits that scale dynamically — "tall boys" that stretch and squish as an animation mechanic and fill the screen with pure time. Design by Sterling Ely (2026), implemented by Sterling Ely + Claude.
+**TallBoy** is a Pebble watchface built around oversized vector-drawn digits that scale dynamically — "tall boys" that stretch to fill the screen and squish as an animation mechanic on every minute change. Design by Sterling Ely (2026), implemented by Sterling Ely + Claude.
 
-**Sterling:** Design/concept lead, CloudPebble builds, device testing (Pebble Time 2 / emery).
+**Sterling:** Design/concept lead, CloudPebble builds, device testing.  
 **Claude:** Code, GitHub commits, documentation.
 
 ---
@@ -16,10 +17,23 @@
 
 ```
 SterlingEly/TallBoy (branch: main)
-└── src/main.c       ← entire watchface, currently v3.30a
+└── src/main.c        ← entire watchface, currently v3.40
+└── appinfo.json      ← app metadata and message keys
+└── README.md         ← user-facing documentation
+└── CONTEXT_TALLBOY.md ← this file
 ```
 
-**CloudPebble build rule:** The file Claude commits to GitHub is `src/main.c`. CloudPebble builds its own internal copy — after Claude pushes, Sterling manually syncs or edits in CloudPebble. Never use `push_files` (sends empty content). Always use `create_or_update_file` with current SHA.
+**CloudPebble build rules:**
+- File Claude commits to GitHub is `src/main.c` (flat path)
+- CloudPebble builds its own internal copy — Sterling manually syncs after Claude pushes
+- **Always use `create_or_update_file` with current SHA** — never `push_files` (sends empty content)
+- Full files only — never partial diffs
+
+**Dead files to delete (still in repo, causing `hstroke` warning on every build):**
+- `src/digit.c` — old bitmap/raster digit library, fully superseded
+- `src/digit.h` — header for above
+- `src/case8_patch.txt` — old patch notes
+- `src/main_digit1_fix.txt` — old patch notes
 
 ---
 
@@ -27,188 +41,243 @@ SterlingEly/TallBoy (branch: main)
 
 | Platform | Watch | Screen | UNIT | Notes |
 |----------|-------|--------|------|-------|
-| emery | Pebble Time 2 | 200×228 rect | 8px | Color, HR, touch — **primary dev device** |
-| flint | Pebble 2 | 144×168 rect | 6px | B&W, HR |
-| basalt | Pebble Time | 144×168 rect | 6px | Color |
-| diorite | Pebble 2 SE | 144×168 rect | 6px | B&W, HR |
-| aplite | Pebble Classic | 144×168 rect | 6px | B&W |
-
-Emery = 25u wide (200px / 8px). All others = 24u (144px / 6px).
+| emery | Pebble Time 2 | 200×228 | 8px | Color, HR, touch, smartstrap — **primary dev device** |
+| flint | Pebble 2 | 144×168 | 6px | B&W, HR |
+| basalt | Pebble Time | 144×168 | 6px | Color |
+| diorite | Pebble 2 SE | 144×168 | 6px | B&W, HR |
+| aplite | Pebble Classic | 144×168 | 6px | B&W |
 
 ---
 
-## 4. DIGIT GEOMETRY — THE UNIT SYSTEM
+## 4. UNIT SYSTEM & DIGIT GEOMETRY
 
-### Horizontal
-Every digit is **4u wide** (GLYPH_W) within a **5u slot** (SLOT_W = 5u). Half-unit padding each side creates 1u visual gap between digits.
+**UNIT = 8px (emery) / 6px (flint).** All layout is expressed in multiples of UNIT.
 
-```
-[margin] [½u|4u digit|½u] ×4 + [½u|1u colon|½u] + [margin] = 23u content
-Emery: 25u total → ~1u margin each side
-Flint: 24u total → ½u margin each side
-```
+Each digit occupies a **5u slot** (SLOT_W). Content is **4u wide** (GLYPH_W = UNIT×4) with HALF_UNIT (4px) padding each side.
 
-### Vertical — the h-based system (v3.27+)
-Digits are parameterized by **pixel height `h`** directly — no discrete size index.
-
+### Fixed constants (NEVER change with height `h`):
 ```c
-// Immutable — NEVER change with h:
-const int ro = UNIT * 2;   // arc outer radius
-const int ri = UNIT * 1;   // arc inner radius  
-const int sw = UNIT;       // stroke width
-
-// Derived from h:
-int bar  = (h - 7*UNIT) / 2;         // ring gap between inner cap centers
-int tail = (h > H_MIN) ? (h - H_MIN) / 4 : 0;  // tail stub extension
-
-// H_MIN = 11*UNIT = 88px (emery) / 66px (flint) — minimum legible
-// At H_MIN: bar=0, tail=0, arcs just touching
+const int ro = UNIT * 2;   // arc outer radius (16px emery)
+const int ri = UNIT * 1;   // arc inner radius (8px emery)
+const int sw = UNIT;       // stroke width (8px emery)
 ```
 
-**Formulas verified:** At h=196px (emery resting): bar=70px, tail=27px. At h=88px (min): bar=0, tail=0. ✓
+### Derived from `h`:
+```c
+int bar  = (h - 7 * UNIT) / 2;         // gap between inner cap centers (0 at H_MIN)
+int tail = (h > H_MIN) ? (h - H_MIN) / 4 : 0;  // tail stub length
+```
 
-### Digit layer taxonomy
-1. **Arc cap** (top, fixed size): arc cap (0,2,3,6,8,9), hbar cap (5,7), diagonal cap (1), none (4)
-2. **Spans** (resize with h): full span (body), bridge span (`bar`), diagonal span (2,7), tail span (`tail`)
-3. **Center elements** (anchored to cy, never move): crossbar (4), ring pair (8), center arc (6,9)
-4. **Arc base** (bottom, fixed size): arc base (0,3,5,6,8,9), flat base (2), none (1,4,7)
+**H_MIN = 11u = 88px (emery) / 66px (flint)** — minimum legible height. At H_MIN: bar=0, tail=0, arcs just touching.
+
+**Digits 1, 2, 7** use `gpath_create` for diagonal strokes. These allocate/free heap every frame. NULL checks are in place. Not a leak — destroy is always called.
 
 ---
 
 ## 5. MARGIN MODEL
 
 ```
-Full-screen vector:  target_h = ub_h - 4*UNIT  (2u top + 2u bottom)
-Stacked layout:      row_h = (ub_h - 5*UNIT) / 2  (2u top + 1u gap + 2u bottom)
-Quick look:          same margins maintained as ub_h shrinks (unobstructed_change fires)
-H_MIN = 11*UNIT      floor for all layouts
-ANIM_OVERSHOOT = UNIT  1u above target for snap effect
+MARGIN_CANVAS = 1u  — screen edge → bg rounded-rect boundary
+MARGIN_DIGIT  = 1u  — canvas boundary → digit/content area
+MARGIN_OUTER  = 2u  — MARGIN_CANVAS + MARGIN_DIGIT (convenience alias)
 ```
 
-On emery unobstructed (228px): `target_h = 228 - 32 = 196px`. Stacked row: `(228-40)/2 = 94px`.
+**Quick-look detection:**
+```c
+#define QUICK_LOOK_ACTIVE(ub_h)  ((ub_h) < (SCREEN_H - UNIT))
+#define BOTTOM_MARGIN(ub_h)      (QUICK_LOOK_ACTIVE(ub_h) ? MARGIN_DIGIT : MARGIN_OUTER)
+```
+When the quick-look bar is active, `ub_h` is reduced from the bottom. `BOTTOM_MARGIN` returns `MARGIN_DIGIT` (1u) so digits sit 1u from the bar, `MARGIN_OUTER` (2u) otherwise.
 
 ---
 
-## 6. ANIMATION SYSTEM
+## 6. LAYOUT SYSTEM
 
 ```c
-ANIM_STEP_PX = 8     // pixels per timer step
-ANIM_STEP_MS = 16    // ~60fps cadence
-ANIM_SNAP_MS = 120   // hold at overshoot peak before snap back
-ANIM_OVERSHOOT = UNIT  // 1u above target
-
-COUNTDOWN_HOLD_MS = 400  // pause at full height between countdown digits
-BLINK_REPS = 2
+#define LAYOUT_FULL      0  // full-screen time, squish on minute change
+#define LAYOUT_INFO_1    1  // 1 info line above + 1 below, time fills middle
+#define LAYOUT_INFO_2    2  // 2 above + 2 below
+#define LAYOUT_INFO_3    3  // 3 above + 3 below
+#define LAYOUT_STACK_R   4  // stacked digits right, info column left
+#define LAYOUT_STACK_L   5  // stacked digits left, info column right
+#define LAYOUT_COUNT     6
 ```
 
-### Sizing variables (no discrete size index — all pixel heights)
+**Shake (accel tap):** cycles forward through layouts. Returns to FULL with shake animation.  
+**Touch (emery, PBL_TOUCH):** cycles bg corner radius — `{2u, 3u, 4u}`.
+
+### Wide layout geometry (INFO_1/2/3):
+- Above block: first glyph at `ub_top + UNIT` (1u from top), lines step down by `INFO_LINE_STEP`
+- Below block: last glyph bottom at `ub_bot - BOTTOM_MARGIN`, lines step up by `INFO_LINE_STEP`
+- Time: fills between the two blocks with 1u gap each side; height auto-calculated, clamped to H_MIN
+
+### Stacked layout geometry:
 ```c
-s_h        // current animated digit height (pixels)
-s_target_h // resting height = prv_compute_target_h(ub_h)
-H_MIN      // = 11*UNIT, squish floor
+dh    = (ub_h - 2*MARGIN_OUTER - UNIT) / 2   // digit height (both rows equal)
+h_cy  = ub_top + MARGIN_OUTER + dh/2          // top digit center
+m_cy  = ub_bot - BOTTOM_MARGIN(ub_h) - dh/2  // bottom digit center
 ```
 
-### Animation phases
-- **PHASE_COUNTDOWN:** 9→0 wink at startup; all-vector, smooth pixel steps
-- **PHASE_BLINK:** 2× squish blinks after countdown before settling
-- **PHASE_SQUISH:** minute-change animation; swaps time digits at H_MIN
-- **PHASE_SHAKE_CYCLE:** accel-tap; SHAKE_OFFSETS_PX relative to s_target_h, 2 reps
-- All expand phases overshoot to `s_target_h + ANIM_OVERSHOOT`, snap back after ANIM_SNAP_MS
+---
+
+## 7. ANIMATION SYSTEM
+
+```c
+#define ANIM_STEP_PX    8    // px per timer tick
+#define ANIM_STEP_MS   16    // ~60fps
+#define ANIM_SNAP_MS  120    // hold at overshoot peak before snap
+#define ANIM_OVERSHOOT UNIT  // 1u above target
+#define COUNTDOWN_HOLD_MS 150  // pause between countdown digits
+#define BLINK_REPS        2    // squish blinks after countdown
+#define SHAKE_LEN         9    // steps in shake pulse wave
+```
+
+### Phases:
+- `PHASE_COUNTDOWN`: 9→0 launch sequence; digits squish and re-expand per digit
+- `PHASE_BLINK`: 2× squish blinks after countdown completes
+- `PHASE_SQUISH`: minute-change animation; swaps time at H_MIN; used for layout transitions too
+- `PHASE_SHAKE_CYCLE`: 9-point pulse wave `{0,-1u,-2u,-3u,-2u,-1u,0,+1u,0}` × 2 reps
+- `PHASE_DONE`: idle, waiting for events
+
+All expand phases overshoot to `s_target_h + ANIM_OVERSHOOT`, hold `ANIM_SNAP_MS`, snap back.
+
+Time digits swap at `H_MIN` during `PHASE_SQUISH`. If a tick arrives during squish, time is queued in `s_pending_hour`/`s_pending_minute` and applied at H_MIN.
 
 ---
 
-## 7. LAYOUT SYSTEM
+## 8. STEP PACE BACKGROUND COLOR
 
-Current layouts (shake to cycle):
-| # | Name | Description |
-|---|------|-------------|
-| 0 | `LAYOUT_VECTOR` | Full-screen vector digits, squish on minute change |
-| 1 | `LAYOUT_RIGHT` | Stacked vector right + info column left |
+Emery + PBL_COLOR + PBL_HEALTH only. Compares today's cumulative steps to `s_steps_expected` (7-day minute-level average at current time of day, fully offline from watch health history).
 
-**Planned v3.31 layout cycle (5 layouts):**
-| Shake | Layout | Description |
-|-------|--------|-------------|
-| 0 | Full time | Large digits, no info |
-| 1 | Info 1+1 | Time shrunk + 1 info line above + 1 below |
-| 2 | Info 2+2 | Time shrunk more + 2 above + 2 below |
-| 3 | Stacked right | Stacked digits right + info left |
-| 4 | Stacked left | Stacked digits left + info right |
-
----
-
-## 8. STEP PACE BACKGROUND COLOR (emery / PBL_COLOR only)
-
-Compares today's steps to `s_steps_expected` (expected cumulative at current minute, from 7-day minute-level watch history — fully offline).
-
-| % of expected | Color | fg |
-|---------------|-------|----|
+| % of expected | BG Color | FG Color |
+|---------------|----------|----------|
 | 0 / no data | Black | White |
 | 1–30% | Red | White |
 | 31–60% | Orange | White |
 | 61–90% | Yellow | **Black** |
-| 91–200% | Green | White |
+| 91–200% | Green | **Black** |
 | 201–400% | Blue | White |
 | 401–700% | Indigo | White |
 | 701–1000% | VividViolet | White |
 | 1001%+ | Black | White (easter egg) |
 
-Note: `GColorViolet` does NOT exist in Pebble SDK. Use `GColorVividViolet`.
+Note: Use `GColorVividViolet` — `GColorViolet` does not exist in the Pebble SDK.
 
 ---
 
-## 9. HEALTH DATA (v3.30+)
+## 9. HEALTH DATA
 
-All health reads happen **once per minute** inside `tick_handler` via `prv_update_health()`. No `health_service_events_subscribe` — removed entirely. All reads are synchronous from on-device cache.
+All health reads happen **once per minute** inside `tick_handler` via `prv_update_health()`. No `health_service_events_subscribe` — removed. All reads are synchronous from on-device cache.
 
 ```c
 s_steps          // HealthMetricStepCount (sum today)
 s_distance_m     // HealthMetricWalkedDistanceMeters (sum today)
 s_calories       // HealthMetricActiveKCalories (sum today)
 s_heart_rate     // HealthMetricHeartRateBPM (peek current)
-s_steps_expected // prv_calc_steps_expected() — 7-day minute-level avg at this time of day
+s_steps_expected // prv_calc_steps_expected() — 7-day min-level avg at this time
 ```
 
-`prv_calc_steps_expected()`: fetches up to 120 minutes of history from each of 7 prior days, sums steps, averages across days. Window capped at 120min; scales up proportionally if elapsed > window. Returns -1 if < 2 minutes elapsed.
+`prv_calc_steps_expected()`: fetches up to 120 minutes of history from each of 7 prior days, sums steps, averages across days with data. Window capped at 120min; scales proportionally if elapsed > window. Returns -1 if < 2 minutes elapsed today.
+
+Health minute buffer: `s_minute_buf[STEPS_AVG_MAX_MIN]` = 120 × `HealthMinuteData` = 480 bytes, statically allocated.
 
 ---
 
-## 10. INFO LINES (stacked layout, up to 8)
+## 10. INFO LINES
 
-Built by `build_info_lines()`, order:
-1. Full day name (Sunday, Monday…)
-2. Date (MAY 16)
-3. Step count (1,234 steps)
-4. Step pace % (87% pace) — only if s_steps_expected > 0
-5. Distance (mi or km) — only if > 0
-6. Calories (cal) — only if > 0
-7. Heart rate (bpm) or "no phone" if BT disconnected
-8. Battery (bat 84% or bat 84% +)
+### Wide layout (build_info_lines_wide) — up to 6 lines:
+1. Day & date: `"Thursday, May 21"`
+2. Weather: `"72 F & sunny"` (fallback if no data)
+3. Sunrise · sunset: `"6:02am · 8:14pm"` (fallback if no data)
+4. Steps · distance: `"3,500 steps · 2.1 mi"`
+5. Expected · %: `"exp 3,500 · 87%"`
+6. HR · cal: `"72 bpm · 212 cal"` (fallback `"-- bpm · -- cal"` if unavailable)
 
----
+All slots always rendered with fallback strings for layout debugging.
 
-## 11. PIXEL VERIFICATION STATUS
+### Stacked layout (build_info_lines_stacked) — up to 8 lines:
+1. Weather temp
+2. Day name
+3. Date
+4. Steps (short format)
+5. Expected steps
+6. Pace %
+7. +/- steps vs expected (or "on pace")
+8. Distance or battery
 
-- ✅ Emery vector digits pixel-verified at all sizes (Photoshop)
-- ✅ Low-res (flint) vector digits verified (subpixel anomalies acceptable)
-- ✅ Raster system fully retired (v3.25) — all bitmap code removed
-- ✅ Dynamic vertical sizing (v3.27+) — h in pixels, no discrete size index
-- ✅ Margins: 2u top/bottom full-screen, 2u+1u+2u stacked (v3.28)
-
----
-
-## 12. PENDING FEATURES
-
-### Next: v3.31 — multi-layout shake cycle
-Time shrinks dynamically as info lines are added above/below. Needs `draw_info_overlay()` system. Shake cycles through 5 layouts (see §7).
-
-### Soon
-- Weather/solar JS fetch (port from Radium2 `src/pkjs/`)
-- Config page (Clay vs custom HTML — decide when closer)
-- Hourly step pace comparison mode
+Battery always fills last available slot in both layouts.
 
 ---
 
-## 13. DESIGN TENET
+## 11. FONT METRICS (emery, Gothic 24 Bold — measured on device)
+
+```
+INFO_LINE_H     = 28px  full font cell height
+INFO_TOP_PAD    = 10px  dead space above glyph top inside cell
+INFO_GLYPH_H    = 18px  cap-top to descender-bottom (full glyph space)
+INFO_DESCENDER  =  4px  descenders below baseline (g, y, comma)
+INFO_CAP_OFFSET =  3px  caps above x-height (approximately)
+INFO_BOT_PAD    =  0px  glyph touches bottom of cell
+INFO_LINE_STEP  = 26px  rect-top to rect-top spacing for 1u gap between glyphs
+                         = INFO_GLYPH_H + UNIT = 18 + 8
+INFO_BOT_ADJUST =  2px  half-descender — documented, not yet applied
+```
+
+All text uses `draw_text_at_glyph_y(ctx, text, x, glyph_y, width)` which shifts the rect up by `INFO_TOP_PAD` so the visual glyph appears at `glyph_y`.
+
+---
+
+## 12. TOUCH API (PBL_TOUCH, emery + gabbro only)
+
+Confirmed from `pebble.h` line 913:
+```c
+void touch_service_subscribe(TouchServiceHandler handler, void *context);
+typedef void (*TouchServiceHandler)(const TouchEvent *, void *);
+```
+
+Current use: any touch → cycle `s_radius_idx` → redraw with new corner radius.
+
+**TODO:** Filter to touch-down only once event type enum is confirmed (compilation showed `TOUCH_EVENT_TYPE_DOWN` is wrong name). Also want `event->touch.x` / `event->touch.y` for per-digit squish easter egg — slot x positions are: H_TENS=12, H_ONES=52, COLON=80, M_TENS=108, M_ONES=148 (emery).
+
+---
+
+## 13. WEATHER / SOLAR DATA
+
+Received via `app_message` inbox from JS pebble-js-app (not yet written — see Radium2 reference).
+
+```c
+MESSAGE_KEY_WeatherTempF  // integer °F
+MESSAGE_KEY_WeatherTempC  // integer °C (fallback)
+MESSAGE_KEY_WeatherCode   // 0=clear, 1-3=cloudy, 4-49=fog, 50-69=rain, 70-79=snow, 80-99=storm
+// Stub (not yet handled):
+// MESSAGE_KEY_SunriseMin   // minutes since midnight
+// MESSAGE_KEY_SunsetMin    // minutes since midnight
+```
+
+Inbox size: 256 bytes (sufficient). Outbox: 64 bytes (nothing sent currently).
+
+---
+
+## 14. PENDING FEATURES
+
+### Near-term
+- Weather/solar JS fetch — port from `SterlingEly/Radium2` `src/pkjs/`
+- `MESSAGE_KEY_SunriseMin` / `MESSAGE_KEY_SunsetMin` inbox handling (stub in `inbox_received`)
+- Touch easter egg: per-digit squish using x/y hit testing
+- Delete dead files: `src/digit.c`, `src/digit.h`, `.txt` patch files
+- Prune unused legacy images from `resources/`
+
+### Design TBD
+- Config page (Clay vs custom HTML — prefer custom given Radium2 precedent)
+- `INFO_BOT_ADJUST = 2px` bottom margin tweak (documented, not applied)
+- Orange foreground: decide if luminance requires dark fg (borderline)
+- Corner radius final choice (currently touch-cycled for evaluation)
+- Canvas outline / border: likely removed in final; `draw_border()` deleted in v3.38b
+- Light vs dark color spectrum variant
+
+---
+
+## 15. DESIGN TENET
 
 *Watchfaces display data as atmosphere, not content. Artfully vague > precisely readable.*
 
@@ -216,20 +285,8 @@ Color = mood. Position = direction. The watch is the barometer; the phone is the
 
 ---
 
-## 14. RADIUM2 REFERENCE
+## 16. RADIUM2 REFERENCE
 
 Repo: `SterlingEly/Radium2` (branch: master)
-- `src/c/main.c` — field system reference, icon drawing, weather/solar logic
-- `src/pkjs/` — weather/solar JS fetch to port
-
-Field IDs from Radium2 (for future config system):
-```
-FIELD_NONE=0, FIELD_DAY_LONG=1, FIELD_DATE=2, FIELD_DAY_DATE=3,
-FIELD_STEPS=4, FIELD_TEMP_F=5, FIELD_TEMP_C=6, FIELD_BATTERY=7,
-FIELD_DISTANCE=8, FIELD_CALORIES=9, FIELD_BT=10, FIELD_HEART_RATE=11,
-FIELD_SUNRISE=12, FIELD_SUNSET=13, FIELD_DAYLIGHT=14
-```
-
----
-
-*End of context seed. Last updated: v3.30a, May 2026.*
+- `src/c/main.c` — field system reference, weather/solar parsing
+- `src/pkjs/` — weather/solar JS fetch to port to TallBoy
