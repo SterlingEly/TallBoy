@@ -1,7 +1,7 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v3.40
+// TallBoy — main.c  v3.41
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
 // Full-vector Pebble watchface. Digits are drawn from geometric
@@ -23,14 +23,15 @@
 //   TODO: filter to touch-down only once enum name is confirmed.
 //
 // FONT METRICS (emery, Gothic 24 Bold — measured on device):
-//   INFO_LINE_H    = 28px  full cell height
-//   INFO_TOP_PAD   = 10px  dead space above glyph top
-//   INFO_GLYPH_H   = 18px  cap-top to descender-bottom
-//   INFO_DESCENDER =  4px  descenders (g, y, comma)
-//   INFO_CAP_OFFSET =  3px  caps above x-height
-//   INFO_BOT_PAD   =  0px  glyph touches cell bottom
-//   INFO_LINE_STEP = 26px  rect-top to rect-top for 1u glyph gap
-//   INFO_BOT_ADJUST = 2px  half-descender (documented, not yet applied)
+//   INFO_LINE_H         = 28px  full cell height
+//   INFO_TOP_PAD        = 10px  dead space above glyph top
+//   INFO_GLYPH_H        = 18px  cap-top to descender-bottom
+//   INFO_DESCENDER      =  4px  descenders (g, y, comma)
+//   INFO_CAP_OFFSET     =  3px  caps above x-height
+//   INFO_BOT_PAD        =  0px  glyph touches cell bottom
+//   INFO_LINE_STEP      = 26px  1u glyph gap (stacked layouts)
+//   INFO_LINE_STEP_WIDE = 22px  ½u glyph gap (wide info overlay layouts)
+//   INFO_BOT_ADJUST     =  2px  half-descender (documented, not yet applied)
 //
 // MARGIN MODEL:
 //   MARGIN_CANVAS = 1u   screen edge → bg rounded-rect boundary
@@ -38,6 +39,12 @@
 //   MARGIN_OUTER  = 2u   = MARGIN_CANVAS + MARGIN_DIGIT (convenience alias)
 //   Quick-look: bar reduces ub_h from bottom; BOTTOM_MARGIN() macro
 //   returns MARGIN_DIGIT (1u) when bar active, MARGIN_OUTER (2u) otherwise.
+//
+// WIDE INFO OVERLAY MARGINS (v3.41):
+//   Top glyph:    ½u from screen top  (ub_top + HALF_UNIT)
+//   Bottom glyph: ½u from screen bottom (ub_bot - HALF_UNIT)
+//   Line spacing: ½u between glyphs   (INFO_LINE_STEP_WIDE = 22px)
+//   Time gap:     ½u each side of time digit block
 //
 // ANIMATION:
 //   All phases use AppTimer at 16ms (≈60fps), ANIM_STEP_PX=8px/step.
@@ -92,7 +99,8 @@ static int s_layout = LAYOUT_FULL;
   #define INFO_DESCENDER      4   // descender depth below baseline (measured)
   #define INFO_CAP_OFFSET     3   // cap height above x-height (measured)
   #define INFO_BOT_ADJUST     2   // half-descender — documented, not yet applied
-  #define INFO_LINE_STEP     26   // = INFO_GLYPH_H + UNIT — 1u gap between glyphs
+  #define INFO_LINE_STEP     26   // = INFO_GLYPH_H + UNIT — 1u gap (stacked layouts)
+  #define INFO_LINE_STEP_WIDE 22  // = INFO_GLYPH_H + HALF_UNIT — ½u gap (wide layouts)
   #define INFO_FONT_KEY    FONT_KEY_GOTHIC_24_BOLD
   #define UNIT                8   // px — base grid unit
 
@@ -118,7 +126,8 @@ static int s_layout = LAYOUT_FULL;
   #define INFO_DESCENDER      3
   #define INFO_CAP_OFFSET     2
   #define INFO_BOT_ADJUST     1
-  #define INFO_LINE_STEP     20   // = INFO_GLYPH_H + UNIT
+  #define INFO_LINE_STEP     20   // = INFO_GLYPH_H + UNIT (stacked)
+  #define INFO_LINE_STEP_WIDE 17  // = INFO_GLYPH_H + HALF_UNIT (wide)
   #define INFO_FONT_KEY    FONT_KEY_GOTHIC_18_BOLD
   #define UNIT                6
 #endif
@@ -480,10 +489,11 @@ static void draw_stacked_vec(GContext *ctx, int h_tens, int h_ones,
 // Layout geometry helpers
 // ---------------------------------------------------------------------------
 
-// Height of a visual block of n info lines (top of first glyph to bottom of last)
-static int prv_info_block_h(int n) {
+// Height of a visual block of n info lines (top of first glyph to bottom of last).
+// step = INFO_LINE_STEP (stacked, 1u spacing) or INFO_LINE_STEP_WIDE (wide, ½u spacing)
+static int prv_info_block_h(int n, int step) {
   if (n <= 0) return 0;
-  return INFO_GLYPH_H + (n - 1) * INFO_LINE_STEP;
+  return INFO_GLYPH_H + (n - 1) * step;
 }
 
 // Target digit height for current layout and unobstructed bounds height.
@@ -491,9 +501,9 @@ static int prv_info_block_h(int n) {
 static int prv_compute_target_h(int ub_h, int lines_above, int lines_below) {
   if (lines_above == 0 && lines_below == 0) return ub_h - 2 * MARGIN_OUTER;
   int reserved = 0;
-  // Each block: 1u outer gap + glyph block height + 1u inner gap to time
-  reserved += UNIT + prv_info_block_h(lines_above) + UNIT;
-  reserved += UNIT + prv_info_block_h(lines_below) + UNIT;
+  // Wide layout: ½u outer gap + glyph block + ½u inner gap to time, each side
+  reserved += HALF_UNIT + prv_info_block_h(lines_above, INFO_LINE_STEP_WIDE) + HALF_UNIT;
+  reserved += HALF_UNIT + prv_info_block_h(lines_below, INFO_LINE_STEP_WIDE) + HALF_UNIT;
   int h = ub_h - reserved;
   return h < H_MIN ? H_MIN : h;
 }
@@ -585,7 +595,7 @@ static int build_info_lines_wide(char lines[][INFO_LINE_BUF], int max_lines, str
     else   snprintf(lines[n++], INFO_LINE_BUF, "Mon, Jan 1");
   }
 
-  // A2: weather — "%.7s & %.29s" guarantees max 7+4+29=40 chars ≤ INFO_LINE_BUF
+  // A2: weather — "%.7s & %.29s" guarantees max 7+4+29=40 chars <= INFO_LINE_BUF
   if (n < max_lines) {
     if (s_weather_temp[0] && s_weather_desc[0])
       snprintf(lines[n++], INFO_LINE_BUF, "%.7s & %.29s", s_weather_temp, s_weather_desc);
@@ -719,7 +729,8 @@ static void draw_text_at_glyph_y(GContext *ctx, const char *text,
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 }
 
-// Stacked info column: n lines distributed evenly between adjusted margins
+// Stacked info column: n lines distributed evenly between adjusted margins.
+// Uses INFO_LINE_STEP (1u spacing) via equal slot distribution.
 static void draw_info_column(GContext *ctx, GRect area, struct tm *t) {
   char lines[INFO_LINES_MAX][INFO_LINE_BUF];
   int n = build_info_lines_stacked(lines, INFO_LINES_MAX, t);
@@ -735,23 +746,25 @@ static void draw_info_column(GContext *ctx, GRect area, struct tm *t) {
                          glyph_top + i * slot_h, area.size.w);
 }
 
-// Wide layout: lines anchored to top edge, growing downward
+// Wide layout: lines anchored to top edge, growing downward.
+// Uses INFO_LINE_STEP_WIDE (½u spacing between glyphs).
 static void draw_info_block_down(GContext *ctx, char lines[][INFO_LINE_BUF], int n,
                                   int glyph_y_start, int width, int x) {
   for (int i = 0; i < n; i++)
     draw_text_at_glyph_y(ctx, lines[i], x,
-                         glyph_y_start + i * INFO_LINE_STEP, width);
+                         glyph_y_start + i * INFO_LINE_STEP_WIDE, width);
 }
 
-// Wide layout: lines anchored to bottom edge, growing upward
-// glyph_bot is the pixel where the bottom of the last glyph should sit
+// Wide layout: lines anchored to bottom edge, growing upward.
+// glyph_bot is the pixel where the bottom of the last glyph should sit.
+// Uses INFO_LINE_STEP_WIDE (½u spacing between glyphs).
 static void draw_info_block_up(GContext *ctx, char lines[][INFO_LINE_BUF],
                                 int first_idx, int n, int glyph_bot, int width, int x) {
   if (n <= 0) return;
   for (int i = 0; i < n; i++) {
     // Last line (i = n-1): glyph top = glyph_bot - INFO_GLYPH_H
-    // Each preceding line is INFO_LINE_STEP higher
-    int glyph_y = glyph_bot - INFO_GLYPH_H - (n - 1 - i) * INFO_LINE_STEP;
+    // Each preceding line is INFO_LINE_STEP_WIDE higher
+    int glyph_y = glyph_bot - INFO_GLYPH_H - (n - 1 - i) * INFO_LINE_STEP_WIDE;
     draw_text_at_glyph_y(ctx, lines[first_idx + i], x, glyph_y, width);
   }
 }
@@ -815,16 +828,16 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int lines_above, lines_below;
     prv_layout_lines(&lines_above, &lines_below);
 
-    // Above block: first glyph at UNIT from top edge
-    int above_start = ub_top + UNIT;
-    int above_end   = above_start + prv_info_block_h(lines_above);
+    // Above block: first glyph at ½u from screen top
+    int above_start = ub_top + HALF_UNIT;
+    int above_end   = above_start + prv_info_block_h(lines_above, INFO_LINE_STEP_WIDE);
 
-    // Below block: last glyph bottom at bot_margin from unobstructed bottom
-    int below_end   = ub_bot - bot_margin;
-    int below_start = below_end - prv_info_block_h(lines_below);
+    // Below block: last glyph bottom at ½u from unobstructed bottom
+    int below_end   = ub_bot - HALF_UNIT;
+    int below_start = below_end - prv_info_block_h(lines_below, INFO_LINE_STEP_WIDE);
 
-    // Time fills whatever is left between the two blocks (1u gap each side)
-    int time_cy = (above_end + UNIT + below_start - UNIT) / 2;
+    // Time fills whatever is left between the two blocks (½u gap each side)
+    int time_cy = (above_end + HALF_UNIT + below_start - HALF_UNIT) / 2;
 
     // Build and draw info lines (info draws first, digits on top)
     char all_lines[INFO_LINES_MAX][INFO_LINE_BUF];
@@ -1153,7 +1166,7 @@ static void window_load(Window *window) {
   touch_service_subscribe(touch_handler, NULL);
 #endif
 
-  // Start launch countdown from 9 → 0
+  // Start launch countdown from 9 -> 0
   s_phase = PHASE_COUNTDOWN;
   s_countdown_digit = 9;
   s_overshot = false;
