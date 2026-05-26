@@ -1,85 +1,32 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v3.42
+// TallBoy — main.c  v3.42a
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// CHANGES v3.42:
+// v3.42a: remove duplicate prv_update_targets definition (line 414)
 //
-// LAYOUT CYCLE (shake wrist) — 9 states, sandwiches each info
-// layout between full-screen so you see the transition both ways:
-//   Full → Info1 → Full → Info2 → Full → Info3 → Full →
-//   StackL → StackR → Full → (wrap)
+// LAYOUT CYCLE (shake wrist) — 9 states:
+//   Full → Info1 → Full → Info2 → Full → Info3 → Full → StackL → StackR → (wrap)
 //
-// QUICK-LOOK MARGIN FIX:
-//   LAYOUT_FULL now uses BOTTOM_MARGIN(ub_h) for bottom only,
-//   MARGIN_OUTER for top — gives 1u from bar when active.
+// ANIMATION — 12 PRINCIPLES:
+//   Ease in/out: EASE[12] table replaces flat 8px steps
+//   Anticipation: PHASE_ANTICIPATE micro-stretch before squish
+//   Follow-through: overshoot + snap on expand
+//   Overlapping action: hour digits lead expand, minutes stagger by ANIM_STAGGER_MS
 //
-// STACKED OVERLAP FIX:
-//   H_ABSOLUTE_MIN = 5u (40px emery) — emergency floor used only
-//   in prv_compute_stacked_h when quick-look forces digits smaller
-//   than H_MIN. Digits look compressed but don't overlap.
-//
-// ANIMATION — 12 PRINCIPLES APPLIED:
-//
-//   Ease in/out (Slow in / Slow out):
-//     Variable step sizes via EASE[] table replace flat 8px steps.
-//     More frames at extremes (slow), fewer in middle (fast).
-//     Gives organic feel vs mechanical linear motion.
-//
-//   Anticipation:
-//     PHASE_SQUISH begins with a 1-frame micro-stretch (+HALF_UNIT)
-//     before the main squish. The brief upward movement signals
-//     that a squish is coming — "winding up".
-//
-//   Follow-through / Overshoot:
-//     Preserved from before. Expand overshoots ANIM_OVERSHOOT (1u)
-//     then snaps back after ANIM_SNAP_MS. Heavier feel.
-//
-//   Overlapping action:
-//     During expand, hour digits lead; minute digits follow by
-//     ANIM_STAGGER_MS (2 frames = 32ms). Expand is slightly
-//     asynchronous — hours fully overshoot before minutes start.
-//     During squish: all together (must all hit H_MIN for swap).
-//
-//   Secondary action:
-//     Colon dots have independent scale: they lead the expand
-//     slightly (ahead of hour digits) and trail the squish.
-//     Implemented via s_colon_h separate from s_h.
-//     (TODO: implement colon independence — noting here)
-//
-// ANIMATION TIMING:
-//   EASE table (12 entries, px per step) follows ease-in-out curve.
-//   Total travel: sum(EASE) = 80px ≈ target_h - H_MIN for typical
-//   layout. Actual timing self-corrects by clamping to target.
+// QUICK-LOOK: BOTTOM_MARGIN() returns 1u when bar active, 2u otherwise
+// H_ABSOLUTE_MIN = 5u — emergency floor for stacked-under-quick-look
 //
 // FONT METRICS (emery, Gothic 24 Bold — measured on device):
-//   INFO_LINE_H         = 28px  INFO_TOP_PAD       = 10px
-//   INFO_GLYPH_H        = 18px  INFO_BOT_PAD       =  0px
-//   INFO_DESCENDER      =  4px  INFO_CAP_OFFSET    =  3px
-//   INFO_LINE_STEP      = 26px  1u gap (stacked)
-//   INFO_LINE_STEP_WIDE = 22px  ½u gap (wide info overlay)
-//   INFO_BOT_ADJUST     =  2px  half-descender (not yet applied)
-//
-// WIDE INFO OVERLAY MARGINS:
-//   Top/bottom glyph at ½u from screen edge
-//   Line spacing: ½u between glyphs (INFO_LINE_STEP_WIDE)
-//   Time gap: ½u each side of digit block
-//
-// MARGIN MODEL:
-//   MARGIN_CANVAS = 1u, MARGIN_DIGIT = 1u, MARGIN_OUTER = 2u
-//   BOTTOM_MARGIN(ub_h): 1u when quick-look bar active, 2u otherwise
+//   INFO_LINE_H=28  INFO_TOP_PAD=10  INFO_GLYPH_H=18
+//   INFO_LINE_STEP=26 (stacked, 1u gap)  INFO_LINE_STEP_WIDE=22 (wide, ½u gap)
 // ============================================================
 
 // #define DEBUG_TEXT_BOXES
 
-// ---------------------------------------------------------------------------
-// Layout sequence — 9 states cycling through Full between each info group
-// ---------------------------------------------------------------------------
-// Sequence: Full(0) Info1(1) Full(2) Info2(3) Full(4) Info3(5) Full(6) StackL(7) StackR(8)
 #define LSEQ_COUNT  9
 static const int s_layout_seq[LSEQ_COUNT] = { 0, 1, 0, 2, 0, 3, 0, 5, 4 };
-// Underlying layout IDs (same as before)
 #define LAYOUT_FULL    0
 #define LAYOUT_INFO_1  1
 #define LAYOUT_INFO_2  2
@@ -87,15 +34,10 @@ static const int s_layout_seq[LSEQ_COUNT] = { 0, 1, 0, 2, 0, 3, 0, 5, 4 };
 #define LAYOUT_STACK_R 4
 #define LAYOUT_STACK_L 5
 
-static int s_lseq_idx = 0;  // current position in s_layout_seq
+static int s_lseq_idx = 0;
 #define CURRENT_LAYOUT  (s_layout_seq[s_lseq_idx])
-
-// Number of shake animation steps
 #define SHAKE_LEN  9
 
-// ---------------------------------------------------------------------------
-// Platform geometry
-// ---------------------------------------------------------------------------
 #if defined(PBL_PLATFORM_EMERY)
   #define SCREEN_W          200
   #define SCREEN_H          228
@@ -117,11 +59,9 @@ static int s_lseq_idx = 0;  // current position in s_layout_seq
   #define INFO_LINE_STEP_WIDE 22
   #define INFO_FONT_KEY    FONT_KEY_GOTHIC_24_BOLD
   #define UNIT                8
-
   static const uint16_t s_radius_opts[] = { UNIT*2, UNIT*3, UNIT*4 };
   #define RADIUS_COUNT 3
   static int s_radius_idx = 0;
-
 #else
   #define SCREEN_W          144
   #define SCREEN_H          168
@@ -150,70 +90,49 @@ static int s_lseq_idx = 0;  // current position in s_layout_seq
 #define MARGIN_OUTER    (MARGIN_CANVAS + MARGIN_DIGIT)
 #define HALF_SLOT_PAD   (UNIT / 2)
 #define GLYPH_W         (UNIT * 4)
-
-// H_MIN: desired minimum (squish floor, animation target)
-// H_ABSOLUTE_MIN: emergency floor only for stacked-under-quick-look
 #define H_MIN           (UNIT * 11)
 #define H_ABSOLUTE_MIN  (UNIT * 5)
-
 #define INFO_LINE_BUF   40
 #define INFO_LINES_MAX  8
 
-// Ease-in-out velocity table (px per step, 12 entries).
-// Follows a smooth acceleration/deceleration curve.
-// Sum = 80px — covers ~full travel range for typical layouts.
-// Animation self-corrects by clamping to target at end.
-//
-// Principle: Slow In / Slow Out — more frames near extremes,
-// faster in the middle. Organic feel vs mechanical linear steps.
+// Ease-in-out velocity table: slow at extremes, fast in middle
+// Sum=80px covers typical full travel. Animation clamps to target.
 static const int EASE[12] = { 2, 4, 6, 8, 10, 10, 10, 8, 6, 4, 2, 2 };
 #define EASE_LEN  12
 
-#define ANIM_STEP_MS    16    // ~60fps timer interval
-#define ANIM_SNAP_MS   100    // overshoot hold before snap (tighter than before)
-#define ANIM_OVERSHOOT  UNIT  // 1u overshoot above target
-
-// Anticipation micro-stretch: +HALF_UNIT before squish, held 1 frame
+#define ANIM_STEP_MS    16
+#define ANIM_SNAP_MS   100
+#define ANIM_OVERSHOOT  UNIT
 #define ANTICIPATION_PX   HALF_UNIT
 #define ANTICIPATION_MS   16
-
-// Stagger: minutes lag hours by this many ms during expand
-#define ANIM_STAGGER_MS  32   // 2 frames
-
+#define ANIM_STAGGER_MS  32   // minutes lag hours by 2 frames during expand
 #define COUNTDOWN_HOLD_MS  120
 #define BLINK_REPS           2
 #define STEPS_AVG_MAX_MIN  120
-
 #define DOT " \xc2\xb7 "
 
 #define QUICK_LOOK_ACTIVE(ub_h)  ((ub_h) < (SCREEN_H - UNIT))
 #define BOTTOM_MARGIN(ub_h)      (QUICK_LOOK_ACTIVE(ub_h) ? MARGIN_DIGIT : MARGIN_OUTER)
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
 typedef enum { CD_SHRINK, CD_HOLD_MIN, CD_EXPAND, CD_HOLD_MAX } CdSubPhase;
 typedef enum {
   PHASE_COUNTDOWN,
   PHASE_BLINK,
   PHASE_DONE,
-  PHASE_ANTICIPATE,   // brief stretch before squish (anticipation)
+  PHASE_ANTICIPATE,
   PHASE_SQUISH,
-  PHASE_EXPAND,       // explicit expand phase (hours lead, minutes stagger)
+  PHASE_EXPAND,
   PHASE_SHAKE_CYCLE
 } Phase;
 
-// ---------------------------------------------------------------------------
-// Global state
-// ---------------------------------------------------------------------------
 static Window    *s_window;
 static Layer     *s_canvas_layer;
 static int        s_hour = 0, s_minute = 0;
 static int        s_h = 0, s_target_h = 0;
-static int        s_h_min = 0;         // target min for current squish (H_MIN or H_ABSOLUTE_MIN)
-static int        s_ease_idx = 0;      // current position in EASE table
-static int        s_min_h = 0;         // minutes digit height (for stagger effect)
-static bool       s_min_staggered = false;  // true when minute digits lag
+static int        s_h_min = 0;
+static int        s_ease_idx = 0;
+static int        s_min_h = 0;
+static bool       s_min_staggered = false;
 static GColor     s_fg, s_bg;
 static Phase      s_phase = PHASE_COUNTDOWN;
 static int        s_anim_step = 0, s_anim_rep = 0;
@@ -221,7 +140,7 @@ static bool       s_going_down = true, s_overshot = false;
 static int        s_countdown_digit = 9;
 static CdSubPhase s_cd_sub = CD_HOLD_MAX;
 static AppTimer  *s_timer = NULL;
-static AppTimer  *s_min_timer = NULL;   // stagger timer for minute digits
+static AppTimer  *s_min_timer = NULL;
 static bool       s_digit_pending = false;
 static int        s_pending_hour = 0, s_pending_minute = 0;
 static int        s_battery_pct = 100;
@@ -232,9 +151,6 @@ static int        s_sunrise_min = -1, s_sunset_min = -1;
 static char       s_weather_temp[8] = "";
 static char       s_weather_desc[32] = "";
 
-// ---------------------------------------------------------------------------
-// Pace color
-// ---------------------------------------------------------------------------
 #if defined(PBL_COLOR)
 static GColor prv_pace_color(int steps_today, int steps_expected) {
   if (steps_expected <= 0 || steps_today <= 0) return GColorBlack;
@@ -254,12 +170,8 @@ static bool prv_bg_needs_dark_fg(GColor bg) {
 }
 #endif
 
-// ---------------------------------------------------------------------------
-// Health
-// ---------------------------------------------------------------------------
 #if defined(PBL_HEALTH)
 static HealthMinuteData s_minute_buf[STEPS_AVG_MAX_MIN];
-
 static int prv_calc_steps_expected(void) {
   time_t now = time(NULL);
   struct tm *t = localtime(&now);
@@ -281,7 +193,6 @@ static int prv_calc_steps_expected(void) {
   }
   return day_count > 0 ? total / day_count : -1;
 }
-
 static void prv_update_health(void) {
   HealthServiceAccessibilityMask mask;
   time_t start = time_start_of_today(), now = time(NULL);
@@ -301,9 +212,6 @@ static void prv_update_health(void) {
 }
 #endif
 
-// ---------------------------------------------------------------------------
-// Drawing
-// ---------------------------------------------------------------------------
 static void fill_arc(GContext *ctx, int cx, int cy, int ro, int ri, int a0, int a1) {
   GRect b = GRect(cx - ro, cy - ro, ro * 2, ro * 2);
   graphics_fill_radial(ctx, b, GOvalScaleModeFitCircle, (uint16_t)(ro - ri),
@@ -353,13 +261,12 @@ static void draw_colon_vec(GContext *ctx, int slot_x, int cy, int h) {
                        GOvalScaleModeFitCircle, (uint16_t)r, 0, DEG_TO_TRIGANGLE(360));
 }
 
-// Draw full time with optional stagger: hour digits use s_h, minute digits use s_min_h
+// Hour digits use s_h; minute digits use s_min_h (stagger during expand)
 static void draw_digits_vec(GContext *ctx, int h_tens, int h_ones,
                              int m_tens, int m_ones, int cy) {
   draw_digit_vec(ctx, h_tens, SLOT_H_TENS, cy, s_h);
   draw_digit_vec(ctx, h_ones, SLOT_H_ONES, cy, s_h);
   draw_colon_vec(ctx, COLON_SLOT_X, cy, s_h);
-  // Minute digits use s_min_h for stagger effect; clamp to H_ABSOLUTE_MIN
   int mh = s_min_h < H_ABSOLUTE_MIN ? H_ABSOLUTE_MIN : s_min_h;
   draw_digit_vec(ctx, m_tens, SLOT_M_TENS, cy, mh);
   draw_digit_vec(ctx, m_ones, SLOT_M_ONES, cy, mh);
@@ -374,9 +281,6 @@ static void draw_stacked_vec(GContext *ctx, int h_tens, int h_ones,
   draw_digit_vec(ctx, m_ones, ones_x, m_cy, dh);
 }
 
-// ---------------------------------------------------------------------------
-// Layout geometry
-// ---------------------------------------------------------------------------
 static int prv_info_block_h(int n, int step) {
   if (n <= 0) return 0;
   return INFO_GLYPH_H + (n - 1) * step;
@@ -395,10 +299,9 @@ static int prv_compute_target_h(int ub_h, int layout) {
   int above, below;
   prv_layout_lines(layout, &above, &below);
   if (above == 0 && below == 0) {
-    // Full screen: asymmetric margins — top stays 2u, bottom uses quick-look-aware margin
+    // Full: top 2u, bottom quick-look-aware
     return ub_h - MARGIN_OUTER - BOTTOM_MARGIN(ub_h);
   }
-  // Wide: ½u outer + block + ½u inner each side
   int reserved = HALF_UNIT + prv_info_block_h(above, INFO_LINE_STEP_WIDE) + HALF_UNIT;
   reserved    += HALF_UNIT + prv_info_block_h(below, INFO_LINE_STEP_WIDE) + HALF_UNIT;
   int h = ub_h - reserved;
@@ -406,20 +309,10 @@ static int prv_compute_target_h(int ub_h, int layout) {
 }
 
 static int prv_compute_stacked_h(int ub_h) {
-  // Use H_ABSOLUTE_MIN as emergency floor — allows compression under quick-look
   int h = (ub_h - 2 * MARGIN_OUTER - UNIT) / 2;
   return h < H_ABSOLUTE_MIN ? H_ABSOLUTE_MIN : h;
 }
 
-static void prv_update_targets(void) {
-  Layer *root = window_get_root_layer(s_window);
-  GRect ub = layer_get_unobstructed_bounds(root);
-  s_target_h = prv_compute_target_h(ub.size.h, CURRENT_LAYOUT);
-}
-
-// ---------------------------------------------------------------------------
-// String formatters
-// ---------------------------------------------------------------------------
 static const char *s_day_names[] = {
   "Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"
 };
@@ -429,11 +322,9 @@ static const char *s_month_names[] = {
 
 static void prv_fmt_distance(char *buf, int len) {
   if (strcmp(i18n_get_system_locale(), "en_US") == 0) {
-    int mx = (s_distance_m * 10) / 1609;
-    snprintf(buf, len, "%d.%d mi", mx/10, mx%10);
+    int mx = (s_distance_m * 10) / 1609; snprintf(buf, len, "%d.%d mi", mx/10, mx%10);
   } else {
-    int kx = (s_distance_m * 10) / 1000;
-    snprintf(buf, len, "%d.%d km", kx/10, kx%10);
+    int kx = (s_distance_m * 10) / 1000; snprintf(buf, len, "%d.%d km", kx/10, kx%10);
   }
 }
 static void prv_fmt_steps_short(char *buf, int len, int steps) {
@@ -456,9 +347,6 @@ static void prv_fmt_bat_bt(char *buf, int len) {
   else snprintf(buf, len, "%d%% bat", s_battery_pct);
 }
 
-// ---------------------------------------------------------------------------
-// Info line builders
-// ---------------------------------------------------------------------------
 static int build_info_lines_wide(char lines[][INFO_LINE_BUF], int max_lines, struct tm *t) {
   int n = 0;
   if (n < max_lines) {
@@ -469,10 +357,8 @@ static int build_info_lines_wide(char lines[][INFO_LINE_BUF], int max_lines, str
   if (n < max_lines) {
     if (s_weather_temp[0] && s_weather_desc[0])
       snprintf(lines[n++], INFO_LINE_BUF, "%.7s & %.29s", s_weather_temp, s_weather_desc);
-    else if (s_weather_temp[0])
-      snprintf(lines[n++], INFO_LINE_BUF, "%s", s_weather_temp);
-    else
-      snprintf(lines[n++], INFO_LINE_BUF, "72 F & sunny");
+    else if (s_weather_temp[0]) snprintf(lines[n++], INFO_LINE_BUF, "%s", s_weather_temp);
+    else snprintf(lines[n++], INFO_LINE_BUF, "72 F & sunny");
   }
   if (n < max_lines) {
     if (s_sunrise_min >= 0 || s_sunset_min >= 0) {
@@ -480,9 +366,7 @@ static int build_info_lines_wide(char lines[][INFO_LINE_BUF], int max_lines, str
       prv_fmt_time_min(rise, sizeof(rise), s_sunrise_min);
       prv_fmt_time_min(set,  sizeof(set),  s_sunset_min);
       snprintf(lines[n++], INFO_LINE_BUF, "%s" DOT "%s", rise, set);
-    } else {
-      snprintf(lines[n++], INFO_LINE_BUF, "6:02am" DOT "8:14pm");
-    }
+    } else snprintf(lines[n++], INFO_LINE_BUF, "6:02am" DOT "8:14pm");
   }
   if (n < max_lines) {
 #if defined(PBL_HEALTH)
@@ -546,9 +430,6 @@ static int build_info_lines_stacked(char lines[][INFO_LINE_BUF], int max_lines, 
   return n;
 }
 
-// ---------------------------------------------------------------------------
-// Text drawing
-// ---------------------------------------------------------------------------
 static GFont prv_info_font(void) { return fonts_get_system_font(INFO_FONT_KEY); }
 
 static void draw_text_at_glyph_y(GContext *ctx, const char *text,
@@ -571,15 +452,13 @@ static void draw_info_column(GContext *ctx, GRect area, struct tm *t) {
   int glyph_bot = area.origin.y + area.size.h - MARGIN_OUTER + INFO_GLYPH_H;
   int slot_h = (glyph_bot - glyph_top) / n;
   for (int i = 0; i < n; i++)
-    draw_text_at_glyph_y(ctx, lines[i], area.origin.x,
-                         glyph_top + i * slot_h, area.size.w);
+    draw_text_at_glyph_y(ctx, lines[i], area.origin.x, glyph_top + i * slot_h, area.size.w);
 }
 
 static void draw_info_block_down(GContext *ctx, char lines[][INFO_LINE_BUF], int n,
                                   int glyph_y_start, int width, int x) {
   for (int i = 0; i < n; i++)
-    draw_text_at_glyph_y(ctx, lines[i], x,
-                         glyph_y_start + i * INFO_LINE_STEP_WIDE, width);
+    draw_text_at_glyph_y(ctx, lines[i], x, glyph_y_start + i * INFO_LINE_STEP_WIDE, width);
 }
 
 static void draw_info_block_up(GContext *ctx, char lines[][INFO_LINE_BUF],
@@ -591,9 +470,6 @@ static void draw_info_block_up(GContext *ctx, char lines[][INFO_LINE_BUF],
   }
 }
 
-// ---------------------------------------------------------------------------
-// Main draw
-// ---------------------------------------------------------------------------
 static void draw_layer(Layer *layer, GContext *ctx) {
   Layer *root  = window_get_root_layer(s_window);
   GRect ub     = layer_get_unobstructed_bounds(root);
@@ -623,7 +499,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   int bot_margin = BOTTOM_MARGIN(ub_h);
 
   if (s_phase == PHASE_COUNTDOWN) {
-    // Countdown: hour digits use s_h, minute digits lead slightly via s_min_h
     draw_digit_vec(ctx, s_countdown_digit, SLOT_H_TENS, ub_top + ub_h/2, s_h);
     draw_digit_vec(ctx, s_countdown_digit, SLOT_H_ONES, ub_top + ub_h/2, s_h);
     draw_colon_vec(ctx, COLON_SLOT_X, ub_top + ub_h/2, s_h);
@@ -637,7 +512,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   struct tm *tm_now = (s_phase == PHASE_DONE) ? localtime(&now_t) : NULL;
 
   if (layout == LAYOUT_FULL) {
-    // Full screen: center in unobstructed area
     draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, ub_top + ub_h / 2);
 
   } else if (layout == LAYOUT_INFO_1 || layout == LAYOUT_INFO_2 || layout == LAYOUT_INFO_3) {
@@ -654,13 +528,11 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int total = build_info_lines_wide(all_lines, lines_above + lines_below, tm_now);
 
     int above_n = lines_above < total ? lines_above : total;
-    draw_info_block_down(ctx, all_lines, above_n,
-                         above_start, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
+    draw_info_block_down(ctx, all_lines, above_n, above_start, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
     int below_n = total - lines_above;
     if (below_n > lines_below) below_n = lines_below;
     if (below_n > 0)
-      draw_info_block_up(ctx, all_lines, lines_above, below_n,
-                         below_end, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
+      draw_info_block_up(ctx, all_lines, lines_above, below_n, below_end, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
 
     draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, time_cy);
 
@@ -671,25 +543,19 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int tens_x, ones_x, info_x, info_w;
 
     if (layout == LAYOUT_STACK_R) {
-      ones_x = SCREEN_W - SIDE_MARGIN - SLOT_W;
-      tens_x = ones_x - SLOT_W;
+      ones_x = SCREEN_W - SIDE_MARGIN - SLOT_W; tens_x = ones_x - SLOT_W;
       info_x = SIDE_MARGIN; info_w = tens_x - SIDE_MARGIN * 2;
     } else {
       tens_x = SIDE_MARGIN; ones_x = SIDE_MARGIN + SLOT_W;
-      info_x = ones_x + SLOT_W + SIDE_MARGIN;
-      info_w = SCREEN_W - info_x - SIDE_MARGIN;
+      info_x = ones_x + SLOT_W + SIDE_MARGIN; info_w = SCREEN_W - info_x - SIDE_MARGIN;
     }
 
     if (tm_now && info_w > 20)
       draw_info_column(ctx, GRect(info_x, ub_top, info_w, ub_h), tm_now);
-    draw_stacked_vec(ctx, h_tens, h_ones, m_tens, m_ones, dh,
-                     tens_x, ones_x, h_cy, m_cy);
+    draw_stacked_vec(ctx, h_tens, h_ones, m_tens, m_ones, dh, tens_x, ones_x, h_cy, m_cy);
   }
 }
 
-// ---------------------------------------------------------------------------
-// Animation engine — eased, with anticipation and stagger
-// ---------------------------------------------------------------------------
 static void timer_cb(void *data);
 static void min_timer_cb(void *data);
 
@@ -703,67 +569,41 @@ static void schedule_min(uint32_t ms) {
   s_min_timer = app_timer_register(ms, min_timer_cb, NULL);
 }
 
-// One eased expand step. Uses EASE table for velocity.
-// Returns true when target reached.
 static bool prv_ease_expand_step(int *h_val) {
-  if (s_overshot) {
-    *h_val = s_target_h;
-    s_overshot = false;
-    return true;
-  }
+  if (s_overshot) { *h_val = s_target_h; s_overshot = false; return true; }
   int step = (s_ease_idx < EASE_LEN) ? EASE[s_ease_idx] : EASE[EASE_LEN - 1];
   s_ease_idx++;
   *h_val += step;
   int peak = s_target_h + ANIM_OVERSHOOT;
-  if (*h_val >= peak) {
-    *h_val = peak;
-    s_overshot = true;
-    schedule(ANIM_SNAP_MS);
-    return false;
-  }
-  if (*h_val >= s_target_h && !s_overshot) {
-    // Reached target without overshoot (near end of ease table)
-    *h_val = s_target_h;
-    return true;
-  }
+  if (*h_val >= peak) { *h_val = peak; s_overshot = true; schedule(ANIM_SNAP_MS); return false; }
+  if (*h_val >= s_target_h) { *h_val = s_target_h; return true; }
   schedule(ANIM_STEP_MS);
   return false;
 }
 
-// One eased shrink step. Returns true when s_h_min reached.
 static bool prv_ease_shrink_step(void) {
   int step = (s_ease_idx < EASE_LEN) ? EASE[EASE_LEN - 1 - s_ease_idx] : EASE[0];
   s_ease_idx++;
   s_h -= step;
-  if (s_h <= s_h_min) {
-    s_h = s_h_min;
-    s_min_h = s_h_min;  // bring minutes to same floor
-    return true;
-  }
+  if (s_h <= s_h_min) { s_h = s_h_min; s_min_h = s_h_min; return true; }
   return false;
 }
 
-// Stagger timer: fires after ANIM_STAGGER_MS to start minute digit expand
 static void min_timer_cb(void *data) {
   s_min_timer = NULL;
   s_min_staggered = true;
-  // s_min_h will catch up via prv_ease_expand_step in next timer_cb
   layer_mark_dirty(s_canvas_layer);
 }
 
 static void prv_start_anticipate(void) {
-  // Brief upward stretch before squish — anticipation principle
   s_phase = PHASE_ANTICIPATE;
   schedule(ANTICIPATION_MS);
 }
 
 static void prv_start_expand(void) {
   s_phase = PHASE_EXPAND;
-  s_ease_idx = 0;
-  s_overshot = false;
-  // Hour digits lead; minute digits stagger after ANIM_STAGGER_MS
-  s_min_staggered = false;
-  s_min_h = s_h;  // minutes start from same compressed height
+  s_ease_idx = 0; s_overshot = false;
+  s_min_staggered = false; s_min_h = s_h;
   schedule_min(ANIM_STAGGER_MS);
   schedule(ANIM_STEP_MS);
 }
@@ -778,65 +618,48 @@ static void prv_start_blink(void) {
 
 static void timer_cb(void *data) {
   s_timer = NULL;
-
   switch (s_phase) {
 
     case PHASE_ANTICIPATE:
-      // Micro-stretch up before squish
-      s_h += ANTICIPATION_PX;
-      s_min_h = s_h;
+      s_h += ANTICIPATION_PX; s_min_h = s_h;
       layer_mark_dirty(s_canvas_layer);
-      s_phase = PHASE_SQUISH;
-      s_ease_idx = 0;
-      s_h_min = H_MIN;
+      s_phase = PHASE_SQUISH; s_ease_idx = 0; s_h_min = H_MIN;
       schedule(ANIM_STEP_MS);
       break;
 
     case PHASE_COUNTDOWN:
       switch (s_cd_sub) {
         case CD_SHRINK:
-          s_h -= 6; s_min_h = s_h;
-          layer_mark_dirty(s_canvas_layer);
+          s_h -= 6; s_min_h = s_h; layer_mark_dirty(s_canvas_layer);
           if (s_h <= H_MIN) { s_h = H_MIN; s_min_h = H_MIN; s_cd_sub = CD_HOLD_MIN; schedule(ANIM_SNAP_MS); }
           else schedule(ANIM_STEP_MS);
           break;
         case CD_HOLD_MIN:
           if (s_countdown_digit == 0) { prv_start_blink(); break; }
-          s_countdown_digit--;
-          layer_mark_dirty(s_canvas_layer);
-          s_cd_sub = CD_EXPAND; s_ease_idx = 0; s_overshot = false;
-          schedule(ANIM_STEP_MS);
+          s_countdown_digit--; layer_mark_dirty(s_canvas_layer);
+          s_cd_sub = CD_EXPAND; s_ease_idx = 0; s_overshot = false; schedule(ANIM_STEP_MS);
           break;
         case CD_EXPAND: {
           bool done = prv_ease_expand_step(&s_h);
-          s_min_h = s_h;  // countdown: no stagger, move together
-          layer_mark_dirty(s_canvas_layer);
+          s_min_h = s_h; layer_mark_dirty(s_canvas_layer);
           if (done) { s_cd_sub = CD_HOLD_MAX; schedule(COUNTDOWN_HOLD_MS); }
           break;
         }
-        case CD_HOLD_MAX:
-          s_cd_sub = CD_SHRINK;
-          schedule(ANIM_STEP_MS);
-          break;
+        case CD_HOLD_MAX: s_cd_sub = CD_SHRINK; schedule(ANIM_STEP_MS); break;
       }
       break;
 
     case PHASE_BLINK:
       if (s_going_down) {
-        s_h -= 6; s_min_h = s_h;
-        layer_mark_dirty(s_canvas_layer);
+        s_h -= 6; s_min_h = s_h; layer_mark_dirty(s_canvas_layer);
         if (s_h <= H_MIN) { s_h = H_MIN; s_min_h = H_MIN; s_going_down = false; s_overshot = false; }
         schedule(ANIM_STEP_MS);
       } else {
         bool done = prv_ease_expand_step(&s_h);
-        s_min_h = s_h;
-        layer_mark_dirty(s_canvas_layer);
+        s_min_h = s_h; layer_mark_dirty(s_canvas_layer);
         if (done) {
-          if (++s_anim_rep < BLINK_REPS) {
-            s_going_down = true; s_overshot = false; s_ease_idx = 0; schedule(ANIM_STEP_MS);
-          } else {
-            s_phase = PHASE_DONE; layer_mark_dirty(s_canvas_layer);
-          }
+          if (++s_anim_rep < BLINK_REPS) { s_going_down = true; s_overshot = false; s_ease_idx = 0; schedule(ANIM_STEP_MS); }
+          else { s_phase = PHASE_DONE; layer_mark_dirty(s_canvas_layer); }
         }
       }
       break;
@@ -845,46 +668,30 @@ static void timer_cb(void *data) {
       bool done = prv_ease_shrink_step();
       layer_mark_dirty(s_canvas_layer);
       if (done) {
-        if (s_digit_pending) {
-          s_hour = s_pending_hour; s_minute = s_pending_minute;
-          s_digit_pending = false;
-        }
+        if (s_digit_pending) { s_hour = s_pending_hour; s_minute = s_pending_minute; s_digit_pending = false; }
         prv_start_expand();
-      } else {
-        schedule(ANIM_STEP_MS);
-      }
+      } else schedule(ANIM_STEP_MS);
       break;
     }
 
     case PHASE_EXPAND: {
-      // Hour digits: use main ease expand
       bool done = prv_ease_expand_step(&s_h);
-      // Minute digits: stagger if not yet started, otherwise track separately
       if (s_min_staggered) {
-        // Minutes are running — step them independently but slightly behind
-        int min_step = (s_ease_idx > 0 && s_ease_idx <= EASE_LEN) ?
-                       EASE[s_ease_idx - 1] : EASE[EASE_LEN - 1];
+        int min_step = (s_ease_idx > 0 && s_ease_idx <= EASE_LEN) ? EASE[s_ease_idx - 1] : EASE[EASE_LEN - 1];
         s_min_h += min_step;
-        if (s_min_h > s_h) s_min_h = s_h;  // can't exceed hours
+        if (s_min_h > s_h) s_min_h = s_h;
         if (s_min_h > s_target_h) s_min_h = s_target_h;
       }
       layer_mark_dirty(s_canvas_layer);
-      if (done) {
-        s_min_h = s_target_h;  // snap minutes to final target on completion
-        s_phase = PHASE_DONE;
-        layer_mark_dirty(s_canvas_layer);
-      }
+      if (done) { s_min_h = s_target_h; s_phase = PHASE_DONE; layer_mark_dirty(s_canvas_layer); }
       break;
     }
 
     case PHASE_SHAKE_CYCLE: {
-      static const int OFF[SHAKE_LEN] = {
-        0, -UNIT, -(UNIT*2), -(UNIT*3), -(UNIT*2), -UNIT, 0, UNIT, 0
-      };
+      static const int OFF[SHAKE_LEN] = { 0,-UNIT,-(UNIT*2),-(UNIT*3),-(UNIT*2),-UNIT,0,UNIT,0 };
       if (++s_anim_step < SHAKE_LEN) {
         int h = s_target_h + OFF[s_anim_step];
-        s_h = h < H_ABSOLUTE_MIN ? H_ABSOLUTE_MIN : h;
-        s_min_h = s_h;
+        s_h = h < H_ABSOLUTE_MIN ? H_ABSOLUTE_MIN : h; s_min_h = s_h;
         layer_mark_dirty(s_canvas_layer);
         schedule(s_anim_step == SHAKE_LEN - 2 ? ANIM_SNAP_MS : ANIM_STEP_MS);
       } else if (++s_anim_rep < 2) {
@@ -901,9 +708,7 @@ static void timer_cb(void *data) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Event handlers
-// ---------------------------------------------------------------------------
+// prv_update_targets: recompute s_target_h from current layout + live ub
 static void prv_update_targets(void) {
   Layer *root = window_get_root_layer(s_window);
   GRect ub = layer_get_unobstructed_bounds(root);
@@ -912,10 +717,7 @@ static void prv_update_targets(void) {
 
 static void unobstructed_change(AnimationProgress progress, void *ctx) {
   prv_update_targets();
-  if (s_phase == PHASE_DONE) {
-    s_h = s_target_h; s_min_h = s_target_h;
-    layer_mark_dirty(s_canvas_layer);
-  }
+  if (s_phase == PHASE_DONE) { s_h = s_target_h; s_min_h = s_target_h; layer_mark_dirty(s_canvas_layer); }
 }
 
 static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
@@ -925,16 +727,11 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   s_lseq_idx = (s_lseq_idx + 1) % LSEQ_COUNT;
   prv_update_targets();
 
-  int layout = CURRENT_LAYOUT;
-  if (layout == LAYOUT_FULL) {
-    // Returning to full: shake animation
+  if (CURRENT_LAYOUT == LAYOUT_FULL) {
     s_phase = PHASE_SHAKE_CYCLE; s_anim_step = 0; s_anim_rep = 0;
-    s_h = s_target_h; s_min_h = s_target_h;
-    schedule(ANIM_STEP_MS);
+    s_h = s_target_h; s_min_h = s_target_h; schedule(ANIM_STEP_MS);
   } else {
-    // Entering info/stacked: anticipation then squish
-    s_h_min = H_MIN;
-    prv_start_anticipate();
+    s_h_min = H_MIN; prv_start_anticipate();
   }
   layer_mark_dirty(s_canvas_layer);
 }
@@ -951,22 +748,15 @@ static void touch_handler(const TouchEvent *event, void *context) {
 
 static void tick_handler(struct tm *t, TimeUnits units) {
   int layout = CURRENT_LAYOUT;
-  bool animated = (layout == LAYOUT_FULL   ||
-                   layout == LAYOUT_INFO_1 ||
-                   layout == LAYOUT_INFO_2 ||
-                   layout == LAYOUT_INFO_3);
-
+  bool animated = (layout == LAYOUT_FULL || layout == LAYOUT_INFO_1 ||
+                   layout == LAYOUT_INFO_2 || layout == LAYOUT_INFO_3);
   if (s_phase == PHASE_DONE && animated) {
-    s_pending_hour = t->tm_hour; s_pending_minute = t->tm_min;
-    s_digit_pending = true;
-    s_h_min = H_MIN;
-    prv_start_anticipate();
+    s_pending_hour = t->tm_hour; s_pending_minute = t->tm_min; s_digit_pending = true;
+    s_h_min = H_MIN; prv_start_anticipate();
   } else if (s_phase == PHASE_SQUISH) {
-    s_pending_hour = t->tm_hour; s_pending_minute = t->tm_min;
-    s_digit_pending = true;
+    s_pending_hour = t->tm_hour; s_pending_minute = t->tm_min; s_digit_pending = true;
   } else {
-    s_hour = t->tm_hour; s_minute = t->tm_min;
-    layer_mark_dirty(s_canvas_layer);
+    s_hour = t->tm_hour; s_minute = t->tm_min; layer_mark_dirty(s_canvas_layer);
   }
 #if defined(PBL_HEALTH)
   prv_update_health();
@@ -977,7 +767,6 @@ static void battery_handler(BatteryChargeState state) {
   s_battery_pct = state.charge_percent; s_charging = state.is_charging;
   layer_mark_dirty(s_canvas_layer);
 }
-
 static void bt_handler(bool connected) {
   s_bt_connected = connected; layer_mark_dirty(s_canvas_layer);
 }
@@ -997,9 +786,6 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
   layer_mark_dirty(s_canvas_layer);
 }
 
-// ---------------------------------------------------------------------------
-// Window / App lifecycle
-// ---------------------------------------------------------------------------
 static void window_load(Window *window) {
   Layer *root = window_get_root_layer(window);
   s_canvas_layer = layer_create(layer_get_bounds(root));
@@ -1017,10 +803,8 @@ static void window_load(Window *window) {
   touch_service_subscribe(touch_handler, NULL);
 #endif
 
-  s_phase = PHASE_COUNTDOWN;
-  s_countdown_digit = 9;
-  s_overshot = false; s_ease_idx = 0;
-  s_cd_sub = CD_HOLD_MAX;
+  s_phase = PHASE_COUNTDOWN; s_countdown_digit = 9;
+  s_overshot = false; s_ease_idx = 0; s_cd_sub = CD_HOLD_MAX;
   layer_mark_dirty(s_canvas_layer);
   schedule(COUNTDOWN_HOLD_MS);
 }
@@ -1040,9 +824,7 @@ static void init(void) {
   s_fg = GColorWhite; s_bg = GColorBlack;
   s_window = window_create();
   window_set_background_color(s_window, GColorBlack);
-  window_set_window_handlers(s_window, (WindowHandlers){
-    .load = window_load, .unload = window_unload
-  });
+  window_set_window_handlers(s_window, (WindowHandlers){ .load = window_load, .unload = window_unload });
   window_stack_push(s_window, true);
 
   time_t now = time(NULL);
