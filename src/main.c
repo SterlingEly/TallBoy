@@ -1,38 +1,27 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v3.43
+// TallBoy — main.c  v3.43a
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.43 fixes:
+// v3.43a fixes:
 //
-// ANIMATION:
-//   - Reverted minute-digit stagger. Both digit pairs animate
-//     together. Stagger was unreliable on device — revisit later.
-//   - Tighter ease curve: min 4px/step (was 2px), peak 12px.
-//     Old slow starts read as lag/glitch, now feels snappier.
-//   - Shake cycle: 1 rep only (was 2). Removed upswing step
-//     at position 7 — it read as a glitch, not a bounce.
+// SQUISH CENTERED (full screen):
+//   cy was ub_top + MARGIN_OUTER + s_h/2, so it moved as s_h
+//   changed — digit slid down from top instead of squishing in place.
+//   Fix: cy = ub_top + MARGIN_OUTER + s_target_h/2 (fixed center).
+//   Also applied to countdown for consistency.
 //
-// QUICK-LOOK MARGIN FIX (full screen):
-//   Digits are now positioned from top margin, not centered in
-//   ub_h. cy = ub_top + MARGIN_OUTER + target_h/2 ensures the
-//   bottom gap is exactly BOTTOM_MARGIN(ub_h) = 1u when bar active.
+// STACKED INFO COLUMN BOTTOM MARGIN:
+//   glyph_bot now = area.bottom - MARGIN_OUTER + INFO_GLYPH_H.
+//   The + INFO_GLYPH_H compensates for slot distribution: slot_h
+//   is the distance between glyph tops, so the last glyph extends
+//   INFO_GLYPH_H below its slot start. Without this the last line
+//   sat too high. With it the last glyph bottom lands at MARGIN_OUTER
+//   from the column edge.
 //
-// STACKED QUICK-LOOK FIX:
-//   prv_compute_stacked_h now takes ub_h and uses BOTTOM_MARGIN(ub_h)
-//   for the bottom, matching the actual draw positions. This closes
-//   the excess inter-digit gap that appeared with quick-look active.
-//
-// STACKED INFO COLUMN MARGINS:
-//   Removed the HALF_UNIT/INFO_GLYPH_H offsets from draw_info_column.
-//   Now uses plain MARGIN_OUTER both top and bottom = 2u (16px) as intended.
-//   (Those offsets were wide-layout tuning that leaked into stacked.)
-//
-// MARGIN MODEL:
-//   MARGIN_CANVAS = 1u, MARGIN_DIGIT = 1u, MARGIN_OUTER = 2u
-//   BOTTOM_MARGIN(ub_h): 1u when quick-look bar active, 2u otherwise
-//   Full-screen: top = MARGIN_OUTER, bottom = BOTTOM_MARGIN(ub_h)
+// All other v3.43 fixes (stacked quick-look gap, ease table,
+// shake simplification, quick-look bottom margin) unchanged.
 // ============================================================
 
 // #define DEBUG_TEXT_BOXES
@@ -48,7 +37,7 @@ static const int s_layout_seq[LSEQ_COUNT] = { 0, 1, 0, 2, 0, 3, 0, 5, 4 };
 
 static int s_lseq_idx = 0;
 #define CURRENT_LAYOUT  (s_layout_seq[s_lseq_idx])
-#define SHAKE_LEN  7   // one rep, no upswing
+#define SHAKE_LEN  7
 
 #if defined(PBL_PLATFORM_EMERY)
   #define SCREEN_W          200
@@ -107,13 +96,11 @@ static int s_lseq_idx = 0;
 #define INFO_LINE_BUF   40
 #define INFO_LINES_MAX  8
 
-// Ease-in-out table: tighter than before, min 4px/step feels responsive
-// 10 steps, sum=80px. Clamps to target at end.
 static const int EASE[10] = { 4, 6, 8, 10, 12, 12, 10, 8, 6, 4 };
 #define EASE_LEN  10
 
 #define ANIM_STEP_MS    16
-#define ANIM_SNAP_MS    80    // tighter snap
+#define ANIM_SNAP_MS    80
 #define ANIM_OVERSHOOT  UNIT
 #define ANTICIPATION_PX   HALF_UNIT
 #define ANTICIPATION_MS   16
@@ -301,8 +288,6 @@ static int prv_layout_lines(int layout, int *above, int *below) {
   }
 }
 
-// Full-screen target height: top = MARGIN_OUTER, bottom = BOTTOM_MARGIN(ub_h)
-// Digit cy is positioned from top, not centered, so gaps are exact.
 static int prv_compute_target_h(int ub_h, int layout) {
   int above, below;
   prv_layout_lines(layout, &above, &below);
@@ -315,7 +300,6 @@ static int prv_compute_target_h(int ub_h, int layout) {
   return h < H_MIN ? H_MIN : h;
 }
 
-// Stacked height uses BOTTOM_MARGIN(ub_h) to match actual draw positions
 static int prv_compute_stacked_h(int ub_h) {
   int h = (ub_h - MARGIN_OUTER - BOTTOM_MARGIN(ub_h) - UNIT) / 2;
   return h < H_ABSOLUTE_MIN ? H_ABSOLUTE_MIN : h;
@@ -458,16 +442,22 @@ static void draw_text_at_glyph_y(GContext *ctx, const char *text,
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 }
 
-// Stacked info column: plain MARGIN_OUTER (2u) top and bottom
+// Stacked info column.
+// glyph_top: first glyph top at MARGIN_OUTER from area top (2u = 16px)
+// glyph_bot: last glyph BOTTOM at MARGIN_OUTER from area bottom.
+//   = area.bottom - MARGIN_OUTER + INFO_GLYPH_H
+//   The + INFO_GLYPH_H compensates for slot_h measuring glyph tops:
+//   last glyph extends INFO_GLYPH_H below its slot start.
 static void draw_info_column(GContext *ctx, GRect area, struct tm *t) {
   char lines[INFO_LINES_MAX][INFO_LINE_BUF];
   int n = build_info_lines_stacked(lines, INFO_LINES_MAX, t);
   if (!n) return;
   int glyph_top = area.origin.y + MARGIN_OUTER;
-  int glyph_bot = area.origin.y + area.size.h - MARGIN_OUTER;
-  int slot_h = (glyph_bot - glyph_top) / n;
+  int glyph_bot = area.origin.y + area.size.h - MARGIN_OUTER + INFO_GLYPH_H;
+  int slot_h = n > 1 ? (glyph_bot - glyph_top - INFO_GLYPH_H) / (n - 1) : 0;
   for (int i = 0; i < n; i++)
-    draw_text_at_glyph_y(ctx, lines[i], area.origin.x, glyph_top + i * slot_h, area.size.w);
+    draw_text_at_glyph_y(ctx, lines[i], area.origin.x,
+                         glyph_top + i * slot_h, area.size.w);
 }
 
 static void draw_info_block_down(GContext *ctx, char lines[][INFO_LINE_BUF], int n,
@@ -514,8 +504,8 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   int bot_margin = BOTTOM_MARGIN(ub_h);
 
   if (s_phase == PHASE_COUNTDOWN) {
-    // Position from top margin, not centered — consistent with normal full layout
-    int cy = ub_top + MARGIN_OUTER + s_h / 2;
+    // Fixed center based on target height — squishes symmetrically in place
+    int cy = ub_top + MARGIN_OUTER + s_target_h / 2;
     draw_digits_vec(ctx, s_countdown_digit, s_countdown_digit,
                     s_countdown_digit, s_countdown_digit, s_h, cy);
     return;
@@ -525,9 +515,10 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   struct tm *tm_now = (s_phase == PHASE_DONE) ? localtime(&now_t) : NULL;
 
   if (layout == LAYOUT_FULL) {
-    // Positioned from top margin: cy = ub_top + MARGIN_OUTER + h/2
-    // Bottom gap = ub_bot - (cy + h/2) = ub_h - MARGIN_OUTER - h = BOTTOM_MARGIN(ub_h) ✓
-    int cy = ub_top + MARGIN_OUTER + s_h / 2;
+    // Fixed center: cy stays constant as s_h changes → symmetric squish
+    // cy = ub_top + MARGIN_OUTER + s_target_h/2
+    // top gap = MARGIN_OUTER, bottom gap = ub_h - MARGIN_OUTER - s_target_h = BOTTOM_MARGIN(ub_h)
+    int cy = ub_top + MARGIN_OUTER + s_target_h / 2;
     draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy);
 
   } else if (layout == LAYOUT_INFO_1 || layout == LAYOUT_INFO_2 || layout == LAYOUT_INFO_3) {
@@ -550,10 +541,12 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     if (below_n > 0)
       draw_info_block_up(ctx, all_lines, lines_above, below_n, below_end, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
 
+    // Info layout: use midpoint of available space for digit center
+    // (s_target_h already accounts for info blocks, so cy is also fixed)
     draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy);
 
   } else {
-    int dh    = prv_compute_stacked_h(ub_h);  // now uses BOTTOM_MARGIN(ub_h)
+    int dh    = prv_compute_stacked_h(ub_h);
     int h_cy  = ub_top + MARGIN_OUTER + dh / 2;
     int m_cy  = ub_bot - bot_margin - dh / 2;
     int tens_x, ones_x, info_x, info_w;
@@ -592,7 +585,6 @@ static bool prv_ease_expand_step(void) {
 }
 
 static bool prv_ease_shrink_step(void) {
-  // Use ease table in reverse: fast in middle, slow near extremes
   int step = (s_ease_idx < EASE_LEN) ? EASE[EASE_LEN - 1 - s_ease_idx] : EASE[0];
   s_ease_idx++;
   s_h -= step;
@@ -624,7 +616,6 @@ static void timer_cb(void *data) {
   switch (s_phase) {
 
     case PHASE_ANTICIPATE:
-      // Micro-stretch up before squish — signals intent
       s_h += ANTICIPATION_PX;
       layer_mark_dirty(s_canvas_layer);
       s_phase = PHASE_SQUISH; s_ease_idx = 0; s_h_min = H_MIN;
@@ -686,7 +677,6 @@ static void timer_cb(void *data) {
     }
 
     case PHASE_SHAKE_CYCLE: {
-      // 7-step single-rep pulse: down and back, no upswing
       static const int OFF[SHAKE_LEN] = { 0,-UNIT,-(UNIT*2),-(UNIT*3),-(UNIT*2),-UNIT,0 };
       if (++s_anim_step < SHAKE_LEN) {
         int h = s_target_h + OFF[s_anim_step];
@@ -694,7 +684,6 @@ static void timer_cb(void *data) {
         layer_mark_dirty(s_canvas_layer);
         schedule(ANIM_STEP_MS);
       } else {
-        // End of shake: snap to target cleanly
         s_h = s_target_h;
         s_phase = PHASE_DONE;
         layer_mark_dirty(s_canvas_layer);
