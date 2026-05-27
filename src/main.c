@@ -1,20 +1,23 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v3.46d
+// TallBoy — main.c  v3.46e
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.46d touch fix (from pebble-calculator reference):
+// v3.46e: add 50ms haptic pulse on touch (from calculator ref).
+//   Serves as both a diagnostic (confirms touch is firing even
+//   when bg is black) and the right feel for a tap gesture.
 //
-//   Added window_set_click_config_provider() with an empty
-//   provider. The calculator does this even on a touch-only app.
-//   Suspected reason: Pebble's input system may not fully
-//   initialize touch event routing for a window without a click
-//   config provider registered. This is the last untried fix.
+// Summary of touch stack so far:
+//   - touch_service_is_enabled() guard on subscribe ✓
+//   - TouchEvent_Touchdown filter ✓
+//   - touch_service_unsubscribe() unconditional ✓
+//   - window_set_click_config_provider() (empty) ✓
+//   - vibes_enqueue_custom_pattern() 50ms pulse ← new
 //
-//   Also: removed touch_service_is_enabled() guard on
-//   unsubscribe — the calculator calls touch_service_unsubscribe()
-//   unconditionally in window_unload, unlike subscribe.
+// Settings fix (appinfo.json already pushed separately):
+//   - "configurable" moved from watchapp{} to capabilities[]
+//     matching TimeStyle / pebble-calculator reference pattern.
 // ============================================================
 
 // #define DEBUG_TEXT_BOXES
@@ -107,6 +110,12 @@ static const int EASE[10] = { 4, 6, 8, 10, 12, 12, 10, 8, 6, 4 };
 #define BLINK_REPS          2
 #define STEPS_AVG_MAX_MIN 120
 #define DOT " \xc2\xb7 "
+
+// Touch haptic — 50ms pulse, same as pebble-calculator
+#if defined(PBL_TOUCH)
+static const uint32_t TOUCH_VIBE_MS[] = {50};
+static const VibePattern TOUCH_VIBE = { .durations = TOUCH_VIBE_MS, .num_segments = 1 };
+#endif
 
 #define QUICK_LOOK_ACTIVE(ub_h)  ((ub_h) < (SCREEN_H - UNIT))
 #define BOTTOM_MARGIN(ub_h)      (QUICK_LOOK_ACTIVE(ub_h) ? MARGIN_DIGIT : MARGIN_OUTER)
@@ -752,11 +761,13 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   layer_mark_dirty(s_canvas_layer);
 }
 
-// Touch: corner-radius sampler (emery only, PBL_TOUCH).
-// Cycles: 16px → 24px → 32px → 16px on each tap-down.
+// Touch: corner-radius sampler with haptic feedback (emery, PBL_TOUCH).
+// 50ms vibe fires on every Touchdown — works as touch diagnostic even
+// when the bg is black and the radius change is invisible.
 #if defined(PBL_TOUCH)
 static void touch_handler(const TouchEvent *event, void *context) {
   if (event->type != TouchEvent_Touchdown) return;
+  vibes_enqueue_custom_pattern(TOUCH_VIBE);
 #if defined(PBL_PLATFORM_EMERY)
   s_radius_idx = (s_radius_idx + 1) % RADIUS_COUNT;
   layer_mark_dirty(s_canvas_layer);
@@ -766,12 +777,7 @@ static void touch_handler(const TouchEvent *event, void *context) {
 
 // Empty click config provider — required to initialize the input
 // system for this window, which in turn enables touch event routing.
-// The calculator (freakified/pebble-calculator) sets this even on a
-// touch-only app; omitting it may prevent touch events from arriving.
-static void prv_click_config_provider(void *context) {
-  // No button bindings — touch handles all gestures.
-  // This function must exist for touch to work.
-}
+static void prv_click_config_provider(void *context) {}
 
 static void tick_handler(struct tm *t, TimeUnits units) {
   bool animated = (s_layout == LAYOUT_FULL || s_layout == LAYOUT_INFO);
@@ -838,7 +844,6 @@ static void window_load(Window *window) {
   UnobstructedAreaHandlers ua = { .change = unobstructed_change };
   unobstructed_area_service_subscribe(ua, NULL);
   accel_tap_service_subscribe(accel_tap_handler);
-
 #if defined(PBL_TOUCH)
   if (touch_service_is_enabled()) {
     touch_service_subscribe(touch_handler, NULL);
@@ -854,7 +859,7 @@ static void window_unload(Window *window) {
   unobstructed_area_service_unsubscribe();
   accel_tap_service_unsubscribe();
 #if defined(PBL_TOUCH)
-  touch_service_unsubscribe();  // unconditional, matching calculator reference
+  touch_service_unsubscribe();
 #endif
   if (s_timer) { app_timer_cancel(s_timer); s_timer = NULL; }
   layer_destroy(s_canvas_layer);
@@ -865,8 +870,6 @@ static void init(void) {
   prv_load_config();
   s_window = window_create();
   window_set_background_color(s_window, GColorBlack);
-  // Set click config provider even though we don't use buttons —
-  // required to enable touch event routing on this window.
   window_set_click_config_provider(s_window, prv_click_config_provider);
   window_set_window_handlers(s_window, (WindowHandlers){ .load = window_load, .unload = window_unload });
   window_stack_push(s_window, true);
