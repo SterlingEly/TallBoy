@@ -1,41 +1,29 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v3.45
+// TallBoy — main.c  v3.46
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.45:
-//   - Touch service removed entirely (never worked on device;
-//     TouchEvent struct fields unknown, not worth debugging now)
-//   - Config system fully wired:
-//       s_cfg_time_pos  : 0-6 where time sits in info line order
-//       s_cfg_slots[6]  : slot type per position (see SLOT_* enum)
-//       s_cfg_temp_f    : bool, true=F false=C
-//       s_cfg_dist_mi   : bool, true=mi false=km
-//       s_cfg_24h       : bool, true=24h false=12h
-//   - Info line builders now driven by slot config
-//   - Layout cycle reads s_cfg_time_pos to determine above/below
-//     split, replacing hardcoded INFO_1/2/3 fixed splits
-//   - Stacked layout always shows all slots in order
-//   - Wide layout combines pairs automatically:
-//       SLOT_DATE    + nothing → "Thursday, May 21"
-//       SLOT_WEATHER + nothing → "72 F & sunny" (temp + desc)
-//       SLOT_STEPS   + nothing → "3,500 steps · 2.1 mi" (auto-adds distance)
-//       SLOT_PACE    + nothing → "exp 3,500 · 87%"
-//       SLOT_HRCAL   + nothing → "72 bpm · 212 cal"
-//   - Shake cycle now uses time_pos to determine info counts,
-//     replacing hardcoded INFO_1/2/3 sequence
-//   - LAYOUT_INFO_1/2/3 IDs retired; layout is now either
-//     LAYOUT_FULL, LAYOUT_INFO (splits driven by time_pos),
-//     LAYOUT_STACK_R, or LAYOUT_STACK_L
-//   - Countdown preserved but disabled (s_phase = PHASE_DONE)
+// v3.46:
+//   Touch restored (emery/gabbro, PBL_TOUCH):
+//     Confirmed API: touch_service_subscribe(handler, context)
+//     Handler signature: void(*)(const TouchEvent *, void *)
+//     TouchEvent struct fields (type enum, x, y) unknown —
+//     fires on any touch. TODO: filter to touch-down only once
+//     event type enum name is confirmed from pebble.h / docs.
+//
+//   Interaction model redesigned:
+//     TOUCH  = advance layout forward through cycle (squish anim)
+//     SHAKE  = always return to LAYOUT_FULL (shake anim)
+//     This gives two independent directional gestures.
+//     Shake-in-place on LAYOUT_FULL still gives satisfying feedback.
+//
+//   Also removed unused s_lseq_idx (leftover from old seq system).
+//   Bare % in SLOT_PACE stacked fallback fixed: "87%%" not "87%".
 // ============================================================
 
 // #define DEBUG_TEXT_BOXES
 
-// ---------------------------------------------------------------------------
-// Slot type IDs — must match index.js SLOT_* and appinfo.json CfgSlot values
-// ---------------------------------------------------------------------------
 typedef enum {
   SLOT_EMPTY   = 0,
   SLOT_DATE    = 1,
@@ -47,24 +35,13 @@ typedef enum {
   SLOT_BATTERY = 7
 } SlotType;
 
-// ---------------------------------------------------------------------------
-// Layout IDs
-// ---------------------------------------------------------------------------
 #define LAYOUT_FULL    0
-#define LAYOUT_INFO    1   // wide info overlay, split by s_cfg_time_pos
+#define LAYOUT_INFO    1
 #define LAYOUT_STACK_R 2
 #define LAYOUT_STACK_L 3
-#define LAYOUT_COUNT   4
-
-// Shake cycle: Full → Info → Full → StackL → StackR → (wrap)
-// Info is only included when time_pos gives at least 1 line above or below
-static int s_lseq_idx = 0;
 
 #define SHAKE_LEN  7
 
-// ---------------------------------------------------------------------------
-// Platform geometry
-// ---------------------------------------------------------------------------
 #if defined(PBL_PLATFORM_EMERY)
   #define SCREEN_W          200
   #define SCREEN_H          228
@@ -150,9 +127,6 @@ typedef enum {
   PHASE_SHAKE_CYCLE
 } Phase;
 
-// ---------------------------------------------------------------------------
-// Global state
-// ---------------------------------------------------------------------------
 static Window    *s_window;
 static Layer     *s_canvas_layer;
 static int        s_hour = 0, s_minute = 0;
@@ -175,25 +149,20 @@ static int        s_steps_expected = -1;
 static int        s_sunrise_min = -1, s_sunset_min = -1;
 static char       s_weather_temp[8] = "";
 static char       s_weather_desc[32] = "";
+static int        s_layout = LAYOUT_FULL;
 
-// Current layout position in the shake cycle
-static int s_layout = LAYOUT_FULL;
-
-// Config state — loaded from persistent storage, updated via app_message
-static int  s_cfg_time_pos = 3;                     // 0-6, default 3 (3+3)
-static int  s_cfg_slots[NUM_SLOTS] = {1,2,3,4,5,6}; // default: date,weather,solar,steps,pace,hrcal
+static int  s_cfg_time_pos = 3;
+static int  s_cfg_slots[NUM_SLOTS] = {1,2,3,4,5,6};
 static bool s_cfg_temp_f    = true;
 static bool s_cfg_dist_mi   = true;
 static bool s_cfg_24h       = false;
 
-// Persist config keys
 #define PERSIST_CFG_TIME_POS   1
-#define PERSIST_CFG_SLOTS      2   // stores 6 bytes as a single uint32 pair
-#define PERSIST_CFG_FLAGS      3   // bit0=temp_f, bit1=dist_mi, bit2=24h
+#define PERSIST_CFG_SLOTS      2
+#define PERSIST_CFG_FLAGS      3
 
 static void prv_save_config(void) {
   persist_write_int(PERSIST_CFG_TIME_POS, s_cfg_time_pos);
-  // Pack 6 slot values (each 0-7, 3 bits) into a single int32
   int32_t packed = 0;
   for (int i = 0; i < NUM_SLOTS; i++) packed |= (s_cfg_slots[i] & 0x7) << (i * 4);
   persist_write_int(PERSIST_CFG_SLOTS, packed);
@@ -216,12 +185,8 @@ static void prv_load_config(void) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Shake cycle sequence
-// Builds dynamically based on whether info layout has any lines
-// ---------------------------------------------------------------------------
+// FULL → INFO (if configured) → STACK_L → STACK_R → FULL
 static int prv_next_layout(int current) {
-  // Cycle: FULL → INFO (if has lines) → STACK_L → STACK_R → FULL
   bool has_info = (s_cfg_time_pos > 0 && s_cfg_time_pos < NUM_SLOTS);
   switch (current) {
     case LAYOUT_FULL:    return has_info ? LAYOUT_INFO : LAYOUT_STACK_L;
@@ -232,9 +197,6 @@ static int prv_next_layout(int current) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Pace color
-// ---------------------------------------------------------------------------
 #if defined(PBL_COLOR)
 static GColor prv_pace_color(int steps_today, int steps_expected) {
   if (steps_expected <= 0 || steps_today <= 0) return GColorBlack;
@@ -254,9 +216,6 @@ static bool prv_bg_needs_dark_fg(GColor bg) {
 }
 #endif
 
-// ---------------------------------------------------------------------------
-// Health
-// ---------------------------------------------------------------------------
 #if defined(PBL_HEALTH)
 static HealthMinuteData s_minute_buf[STEPS_AVG_MAX_MIN];
 static int prv_calc_steps_expected(void) {
@@ -299,9 +258,6 @@ static void prv_update_health(void) {
 }
 #endif
 
-// ---------------------------------------------------------------------------
-// Drawing primitives
-// ---------------------------------------------------------------------------
 static void fill_arc(GContext *ctx, int cx, int cy, int ro, int ri, int a0, int a1) {
   GRect b = GRect(cx - ro, cy - ro, ro * 2, ro * 2);
   graphics_fill_radial(ctx, b, GOvalScaleModeFitCircle, (uint16_t)(ro - ri),
@@ -369,31 +325,21 @@ static void draw_stacked_vec(GContext *ctx, int h_tens, int h_ones,
   draw_digit_vec(ctx, m_ones, ones_x, m_cy, dh);
 }
 
-// ---------------------------------------------------------------------------
-// Layout geometry
-// ---------------------------------------------------------------------------
 static int prv_info_block_h(int n, int step) {
   if (n <= 0) return 0;
   return INFO_GLYPH_H + (n - 1) * step;
 }
 
-// For wide layout: how many lines above/below based on config
 static void prv_info_split(int *above, int *below) {
-  // Count enabled (non-empty) slots
   int total = 0;
   for (int i = 0; i < NUM_SLOTS; i++) if (s_cfg_slots[i] != SLOT_EMPTY) total++;
-  int pos = s_cfg_time_pos;
-  if (pos > total) pos = total;
-  *above = pos;
-  *below = total - pos;
+  int pos = s_cfg_time_pos; if (pos > total) pos = total;
+  *above = pos; *below = total - pos;
 }
 
 static int prv_compute_target_h(int ub_h, int layout) {
-  if (layout != LAYOUT_INFO) {
-    return ub_h - MARGIN_OUTER - BOTTOM_MARGIN(ub_h);
-  }
-  int above, below;
-  prv_info_split(&above, &below);
+  if (layout != LAYOUT_INFO) return ub_h - MARGIN_OUTER - BOTTOM_MARGIN(ub_h);
+  int above, below; prv_info_split(&above, &below);
   int reserved = HALF_UNIT + prv_info_block_h(above, INFO_LINE_STEP_WIDE) + HALF_UNIT;
   reserved    += HALF_UNIT + prv_info_block_h(below, INFO_LINE_STEP_WIDE) + HALF_UNIT;
   int h = ub_h - reserved;
@@ -411,9 +357,6 @@ static void prv_update_targets(void) {
   s_target_h = prv_compute_target_h(ub.size.h, s_layout);
 }
 
-// ---------------------------------------------------------------------------
-// String formatters
-// ---------------------------------------------------------------------------
 static const char *s_day_names[] = {
   "Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"
 };
@@ -452,7 +395,6 @@ static void prv_fmt_temp(char *buf, int len) {
   else snprintf(buf, len, "--");
 }
 
-// Format a single slot for wide layout (auto-combines where appropriate)
 static void prv_render_slot_wide(char *buf, int len, SlotType slot, struct tm *t) {
   switch (slot) {
     case SLOT_DATE:
@@ -462,10 +404,8 @@ static void prv_render_slot_wide(char *buf, int len, SlotType slot, struct tm *t
     case SLOT_WEATHER:
       if (s_weather_temp[0] && s_weather_desc[0])
         snprintf(buf, len, "%.7s & %.29s", s_weather_temp, s_weather_desc);
-      else if (s_weather_temp[0])
-        snprintf(buf, len, "%s", s_weather_temp);
-      else
-        snprintf(buf, len, "72 F & sunny");
+      else if (s_weather_temp[0]) snprintf(buf, len, "%s", s_weather_temp);
+      else snprintf(buf, len, "72 F & sunny");
       break;
     case SLOT_SOLAR:
       if (s_sunrise_min >= 0 || s_sunset_min >= 0) {
@@ -507,25 +447,18 @@ static void prv_render_slot_wide(char *buf, int len, SlotType slot, struct tm *t
       snprintf(buf, len, "72 bpm" DOT "212 cal");
 #endif
       break;
-    case SLOT_BATTERY:
-      prv_fmt_bat_bt(buf, len);
-      break;
-    default:
-      buf[0] = '\0';
-      break;
+    case SLOT_BATTERY: prv_fmt_bat_bt(buf, len); break;
+    default: buf[0] = '\0'; break;
   }
 }
 
-// Format a single slot for stacked layout (shorter strings)
 static void prv_render_slot_stacked(char *buf, int len, SlotType slot, struct tm *t) {
   switch (slot) {
     case SLOT_DATE:
       if (t) snprintf(buf, len, "%s %d", s_month_names[t->tm_mon], t->tm_mday);
       else   snprintf(buf, len, "Jan 1");
       break;
-    case SLOT_WEATHER:
-      prv_fmt_temp(buf, len);
-      break;
+    case SLOT_WEATHER: prv_fmt_temp(buf, len); break;
     case SLOT_SOLAR:
       if (s_sunrise_min >= 0 || s_sunset_min >= 0) {
         char rise[12]; prv_fmt_time_min(rise, sizeof(rise), s_sunrise_min);
@@ -542,11 +475,10 @@ static void prv_render_slot_stacked(char *buf, int len, SlotType slot, struct tm
       break;
     case SLOT_PACE:
 #if defined(PBL_HEALTH)
-      if (s_steps_expected > 0)
-        snprintf(buf, len, "%d%% pace", (s_steps*100)/s_steps_expected);
+      if (s_steps_expected > 0) snprintf(buf, len, "%d%% pace", (s_steps*100)/s_steps_expected);
       else snprintf(buf, len, "-- pace");
 #else
-      snprintf(buf, len, "87% pace");
+      snprintf(buf, len, "87%% pace");  // %% = literal % in snprintf
 #endif
       break;
     case SLOT_HRCAL:
@@ -558,17 +490,11 @@ static void prv_render_slot_stacked(char *buf, int len, SlotType slot, struct tm
       snprintf(buf, len, "72 bpm");
 #endif
       break;
-    case SLOT_BATTERY:
-      prv_fmt_bat_bt(buf, len);
-      break;
-    default:
-      buf[0] = '\0';
-      break;
+    case SLOT_BATTERY: prv_fmt_bat_bt(buf, len); break;
+    default: buf[0] = '\0'; break;
   }
 }
 
-// Build the n lines for wide overlay (slots 0..time_pos-1 for above, time_pos..end for below)
-// Returns total lines built. Skips empty slots.
 static int build_info_lines_wide(char lines[][INFO_LINE_BUF], int max_lines, struct tm *t) {
   int n = 0;
   for (int i = 0; i < NUM_SLOTS && n < max_lines; i++) {
@@ -580,7 +506,6 @@ static int build_info_lines_wide(char lines[][INFO_LINE_BUF], int max_lines, str
   return n;
 }
 
-// Build lines for stacked info column (all slots in order)
 static int build_info_lines_stacked(char lines[][INFO_LINE_BUF], int max_lines, struct tm *t) {
   int n = 0;
   for (int i = 0; i < NUM_SLOTS && n < max_lines; i++) {
@@ -592,9 +517,6 @@ static int build_info_lines_stacked(char lines[][INFO_LINE_BUF], int max_lines, 
   return n;
 }
 
-// ---------------------------------------------------------------------------
-// Text drawing
-// ---------------------------------------------------------------------------
 static GFont prv_info_font(void) { return fonts_get_system_font(INFO_FONT_KEY); }
 
 static void draw_text_at_glyph_y(GContext *ctx, const char *text,
@@ -617,8 +539,7 @@ static void draw_info_column(GContext *ctx, GRect area, struct tm *t) {
   int glyph_bot = area.origin.y + area.size.h - MARGIN_OUTER + INFO_GLYPH_H;
   int slot_h = n > 1 ? (glyph_bot - glyph_top - INFO_GLYPH_H) / (n - 1) : 0;
   for (int i = 0; i < n; i++)
-    draw_text_at_glyph_y(ctx, lines[i], area.origin.x,
-                         glyph_top + i * slot_h, area.size.w);
+    draw_text_at_glyph_y(ctx, lines[i], area.origin.x, glyph_top + i * slot_h, area.size.w);
 }
 
 static void draw_info_block_down(GContext *ctx, char lines[][INFO_LINE_BUF], int n,
@@ -636,9 +557,6 @@ static void draw_info_block_up(GContext *ctx, char lines[][INFO_LINE_BUF],
   }
 }
 
-// ---------------------------------------------------------------------------
-// Main draw
-// ---------------------------------------------------------------------------
 static void draw_layer(Layer *layer, GContext *ctx) {
   Layer *root  = window_get_root_layer(s_window);
   GRect ub     = layer_get_unobstructed_bounds(root);
@@ -689,8 +607,7 @@ static void draw_layer(Layer *layer, GContext *ctx) {
 
     int an = lines_above < total ? lines_above : total;
     draw_info_block_down(ctx, all_lines, an, above_start, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
-    int bn = total - lines_above;
-    if (bn > lines_below) bn = lines_below;
+    int bn = total - lines_above; if (bn > lines_below) bn = lines_below;
     if (bn > 0)
       draw_info_block_up(ctx, all_lines, lines_above, bn, below_end, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
 
@@ -717,7 +634,7 @@ static void draw_layer(Layer *layer, GContext *ctx) {
 }
 
 // ---------------------------------------------------------------------------
-// Animation
+// Shared layout-advance logic (used by both touch and shake-advance)
 // ---------------------------------------------------------------------------
 static void timer_cb(void *data);
 
@@ -751,6 +668,22 @@ static void prv_start_expand(void) { s_phase = PHASE_EXPAND; s_ease_idx = 0; s_o
 static void prv_start_blink(void) {
   s_h = s_target_h; s_going_down = true; s_anim_rep = 0; s_overshot = false;
   s_phase = PHASE_BLINK; layer_mark_dirty(s_canvas_layer); schedule(ANIM_STEP_MS);
+}
+
+// Advance to the next layout in the forward cycle.
+// If phase is busy, ignore — prevents input stacking during animation.
+static void prv_advance_layout(void) {
+  if (s_phase != PHASE_DONE) return;
+  s_layout = prv_next_layout(s_layout);
+  prv_update_targets();
+  if (s_layout == LAYOUT_FULL) {
+    // Wrapping back to full: use shake animation for satisfying feedback
+    s_phase = PHASE_SHAKE_CYCLE; s_anim_step = 0;
+    s_h = s_target_h; schedule(ANIM_STEP_MS);
+  } else {
+    s_h_min = H_MIN; prv_start_anticipate();
+  }
+  layer_mark_dirty(s_canvas_layer);
 }
 
 static void timer_cb(void *data) {
@@ -824,26 +757,33 @@ static void timer_cb(void *data) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Event handlers
-// ---------------------------------------------------------------------------
 static void unobstructed_change(AnimationProgress progress, void *ctx) {
   prv_update_targets();
   if (s_phase == PHASE_DONE) { s_h = s_target_h; layer_mark_dirty(s_canvas_layer); }
 }
 
+// Shake: always return to LAYOUT_FULL.
+// Shake-in-place when already FULL gives pulse feedback.
 static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   if (s_phase != PHASE_DONE) return;
-  s_layout = prv_next_layout(s_layout);
+  s_layout = LAYOUT_FULL;
   prv_update_targets();
-  if (s_layout == LAYOUT_FULL) {
-    s_phase = PHASE_SHAKE_CYCLE; s_anim_step = 0;
-    s_h = s_target_h; schedule(ANIM_STEP_MS);
-  } else {
-    s_h_min = H_MIN; prv_start_anticipate();
-  }
+  s_phase = PHASE_SHAKE_CYCLE; s_anim_step = 0;
+  s_h = s_target_h; schedule(ANIM_STEP_MS);
   layer_mark_dirty(s_canvas_layer);
 }
+
+// Touch: advance to next layout in forward cycle.
+// API: touch_service_subscribe(handler, context)
+//      handler = void(*)(const TouchEvent *, void *)
+// TouchEvent fields (type enum, x, y) unknown — any touch advances.
+// TODO: filter to touch-down type only once enum name is confirmed.
+#if defined(PBL_TOUCH)
+static void touch_handler(const TouchEvent *event, void *context) {
+  (void)event; (void)context;
+  prv_advance_layout();
+}
+#endif
 
 static void tick_handler(struct tm *t, TimeUnits units) {
   bool animated = (s_layout == LAYOUT_FULL || s_layout == LAYOUT_INFO);
@@ -870,66 +810,33 @@ static void bt_handler(bool connected) {
 
 static void inbox_received(DictionaryIterator *iter, void *context) {
   Tuple *t;
-
-  // Weather
   t = dict_find(iter, MESSAGE_KEY_WeatherTempF);
   if (t) snprintf(s_weather_temp, sizeof(s_weather_temp), "%dF", (int)t->value->int32);
   t = dict_find(iter, MESSAGE_KEY_WeatherTempC);
-  if (t && !s_weather_temp[0]) {
-    // Only use C if F wasn't provided, or if user configured C
-    if (!s_cfg_temp_f) snprintf(s_weather_temp, sizeof(s_weather_temp), "%dC", (int)t->value->int32);
-  }
+  if (t && !s_cfg_temp_f && !s_weather_temp[0])
+    snprintf(s_weather_temp, sizeof(s_weather_temp), "%dC", (int)t->value->int32);
   t = dict_find(iter, MESSAGE_KEY_WeatherCode);
   if (t) {
     int c = (int)t->value->int32;
     const char *d = (c==0)?"clear":(c<=3)?"cloudy":(c<=49)?"fog":(c<=69)?"rain":(c<=79)?"snow":(c<=99)?"storm":"weather";
     snprintf(s_weather_desc, sizeof(s_weather_desc), "%s", d);
   }
-
-  // Solar: Unix timestamps → minutes since midnight
   t = dict_find(iter, MESSAGE_KEY_SunriseTime);
-  if (t) {
-    time_t ts = (time_t)(uint32_t)t->value->uint32;
-    struct tm *lt = localtime(&ts);
-    if (lt) s_sunrise_min = lt->tm_hour * 60 + lt->tm_min;
-  }
+  if (t) { time_t ts = (time_t)(uint32_t)t->value->uint32; struct tm *lt = localtime(&ts); if (lt) s_sunrise_min = lt->tm_hour * 60 + lt->tm_min; }
   t = dict_find(iter, MESSAGE_KEY_SunsetTime);
-  if (t) {
-    time_t ts = (time_t)(uint32_t)t->value->uint32;
-    struct tm *lt = localtime(&ts);
-    if (lt) s_sunset_min = lt->tm_hour * 60 + lt->tm_min;
-  }
-
-  // Config keys
+  if (t) { time_t ts = (time_t)(uint32_t)t->value->uint32; struct tm *lt = localtime(&ts); if (lt) s_sunset_min = lt->tm_hour * 60 + lt->tm_min; }
   t = dict_find(iter, MESSAGE_KEY_CfgTimePos);
   if (t) s_cfg_time_pos = (int)t->value->int32;
-
   for (int i = 0; i < NUM_SLOTS; i++) {
-    // MESSAGE_KEY_CfgSlot1 = key 6, CfgSlot2 = 7, ..., CfgSlot6 = 11
     t = dict_find(iter, MESSAGE_KEY_CfgSlot1 + i);
     if (t) s_cfg_slots[i] = (int)t->value->int32;
   }
-
-  t = dict_find(iter, MESSAGE_KEY_CfgTempUnit);
-  if (t) {
-    s_cfg_temp_f = (t->value->int32 == 0);
-    // Re-format weather temp if we have raw data (would need re-fetch; just clear to trigger refresh)
-    // For now just note the preference — JS will send the right unit on next fetch
-  }
-  t = dict_find(iter, MESSAGE_KEY_CfgDistUnit);
-  if (t) s_cfg_dist_mi = (t->value->int32 == 0);
-
-  t = dict_find(iter, MESSAGE_KEY_CfgClockFormat);
-  if (t) s_cfg_24h = (t->value->int32 == 1);
-
-  prv_save_config();
-  prv_update_targets();
-  layer_mark_dirty(s_canvas_layer);
+  t = dict_find(iter, MESSAGE_KEY_CfgTempUnit);    if (t) s_cfg_temp_f  = (t->value->int32 == 0);
+  t = dict_find(iter, MESSAGE_KEY_CfgDistUnit);    if (t) s_cfg_dist_mi = (t->value->int32 == 0);
+  t = dict_find(iter, MESSAGE_KEY_CfgClockFormat); if (t) s_cfg_24h     = (t->value->int32 == 1);
+  prv_save_config(); prv_update_targets(); layer_mark_dirty(s_canvas_layer);
 }
 
-// ---------------------------------------------------------------------------
-// Window / App lifecycle
-// ---------------------------------------------------------------------------
 static void window_load(Window *window) {
   Layer *root = window_get_root_layer(window);
   s_canvas_layer = layer_create(layer_get_bounds(root));
@@ -943,9 +850,11 @@ static void window_load(Window *window) {
   UnobstructedAreaHandlers ua = { .change = unobstructed_change };
   unobstructed_area_service_subscribe(ua, NULL);
   accel_tap_service_subscribe(accel_tap_handler);
+#if defined(PBL_TOUCH)
+  touch_service_subscribe(touch_handler, NULL);
+#endif
 
-  // COUNTDOWN DISABLED — to re-enable see v3.44 comments
-  s_phase = PHASE_DONE;
+  s_phase = PHASE_DONE;  // countdown disabled; re-enable in future pass
   s_overshot = false; s_ease_idx = 0;
   layer_mark_dirty(s_canvas_layer);
 }
@@ -953,15 +862,16 @@ static void window_load(Window *window) {
 static void window_unload(Window *window) {
   unobstructed_area_service_unsubscribe();
   accel_tap_service_unsubscribe();
+#if defined(PBL_TOUCH)
+  touch_service_unsubscribe();
+#endif
   if (s_timer) { app_timer_cancel(s_timer); s_timer = NULL; }
   layer_destroy(s_canvas_layer);
 }
 
 static void init(void) {
   s_fg = GColorWhite; s_bg = GColorBlack;
-
-  prv_load_config();  // load persisted config before building UI
-
+  prv_load_config();
   s_window = window_create();
   window_set_background_color(s_window, GColorBlack);
   window_set_window_handlers(s_window, (WindowHandlers){ .load = window_load, .unload = window_unload });
