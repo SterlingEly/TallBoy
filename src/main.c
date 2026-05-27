@@ -1,21 +1,20 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v3.46c
+// TallBoy — main.c  v3.46d
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.46c: touch fix from pebble-2048-touch reference (lanrat):
+// v3.46d touch fix (from pebble-calculator reference):
 //
-//   1. touch_service_is_enabled() guard on subscribe/unsubscribe.
-//      Without this, subscribing when the sensor is off silently
-//      fails and no events arrive.
+//   Added window_set_click_config_provider() with an empty
+//   provider. The calculator does this even on a touch-only app.
+//   Suspected reason: Pebble's input system may not fully
+//   initialize touch event routing for a window without a click
+//   config provider registered. This is the last untried fix.
 //
-//   2. TouchEvent struct fields confirmed:
-//        event->type  — TouchEvent_Touchdown / Liftoff / PositionUpdate
-//        event->x     — int16_t
-//        event->y     — int16_t
-//      Filtering to TouchEvent_Touchdown prevents the radius
-//      cycling on every drag PositionUpdate frame.
+//   Also: removed touch_service_is_enabled() guard on
+//   unsubscribe — the calculator calls touch_service_unsubscribe()
+//   unconditionally in window_unload, unlike subscribe.
 // ============================================================
 
 // #define DEBUG_TEXT_BOXES
@@ -739,7 +738,7 @@ static void unobstructed_change(AnimationProgress progress, void *ctx) {
   if (s_phase == PHASE_DONE) { s_h = s_target_h; layer_mark_dirty(s_canvas_layer); }
 }
 
-// Shake: advance layout forward (original behavior).
+// Shake: advance layout forward.
 static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   if (s_phase != PHASE_DONE) return;
   s_layout = prv_next_layout(s_layout);
@@ -754,10 +753,7 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
 }
 
 // Touch: corner-radius sampler (emery only, PBL_TOUCH).
-// Cycles: 16px → 24px → 32px → 16px...
-// Only fires on Touchdown to avoid repeat-firing during drag.
-// KEY FIX: touch_service_is_enabled() must return true or subscribe silently
-// does nothing. This was the root cause of touch never working.
+// Cycles: 16px → 24px → 32px → 16px on each tap-down.
 #if defined(PBL_TOUCH)
 static void touch_handler(const TouchEvent *event, void *context) {
   if (event->type != TouchEvent_Touchdown) return;
@@ -767,6 +763,15 @@ static void touch_handler(const TouchEvent *event, void *context) {
 #endif
 }
 #endif
+
+// Empty click config provider — required to initialize the input
+// system for this window, which in turn enables touch event routing.
+// The calculator (freakified/pebble-calculator) sets this even on a
+// touch-only app; omitting it may prevent touch events from arriving.
+static void prv_click_config_provider(void *context) {
+  // No button bindings — touch handles all gestures.
+  // This function must exist for touch to work.
+}
 
 static void tick_handler(struct tm *t, TimeUnits units) {
   bool animated = (s_layout == LAYOUT_FULL || s_layout == LAYOUT_INFO);
@@ -834,9 +839,6 @@ static void window_load(Window *window) {
   unobstructed_area_service_subscribe(ua, NULL);
   accel_tap_service_subscribe(accel_tap_handler);
 
-  // KEY FIX: only subscribe if the touch sensor is actually enabled.
-  // Without this guard, touch_service_subscribe silently fails when
-  // the sensor is off, and no events are ever delivered.
 #if defined(PBL_TOUCH)
   if (touch_service_is_enabled()) {
     touch_service_subscribe(touch_handler, NULL);
@@ -852,9 +854,7 @@ static void window_unload(Window *window) {
   unobstructed_area_service_unsubscribe();
   accel_tap_service_unsubscribe();
 #if defined(PBL_TOUCH)
-  if (touch_service_is_enabled()) {
-    touch_service_unsubscribe();
-  }
+  touch_service_unsubscribe();  // unconditional, matching calculator reference
 #endif
   if (s_timer) { app_timer_cancel(s_timer); s_timer = NULL; }
   layer_destroy(s_canvas_layer);
@@ -865,6 +865,9 @@ static void init(void) {
   prv_load_config();
   s_window = window_create();
   window_set_background_color(s_window, GColorBlack);
+  // Set click config provider even though we don't use buttons —
+  // required to enable touch event routing on this window.
+  window_set_click_config_provider(s_window, prv_click_config_provider);
   window_set_window_handlers(s_window, (WindowHandlers){ .load = window_load, .unload = window_unload });
   window_stack_push(s_window, true);
 
