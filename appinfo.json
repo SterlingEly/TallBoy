@@ -151,8 +151,20 @@
     ]
   },
   "appKeys": {
-    "WeatherTempF": 0,
-    "WeatherTempC": 1,
-    "WeatherCode": 2
+    "WeatherTempF":    0,
+    "WeatherTempC":    1,
+    "WeatherCode":     2,
+    "SunriseTime":     3,
+    "SunsetTime":      4,
+    "CfgTimePos":      5,
+    "CfgSlot1":        6,
+    "CfgSlot2":        7,
+    "CfgSlot3":        8,
+    "CfgSlot4":        9,
+    "CfgSlot5":        10,
+    "CfgSlot6":        11,
+    "CfgTempUnit":     12,
+    "CfgDistUnit":     13,
+    "CfgClockFormat":  14
   }
 }
