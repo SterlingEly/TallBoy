@@ -1,42 +1,70 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v3.44
+// TallBoy — main.c  v3.45
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.44:
-//   - Countdown disabled: app starts directly in PHASE_DONE.
-//     All countdown code preserved (PHASE_COUNTDOWN, CdSubPhase,
-//     s_countdown_digit, prv_start_blink, CD_* cases in timer_cb)
-//     — just not triggered at startup. Restore by setting
-//     s_phase = PHASE_COUNTDOWN in window_load and uncommenting
-//     the schedule(COUNTDOWN_HOLD_MS) call.
-//     Plan: re-enable with animated center-line motion later.
-//
-//   - Solar data: s_sunrise_min / s_sunset_min now stored as
-//     minutes-since-midnight (converted from Unix timestamps
-//     in inbox_received). MESSAGE_KEY_SunriseTime / SunsetTime
-//     accepted from JS.
-//
-//   - app_message inbox size bumped to 512B to accommodate
-//     full config payload (weather + solar + config keys).
+// v3.45:
+//   - Touch service removed entirely (never worked on device;
+//     TouchEvent struct fields unknown, not worth debugging now)
+//   - Config system fully wired:
+//       s_cfg_time_pos  : 0-6 where time sits in info line order
+//       s_cfg_slots[6]  : slot type per position (see SLOT_* enum)
+//       s_cfg_temp_f    : bool, true=F false=C
+//       s_cfg_dist_mi   : bool, true=mi false=km
+//       s_cfg_24h       : bool, true=24h false=12h
+//   - Info line builders now driven by slot config
+//   - Layout cycle reads s_cfg_time_pos to determine above/below
+//     split, replacing hardcoded INFO_1/2/3 fixed splits
+//   - Stacked layout always shows all slots in order
+//   - Wide layout combines pairs automatically:
+//       SLOT_DATE    + nothing → "Thursday, May 21"
+//       SLOT_WEATHER + nothing → "72 F & sunny" (temp + desc)
+//       SLOT_STEPS   + nothing → "3,500 steps · 2.1 mi" (auto-adds distance)
+//       SLOT_PACE    + nothing → "exp 3,500 · 87%"
+//       SLOT_HRCAL   + nothing → "72 bpm · 212 cal"
+//   - Shake cycle now uses time_pos to determine info counts,
+//     replacing hardcoded INFO_1/2/3 sequence
+//   - LAYOUT_INFO_1/2/3 IDs retired; layout is now either
+//     LAYOUT_FULL, LAYOUT_INFO (splits driven by time_pos),
+//     LAYOUT_STACK_R, or LAYOUT_STACK_L
+//   - Countdown preserved but disabled (s_phase = PHASE_DONE)
 // ============================================================
 
 // #define DEBUG_TEXT_BOXES
 
-#define LSEQ_COUNT  9
-static const int s_layout_seq[LSEQ_COUNT] = { 0, 1, 0, 2, 0, 3, 0, 5, 4 };
-#define LAYOUT_FULL    0
-#define LAYOUT_INFO_1  1
-#define LAYOUT_INFO_2  2
-#define LAYOUT_INFO_3  3
-#define LAYOUT_STACK_R 4
-#define LAYOUT_STACK_L 5
+// ---------------------------------------------------------------------------
+// Slot type IDs — must match index.js SLOT_* and appinfo.json CfgSlot values
+// ---------------------------------------------------------------------------
+typedef enum {
+  SLOT_EMPTY   = 0,
+  SLOT_DATE    = 1,
+  SLOT_WEATHER = 2,
+  SLOT_SOLAR   = 3,
+  SLOT_STEPS   = 4,
+  SLOT_PACE    = 5,
+  SLOT_HRCAL   = 6,
+  SLOT_BATTERY = 7
+} SlotType;
 
+// ---------------------------------------------------------------------------
+// Layout IDs
+// ---------------------------------------------------------------------------
+#define LAYOUT_FULL    0
+#define LAYOUT_INFO    1   // wide info overlay, split by s_cfg_time_pos
+#define LAYOUT_STACK_R 2
+#define LAYOUT_STACK_L 3
+#define LAYOUT_COUNT   4
+
+// Shake cycle: Full → Info → Full → StackL → StackR → (wrap)
+// Info is only included when time_pos gives at least 1 line above or below
 static int s_lseq_idx = 0;
-#define CURRENT_LAYOUT  (s_layout_seq[s_lseq_idx])
+
 #define SHAKE_LEN  7
 
+// ---------------------------------------------------------------------------
+// Platform geometry
+// ---------------------------------------------------------------------------
 #if defined(PBL_PLATFORM_EMERY)
   #define SCREEN_W          200
   #define SCREEN_H          228
@@ -93,6 +121,7 @@ static int s_lseq_idx = 0;
 #define H_ABSOLUTE_MIN  (UNIT * 5)
 #define INFO_LINE_BUF   40
 #define INFO_LINES_MAX  8
+#define NUM_SLOTS       6
 
 static const int EASE[10] = { 4, 6, 8, 10, 12, 12, 10, 8, 6, 4 };
 #define EASE_LEN  10
@@ -102,7 +131,7 @@ static const int EASE[10] = { 4, 6, 8, 10, 12, 12, 10, 8, 6, 4 };
 #define ANIM_OVERSHOOT    UNIT
 #define ANTICIPATION_PX   HALF_UNIT
 #define ANTICIPATION_MS   16
-#define COUNTDOWN_HOLD_MS 120   // used if countdown re-enabled
+#define COUNTDOWN_HOLD_MS 120
 #define BLINK_REPS          2
 #define STEPS_AVG_MAX_MIN 120
 #define DOT " \xc2\xb7 "
@@ -121,6 +150,9 @@ typedef enum {
   PHASE_SHAKE_CYCLE
 } Phase;
 
+// ---------------------------------------------------------------------------
+// Global state
+// ---------------------------------------------------------------------------
 static Window    *s_window;
 static Layer     *s_canvas_layer;
 static int        s_hour = 0, s_minute = 0;
@@ -128,10 +160,10 @@ static int        s_h = 0, s_target_h = 0;
 static int        s_h_min = 0;
 static int        s_ease_idx = 0;
 static GColor     s_fg, s_bg;
-static Phase      s_phase = PHASE_DONE;  // countdown disabled — start directly in DONE
+static Phase      s_phase = PHASE_DONE;
 static int        s_anim_step = 0, s_anim_rep = 0;
 static bool       s_going_down = true, s_overshot = false;
-static int        s_countdown_digit = 9;  // preserved for when countdown is re-enabled
+static int        s_countdown_digit = 9;
 static CdSubPhase s_cd_sub = CD_HOLD_MAX;
 static AppTimer  *s_timer = NULL;
 static bool       s_digit_pending = false;
@@ -140,10 +172,69 @@ static int        s_battery_pct = 100;
 static bool       s_charging = false, s_bt_connected = true;
 static int        s_steps = 0, s_distance_m = 0, s_calories = 0, s_heart_rate = 0;
 static int        s_steps_expected = -1;
-static int        s_sunrise_min = -1, s_sunset_min = -1;  // minutes since midnight
+static int        s_sunrise_min = -1, s_sunset_min = -1;
 static char       s_weather_temp[8] = "";
 static char       s_weather_desc[32] = "";
 
+// Current layout position in the shake cycle
+static int s_layout = LAYOUT_FULL;
+
+// Config state — loaded from persistent storage, updated via app_message
+static int  s_cfg_time_pos = 3;                     // 0-6, default 3 (3+3)
+static int  s_cfg_slots[NUM_SLOTS] = {1,2,3,4,5,6}; // default: date,weather,solar,steps,pace,hrcal
+static bool s_cfg_temp_f    = true;
+static bool s_cfg_dist_mi   = true;
+static bool s_cfg_24h       = false;
+
+// Persist config keys
+#define PERSIST_CFG_TIME_POS   1
+#define PERSIST_CFG_SLOTS      2   // stores 6 bytes as a single uint32 pair
+#define PERSIST_CFG_FLAGS      3   // bit0=temp_f, bit1=dist_mi, bit2=24h
+
+static void prv_save_config(void) {
+  persist_write_int(PERSIST_CFG_TIME_POS, s_cfg_time_pos);
+  // Pack 6 slot values (each 0-7, 3 bits) into a single int32
+  int32_t packed = 0;
+  for (int i = 0; i < NUM_SLOTS; i++) packed |= (s_cfg_slots[i] & 0x7) << (i * 4);
+  persist_write_int(PERSIST_CFG_SLOTS, packed);
+  int32_t flags = (s_cfg_temp_f ? 1 : 0) | (s_cfg_dist_mi ? 2 : 0) | (s_cfg_24h ? 4 : 0);
+  persist_write_int(PERSIST_CFG_FLAGS, flags);
+}
+
+static void prv_load_config(void) {
+  if (persist_exists(PERSIST_CFG_TIME_POS))
+    s_cfg_time_pos = persist_read_int(PERSIST_CFG_TIME_POS);
+  if (persist_exists(PERSIST_CFG_SLOTS)) {
+    int32_t packed = persist_read_int(PERSIST_CFG_SLOTS);
+    for (int i = 0; i < NUM_SLOTS; i++) s_cfg_slots[i] = (packed >> (i * 4)) & 0x7;
+  }
+  if (persist_exists(PERSIST_CFG_FLAGS)) {
+    int32_t flags = persist_read_int(PERSIST_CFG_FLAGS);
+    s_cfg_temp_f  = (flags & 1) != 0;
+    s_cfg_dist_mi = (flags & 2) != 0;
+    s_cfg_24h     = (flags & 4) != 0;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Shake cycle sequence
+// Builds dynamically based on whether info layout has any lines
+// ---------------------------------------------------------------------------
+static int prv_next_layout(int current) {
+  // Cycle: FULL → INFO (if has lines) → STACK_L → STACK_R → FULL
+  bool has_info = (s_cfg_time_pos > 0 && s_cfg_time_pos < NUM_SLOTS);
+  switch (current) {
+    case LAYOUT_FULL:    return has_info ? LAYOUT_INFO : LAYOUT_STACK_L;
+    case LAYOUT_INFO:    return LAYOUT_STACK_L;
+    case LAYOUT_STACK_L: return LAYOUT_STACK_R;
+    case LAYOUT_STACK_R: return LAYOUT_FULL;
+    default:             return LAYOUT_FULL;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Pace color
+// ---------------------------------------------------------------------------
 #if defined(PBL_COLOR)
 static GColor prv_pace_color(int steps_today, int steps_expected) {
   if (steps_expected <= 0 || steps_today <= 0) return GColorBlack;
@@ -163,6 +254,9 @@ static bool prv_bg_needs_dark_fg(GColor bg) {
 }
 #endif
 
+// ---------------------------------------------------------------------------
+// Health
+// ---------------------------------------------------------------------------
 #if defined(PBL_HEALTH)
 static HealthMinuteData s_minute_buf[STEPS_AVG_MAX_MIN];
 static int prv_calc_steps_expected(void) {
@@ -205,6 +299,9 @@ static void prv_update_health(void) {
 }
 #endif
 
+// ---------------------------------------------------------------------------
+// Drawing primitives
+// ---------------------------------------------------------------------------
 static void fill_arc(GContext *ctx, int cx, int cy, int ro, int ri, int a0, int a1) {
   GRect b = GRect(cx - ro, cy - ro, ro * 2, ro * 2);
   graphics_fill_radial(ctx, b, GOvalScaleModeFitCircle, (uint16_t)(ro - ri),
@@ -272,26 +369,31 @@ static void draw_stacked_vec(GContext *ctx, int h_tens, int h_ones,
   draw_digit_vec(ctx, m_ones, ones_x, m_cy, dh);
 }
 
+// ---------------------------------------------------------------------------
+// Layout geometry
+// ---------------------------------------------------------------------------
 static int prv_info_block_h(int n, int step) {
   if (n <= 0) return 0;
   return INFO_GLYPH_H + (n - 1) * step;
 }
 
-static int prv_layout_lines(int layout, int *above, int *below) {
-  switch (layout) {
-    case LAYOUT_INFO_1: *above = 1; *below = 1; return 2;
-    case LAYOUT_INFO_2: *above = 2; *below = 2; return 4;
-    case LAYOUT_INFO_3: *above = 3; *below = 3; return 6;
-    default:            *above = 0; *below = 0; return 0;
-  }
+// For wide layout: how many lines above/below based on config
+static void prv_info_split(int *above, int *below) {
+  // Count enabled (non-empty) slots
+  int total = 0;
+  for (int i = 0; i < NUM_SLOTS; i++) if (s_cfg_slots[i] != SLOT_EMPTY) total++;
+  int pos = s_cfg_time_pos;
+  if (pos > total) pos = total;
+  *above = pos;
+  *below = total - pos;
 }
 
 static int prv_compute_target_h(int ub_h, int layout) {
-  int above, below;
-  prv_layout_lines(layout, &above, &below);
-  if (above == 0 && below == 0) {
+  if (layout != LAYOUT_INFO) {
     return ub_h - MARGIN_OUTER - BOTTOM_MARGIN(ub_h);
   }
+  int above, below;
+  prv_info_split(&above, &below);
   int reserved = HALF_UNIT + prv_info_block_h(above, INFO_LINE_STEP_WIDE) + HALF_UNIT;
   reserved    += HALF_UNIT + prv_info_block_h(below, INFO_LINE_STEP_WIDE) + HALF_UNIT;
   int h = ub_h - reserved;
@@ -306,9 +408,12 @@ static int prv_compute_stacked_h(int ub_h) {
 static void prv_update_targets(void) {
   Layer *root = window_get_root_layer(s_window);
   GRect ub = layer_get_unobstructed_bounds(root);
-  s_target_h = prv_compute_target_h(ub.size.h, CURRENT_LAYOUT);
+  s_target_h = prv_compute_target_h(ub.size.h, s_layout);
 }
 
+// ---------------------------------------------------------------------------
+// String formatters
+// ---------------------------------------------------------------------------
 static const char *s_day_names[] = {
   "Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"
 };
@@ -317,7 +422,7 @@ static const char *s_month_names[] = {
 };
 
 static void prv_fmt_distance(char *buf, int len) {
-  if (strcmp(i18n_get_system_locale(), "en_US") == 0) {
+  if (s_cfg_dist_mi) {
     int mx = (s_distance_m * 10) / 1609; snprintf(buf, len, "%d.%d mi", mx/10, mx%10);
   } else {
     int kx = (s_distance_m * 10) / 1000; snprintf(buf, len, "%d.%d km", kx/10, kx%10);
@@ -342,90 +447,154 @@ static void prv_fmt_bat_bt(char *buf, int len) {
   else if (s_charging) snprintf(buf, len, "%d%% bat +", s_battery_pct);
   else snprintf(buf, len, "%d%% bat", s_battery_pct);
 }
+static void prv_fmt_temp(char *buf, int len) {
+  if (s_weather_temp[0]) snprintf(buf, len, "%s", s_weather_temp);
+  else snprintf(buf, len, "--");
+}
 
+// Format a single slot for wide layout (auto-combines where appropriate)
+static void prv_render_slot_wide(char *buf, int len, SlotType slot, struct tm *t) {
+  switch (slot) {
+    case SLOT_DATE:
+      if (t) snprintf(buf, len, "%s, %s %d", s_day_names[t->tm_wday], s_month_names[t->tm_mon], t->tm_mday);
+      else   snprintf(buf, len, "Mon, Jan 1");
+      break;
+    case SLOT_WEATHER:
+      if (s_weather_temp[0] && s_weather_desc[0])
+        snprintf(buf, len, "%.7s & %.29s", s_weather_temp, s_weather_desc);
+      else if (s_weather_temp[0])
+        snprintf(buf, len, "%s", s_weather_temp);
+      else
+        snprintf(buf, len, "72 F & sunny");
+      break;
+    case SLOT_SOLAR:
+      if (s_sunrise_min >= 0 || s_sunset_min >= 0) {
+        char rise[12], set[12];
+        prv_fmt_time_min(rise, sizeof(rise), s_sunrise_min);
+        prv_fmt_time_min(set,  sizeof(set),  s_sunset_min);
+        snprintf(buf, len, "%s" DOT "%s", rise, set);
+      } else snprintf(buf, len, "6:02am" DOT "8:14pm");
+      break;
+    case SLOT_STEPS:
+#if defined(PBL_HEALTH)
+      { char sb[16]; prv_fmt_steps_long(sb, sizeof(sb), s_steps);
+        if (s_distance_m > 0) {
+          char db[12]; prv_fmt_distance(db, sizeof(db));
+          snprintf(buf, len, "%s steps" DOT "%s", sb, db);
+        } else snprintf(buf, len, "%s steps", sb); }
+#else
+      snprintf(buf, len, "3,500 steps" DOT "2.1 mi");
+#endif
+      break;
+    case SLOT_PACE:
+#if defined(PBL_HEALTH)
+      if (s_steps_expected > 0) {
+        char eb[16]; prv_fmt_steps_long(eb, sizeof(eb), s_steps_expected);
+        snprintf(buf, len, "exp %s" DOT "%d%%", eb, (s_steps*100)/s_steps_expected);
+      } else snprintf(buf, len, "exp -- " DOT " --");
+#else
+      snprintf(buf, len, "exp 3,500" DOT "100%%");
+#endif
+      break;
+    case SLOT_HRCAL:
+#if defined(PBL_HEALTH)
+      { bool hr = s_heart_rate > 0, cal = s_calories > 0;
+        if (hr && cal)  snprintf(buf, len, "%d bpm" DOT "%d cal", s_heart_rate, s_calories);
+        else if (hr)    snprintf(buf, len, "%d bpm", s_heart_rate);
+        else if (cal)   snprintf(buf, len, "%d cal", s_calories);
+        else            snprintf(buf, len, "-- bpm" DOT "-- cal"); }
+#else
+      snprintf(buf, len, "72 bpm" DOT "212 cal");
+#endif
+      break;
+    case SLOT_BATTERY:
+      prv_fmt_bat_bt(buf, len);
+      break;
+    default:
+      buf[0] = '\0';
+      break;
+  }
+}
+
+// Format a single slot for stacked layout (shorter strings)
+static void prv_render_slot_stacked(char *buf, int len, SlotType slot, struct tm *t) {
+  switch (slot) {
+    case SLOT_DATE:
+      if (t) snprintf(buf, len, "%s %d", s_month_names[t->tm_mon], t->tm_mday);
+      else   snprintf(buf, len, "Jan 1");
+      break;
+    case SLOT_WEATHER:
+      prv_fmt_temp(buf, len);
+      break;
+    case SLOT_SOLAR:
+      if (s_sunrise_min >= 0 || s_sunset_min >= 0) {
+        char rise[12]; prv_fmt_time_min(rise, sizeof(rise), s_sunrise_min);
+        snprintf(buf, len, "%s rise", rise);
+      } else snprintf(buf, len, "no solar");
+      break;
+    case SLOT_STEPS:
+#if defined(PBL_HEALTH)
+      { char sb[16]; prv_fmt_steps_short(sb, sizeof(sb), s_steps);
+        snprintf(buf, len, "%s steps", sb); }
+#else
+      snprintf(buf, len, "3.5k steps");
+#endif
+      break;
+    case SLOT_PACE:
+#if defined(PBL_HEALTH)
+      if (s_steps_expected > 0)
+        snprintf(buf, len, "%d%% pace", (s_steps*100)/s_steps_expected);
+      else snprintf(buf, len, "-- pace");
+#else
+      snprintf(buf, len, "87% pace");
+#endif
+      break;
+    case SLOT_HRCAL:
+#if defined(PBL_HEALTH)
+      if (s_heart_rate > 0) snprintf(buf, len, "%d bpm", s_heart_rate);
+      else if (s_calories > 0) snprintf(buf, len, "%d cal", s_calories);
+      else snprintf(buf, len, "-- bpm");
+#else
+      snprintf(buf, len, "72 bpm");
+#endif
+      break;
+    case SLOT_BATTERY:
+      prv_fmt_bat_bt(buf, len);
+      break;
+    default:
+      buf[0] = '\0';
+      break;
+  }
+}
+
+// Build the n lines for wide overlay (slots 0..time_pos-1 for above, time_pos..end for below)
+// Returns total lines built. Skips empty slots.
 static int build_info_lines_wide(char lines[][INFO_LINE_BUF], int max_lines, struct tm *t) {
   int n = 0;
-  if (n < max_lines) {
-    if (t) snprintf(lines[n++], INFO_LINE_BUF, "%s, %s %d",
-                    s_day_names[t->tm_wday], s_month_names[t->tm_mon], t->tm_mday);
-    else   snprintf(lines[n++], INFO_LINE_BUF, "Mon, Jan 1");
-  }
-  if (n < max_lines) {
-    if (s_weather_temp[0] && s_weather_desc[0])
-      snprintf(lines[n++], INFO_LINE_BUF, "%.7s & %.29s", s_weather_temp, s_weather_desc);
-    else if (s_weather_temp[0]) snprintf(lines[n++], INFO_LINE_BUF, "%s", s_weather_temp);
-    else snprintf(lines[n++], INFO_LINE_BUF, "72 F & sunny");
-  }
-  if (n < max_lines) {
-    if (s_sunrise_min >= 0 || s_sunset_min >= 0) {
-      char rise[12], set[12];
-      prv_fmt_time_min(rise, sizeof(rise), s_sunrise_min);
-      prv_fmt_time_min(set,  sizeof(set),  s_sunset_min);
-      snprintf(lines[n++], INFO_LINE_BUF, "%s" DOT "%s", rise, set);
-    } else snprintf(lines[n++], INFO_LINE_BUF, "6:02am" DOT "8:14pm");
-  }
-  if (n < max_lines) {
-#if defined(PBL_HEALTH)
-    char sbuf[16]; prv_fmt_steps_long(sbuf, sizeof(sbuf), s_steps);
-    if (s_distance_m > 0) {
-      char dbuf[12]; prv_fmt_distance(dbuf, sizeof(dbuf));
-      snprintf(lines[n++], INFO_LINE_BUF, "%s steps" DOT "%s", sbuf, dbuf);
-    } else snprintf(lines[n++], INFO_LINE_BUF, "%s steps", sbuf);
-#else
-    snprintf(lines[n++], INFO_LINE_BUF, "3,500 steps" DOT "2.1 mi");
-#endif
-  }
-  if (n < max_lines) {
-#if defined(PBL_HEALTH)
-    if (s_steps_expected > 0) {
-      char ebuf[16]; prv_fmt_steps_long(ebuf, sizeof(ebuf), s_steps_expected);
-      snprintf(lines[n++], INFO_LINE_BUF, "exp %s" DOT "%d%%", ebuf, (s_steps*100)/s_steps_expected);
-    } else snprintf(lines[n++], INFO_LINE_BUF, "exp -- " DOT " --");
-#else
-    snprintf(lines[n++], INFO_LINE_BUF, "exp 3,500" DOT "100%%");
-#endif
-  }
-  if (n < max_lines) {
-#if defined(PBL_HEALTH)
-    bool has_hr = s_heart_rate > 0, has_cal = s_calories > 0;
-    if      (has_hr && has_cal) snprintf(lines[n++], INFO_LINE_BUF, "%d bpm" DOT "%d cal", s_heart_rate, s_calories);
-    else if (has_hr)            snprintf(lines[n++], INFO_LINE_BUF, "%d bpm", s_heart_rate);
-    else if (has_cal)           snprintf(lines[n++], INFO_LINE_BUF, "%d cal", s_calories);
-    else                        snprintf(lines[n++], INFO_LINE_BUF, "-- bpm" DOT "-- cal");
-#else
-    snprintf(lines[n++], INFO_LINE_BUF, "72 bpm" DOT "212 cal");
-#endif
-  }
-  if (n < max_lines) {
-    char bbuf[24]; prv_fmt_bat_bt(bbuf, sizeof(bbuf));
-    snprintf(lines[n++], INFO_LINE_BUF, "%s", bbuf);
+  for (int i = 0; i < NUM_SLOTS && n < max_lines; i++) {
+    SlotType slot = (SlotType)s_cfg_slots[i];
+    if (slot == SLOT_EMPTY) continue;
+    prv_render_slot_wide(lines[n], INFO_LINE_BUF, slot, t);
+    if (lines[n][0]) n++;
   }
   return n;
 }
 
+// Build lines for stacked info column (all slots in order)
 static int build_info_lines_stacked(char lines[][INFO_LINE_BUF], int max_lines, struct tm *t) {
   int n = 0;
-  if (n < max_lines) {
-    if (s_weather_temp[0]) snprintf(lines[n++], INFO_LINE_BUF, "%s", s_weather_temp);
-    else                   snprintf(lines[n++], INFO_LINE_BUF, "72 F");
+  for (int i = 0; i < NUM_SLOTS && n < max_lines; i++) {
+    SlotType slot = (SlotType)s_cfg_slots[i];
+    if (slot == SLOT_EMPTY) continue;
+    prv_render_slot_stacked(lines[n], INFO_LINE_BUF, slot, t);
+    if (lines[n][0]) n++;
   }
-  if (n < max_lines && t) snprintf(lines[n++], INFO_LINE_BUF, "%s", s_day_names[t->tm_wday]);
-  if (n < max_lines && t) snprintf(lines[n++], INFO_LINE_BUF, "%s %d", s_month_names[t->tm_mon], t->tm_mday);
-#if defined(PBL_HEALTH)
-  if (n < max_lines) { char sbuf[16]; prv_fmt_steps_short(sbuf, sizeof(sbuf), s_steps); snprintf(lines[n++], INFO_LINE_BUF, "%s steps", sbuf); }
-  if (n < max_lines && s_steps_expected > 0) { char ebuf[16]; prv_fmt_steps_long(ebuf, sizeof(ebuf), s_steps_expected); snprintf(lines[n++], INFO_LINE_BUF, "exp %s", ebuf); }
-  if (n < max_lines && s_steps_expected > 0) snprintf(lines[n++], INFO_LINE_BUF, "%d%% exp", (s_steps*100)/s_steps_expected);
-  if (n < max_lines && s_steps_expected > 0) {
-    int diff = s_steps - s_steps_expected;
-    if (diff == 0) snprintf(lines[n++], INFO_LINE_BUF, "on pace");
-    else { char dbuf[16]; prv_fmt_steps_long(dbuf, sizeof(dbuf), diff < 0 ? -diff : diff); snprintf(lines[n++], INFO_LINE_BUF, "%s%s steps", diff > 0 ? "+" : "-", dbuf); }
-  }
-  if (n < max_lines && s_distance_m > 0) prv_fmt_distance(lines[n++], INFO_LINE_BUF);
-#endif
-  if (n < max_lines) prv_fmt_bat_bt(lines[n++], INFO_LINE_BUF);
   return n;
 }
 
+// ---------------------------------------------------------------------------
+// Text drawing
+// ---------------------------------------------------------------------------
 static GFont prv_info_font(void) { return fonts_get_system_font(INFO_FONT_KEY); }
 
 static void draw_text_at_glyph_y(GContext *ctx, const char *text,
@@ -467,12 +636,14 @@ static void draw_info_block_up(GContext *ctx, char lines[][INFO_LINE_BUF],
   }
 }
 
+// ---------------------------------------------------------------------------
+// Main draw
+// ---------------------------------------------------------------------------
 static void draw_layer(Layer *layer, GContext *ctx) {
   Layer *root  = window_get_root_layer(s_window);
   GRect ub     = layer_get_unobstructed_bounds(root);
   int ub_top   = ub.origin.y, ub_h = ub.size.h, ub_bot = ub_top + ub_h;
   GRect bounds = layer_get_bounds(layer);
-  int layout   = CURRENT_LAYOUT;
 
 #if defined(PBL_COLOR) && defined(PBL_HEALTH)
   GColor bg = prv_pace_color(s_steps, s_steps_expected);
@@ -491,28 +662,21 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 #endif
 
-  int hr = s_hour % 12; if (!hr) hr = 12;
-  int h_tens = hr/10, h_ones = hr%10, m_tens = s_minute/10, m_ones = s_minute%10;
+  int hr_12 = s_hour;
+  if (!s_cfg_24h) { hr_12 = s_hour % 12; if (!hr_12) hr_12 = 12; }
+  int h_tens = hr_12/10, h_ones = hr_12%10, m_tens = s_minute/10, m_ones = s_minute%10;
   int bot_margin = BOTTOM_MARGIN(ub_h);
-
-  // COUNTDOWN DISABLED — preserved for re-enable with animated center-line motion
-  // if (s_phase == PHASE_COUNTDOWN) {
-  //   int cy = ub_top + MARGIN_OUTER + s_target_h / 2;
-  //   draw_digits_vec(ctx, s_countdown_digit, s_countdown_digit,
-  //                   s_countdown_digit, s_countdown_digit, s_h, cy);
-  //   return;
-  // }
 
   time_t now_t = time(NULL);
   struct tm *tm_now = (s_phase == PHASE_DONE) ? localtime(&now_t) : NULL;
 
-  if (layout == LAYOUT_FULL) {
+  if (s_layout == LAYOUT_FULL) {
     int cy = ub_top + MARGIN_OUTER + s_target_h / 2;
     draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy);
 
-  } else if (layout == LAYOUT_INFO_1 || layout == LAYOUT_INFO_2 || layout == LAYOUT_INFO_3) {
+  } else if (s_layout == LAYOUT_INFO) {
     int lines_above, lines_below;
-    prv_layout_lines(layout, &lines_above, &lines_below);
+    prv_info_split(&lines_above, &lines_below);
 
     int above_start = ub_top + HALF_UNIT;
     int above_end   = above_start + prv_info_block_h(lines_above, INFO_LINE_STEP_WIDE);
@@ -521,14 +685,14 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int time_cy     = (above_end + HALF_UNIT + below_start - HALF_UNIT) / 2;
 
     char all_lines[INFO_LINES_MAX][INFO_LINE_BUF];
-    int total = build_info_lines_wide(all_lines, lines_above + lines_below, tm_now);
+    int total = build_info_lines_wide(all_lines, INFO_LINES_MAX, tm_now);
 
-    int above_n = lines_above < total ? lines_above : total;
-    draw_info_block_down(ctx, all_lines, above_n, above_start, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
-    int below_n = total - lines_above;
-    if (below_n > lines_below) below_n = lines_below;
-    if (below_n > 0)
-      draw_info_block_up(ctx, all_lines, lines_above, below_n, below_end, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
+    int an = lines_above < total ? lines_above : total;
+    draw_info_block_down(ctx, all_lines, an, above_start, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
+    int bn = total - lines_above;
+    if (bn > lines_below) bn = lines_below;
+    if (bn > 0)
+      draw_info_block_up(ctx, all_lines, lines_above, bn, below_end, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
 
     draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy);
 
@@ -538,7 +702,7 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int m_cy  = ub_bot - bot_margin - dh / 2;
     int tens_x, ones_x, info_x, info_w;
 
-    if (layout == LAYOUT_STACK_R) {
+    if (s_layout == LAYOUT_STACK_R) {
       ones_x = SCREEN_W - SIDE_MARGIN - SLOT_W; tens_x = ones_x - SLOT_W;
       info_x = SIDE_MARGIN; info_w = tens_x - SIDE_MARGIN * 2;
     } else {
@@ -552,6 +716,9 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Animation
+// ---------------------------------------------------------------------------
 static void timer_cb(void *data);
 
 static void schedule(uint32_t ms) {
@@ -579,24 +746,11 @@ static bool prv_ease_shrink_step(void) {
   return false;
 }
 
-static void prv_start_anticipate(void) {
-  s_phase = PHASE_ANTICIPATE;
-  schedule(ANTICIPATION_MS);
-}
-
-static void prv_start_expand(void) {
-  s_phase = PHASE_EXPAND;
-  s_ease_idx = 0; s_overshot = false;
-  schedule(ANIM_STEP_MS);
-}
-
-// Preserved for countdown re-enable
+static void prv_start_anticipate(void) { s_phase = PHASE_ANTICIPATE; schedule(ANTICIPATION_MS); }
+static void prv_start_expand(void) { s_phase = PHASE_EXPAND; s_ease_idx = 0; s_overshot = false; schedule(ANIM_STEP_MS); }
 static void prv_start_blink(void) {
-  s_h = s_target_h;
-  s_going_down = true; s_anim_rep = 0; s_overshot = false;
-  s_phase = PHASE_BLINK;
-  layer_mark_dirty(s_canvas_layer);
-  schedule(ANIM_STEP_MS);
+  s_h = s_target_h; s_going_down = true; s_anim_rep = 0; s_overshot = false;
+  s_phase = PHASE_BLINK; layer_mark_dirty(s_canvas_layer); schedule(ANIM_STEP_MS);
 }
 
 static void timer_cb(void *data) {
@@ -604,31 +758,23 @@ static void timer_cb(void *data) {
   switch (s_phase) {
 
     case PHASE_ANTICIPATE:
-      s_h += ANTICIPATION_PX;
-      layer_mark_dirty(s_canvas_layer);
-      s_phase = PHASE_SQUISH; s_ease_idx = 0; s_h_min = H_MIN;
-      schedule(ANIM_STEP_MS);
+      s_h += ANTICIPATION_PX; layer_mark_dirty(s_canvas_layer);
+      s_phase = PHASE_SQUISH; s_ease_idx = 0; s_h_min = H_MIN; schedule(ANIM_STEP_MS);
       break;
 
-    // COUNTDOWN PHASES — preserved, not triggered (s_phase never set to PHASE_COUNTDOWN)
     case PHASE_COUNTDOWN:
       switch (s_cd_sub) {
         case CD_SHRINK:
           s_h -= 6; layer_mark_dirty(s_canvas_layer);
           if (s_h <= H_MIN) { s_h = H_MIN; s_cd_sub = CD_HOLD_MIN; schedule(ANIM_SNAP_MS); }
-          else schedule(ANIM_STEP_MS);
-          break;
+          else schedule(ANIM_STEP_MS); break;
         case CD_HOLD_MIN:
           if (s_countdown_digit == 0) { prv_start_blink(); break; }
           s_countdown_digit--; layer_mark_dirty(s_canvas_layer);
-          s_cd_sub = CD_EXPAND; s_ease_idx = 0; s_overshot = false; schedule(ANIM_STEP_MS);
-          break;
+          s_cd_sub = CD_EXPAND; s_ease_idx = 0; s_overshot = false; schedule(ANIM_STEP_MS); break;
         case CD_EXPAND: {
-          bool done = prv_ease_expand_step();
-          layer_mark_dirty(s_canvas_layer);
-          if (done) { s_cd_sub = CD_HOLD_MAX; schedule(COUNTDOWN_HOLD_MS); }
-          break;
-        }
+          bool done = prv_ease_expand_step(); layer_mark_dirty(s_canvas_layer);
+          if (done) { s_cd_sub = CD_HOLD_MAX; schedule(COUNTDOWN_HOLD_MS); } break; }
         case CD_HOLD_MAX: s_cd_sub = CD_SHRINK; schedule(ANIM_STEP_MS); break;
       }
       break;
@@ -639,8 +785,7 @@ static void timer_cb(void *data) {
         if (s_h <= H_MIN) { s_h = H_MIN; s_going_down = false; s_overshot = false; }
         schedule(ANIM_STEP_MS);
       } else {
-        bool done = prv_ease_expand_step();
-        layer_mark_dirty(s_canvas_layer);
+        bool done = prv_ease_expand_step(); layer_mark_dirty(s_canvas_layer);
         if (done) {
           if (++s_anim_rep < BLINK_REPS) { s_going_down = true; s_overshot = false; s_ease_idx = 0; schedule(ANIM_STEP_MS); }
           else { s_phase = PHASE_DONE; layer_mark_dirty(s_canvas_layer); }
@@ -649,8 +794,7 @@ static void timer_cb(void *data) {
       break;
 
     case PHASE_SQUISH: {
-      bool done = prv_ease_shrink_step();
-      layer_mark_dirty(s_canvas_layer);
+      bool done = prv_ease_shrink_step(); layer_mark_dirty(s_canvas_layer);
       if (done) {
         if (s_digit_pending) { s_hour = s_pending_hour; s_minute = s_pending_minute; s_digit_pending = false; }
         prv_start_expand();
@@ -659,8 +803,7 @@ static void timer_cb(void *data) {
     }
 
     case PHASE_EXPAND: {
-      bool done = prv_ease_expand_step();
-      layer_mark_dirty(s_canvas_layer);
+      bool done = prv_ease_expand_step(); layer_mark_dirty(s_canvas_layer);
       if (done) { s_phase = PHASE_DONE; layer_mark_dirty(s_canvas_layer); }
       break;
     }
@@ -670,12 +813,9 @@ static void timer_cb(void *data) {
       if (++s_anim_step < SHAKE_LEN) {
         int h = s_target_h + OFF[s_anim_step];
         s_h = h < H_ABSOLUTE_MIN ? H_ABSOLUTE_MIN : h;
-        layer_mark_dirty(s_canvas_layer);
-        schedule(ANIM_STEP_MS);
+        layer_mark_dirty(s_canvas_layer); schedule(ANIM_STEP_MS);
       } else {
-        s_h = s_target_h;
-        s_phase = PHASE_DONE;
-        layer_mark_dirty(s_canvas_layer);
+        s_h = s_target_h; s_phase = PHASE_DONE; layer_mark_dirty(s_canvas_layer);
       }
       break;
     }
@@ -684,21 +824,20 @@ static void timer_cb(void *data) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Event handlers
+// ---------------------------------------------------------------------------
 static void unobstructed_change(AnimationProgress progress, void *ctx) {
   prv_update_targets();
   if (s_phase == PHASE_DONE) { s_h = s_target_h; layer_mark_dirty(s_canvas_layer); }
 }
 
 static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
-  // COUNTDOWN DISABLED: tap-to-skip-countdown path removed
-  // if (s_phase == PHASE_COUNTDOWN) { prv_start_blink(); return; }
   if (s_phase != PHASE_DONE) return;
-
-  s_lseq_idx = (s_lseq_idx + 1) % LSEQ_COUNT;
+  s_layout = prv_next_layout(s_layout);
   prv_update_targets();
-
-  if (CURRENT_LAYOUT == LAYOUT_FULL) {
-    s_phase = PHASE_SHAKE_CYCLE; s_anim_step = 0; s_anim_rep = 0;
+  if (s_layout == LAYOUT_FULL) {
+    s_phase = PHASE_SHAKE_CYCLE; s_anim_step = 0;
     s_h = s_target_h; schedule(ANIM_STEP_MS);
   } else {
     s_h_min = H_MIN; prv_start_anticipate();
@@ -706,20 +845,8 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   layer_mark_dirty(s_canvas_layer);
 }
 
-#if defined(PBL_TOUCH)
-static void touch_handler(const TouchEvent *event, void *context) {
-  (void)event; (void)context;
-#if defined(PBL_PLATFORM_EMERY)
-  s_radius_idx = (s_radius_idx + 1) % RADIUS_COUNT;
-  layer_mark_dirty(s_canvas_layer);
-#endif
-}
-#endif
-
 static void tick_handler(struct tm *t, TimeUnits units) {
-  int layout = CURRENT_LAYOUT;
-  bool animated = (layout == LAYOUT_FULL || layout == LAYOUT_INFO_1 ||
-                   layout == LAYOUT_INFO_2 || layout == LAYOUT_INFO_3);
+  bool animated = (s_layout == LAYOUT_FULL || s_layout == LAYOUT_INFO);
   if (s_phase == PHASE_DONE && animated) {
     s_pending_hour = t->tm_hour; s_pending_minute = t->tm_min; s_digit_pending = true;
     s_h_min = H_MIN; prv_start_anticipate();
@@ -748,7 +875,10 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
   t = dict_find(iter, MESSAGE_KEY_WeatherTempF);
   if (t) snprintf(s_weather_temp, sizeof(s_weather_temp), "%dF", (int)t->value->int32);
   t = dict_find(iter, MESSAGE_KEY_WeatherTempC);
-  if (t && !s_weather_temp[0]) snprintf(s_weather_temp, sizeof(s_weather_temp), "%dC", (int)t->value->int32);
+  if (t && !s_weather_temp[0]) {
+    // Only use C if F wasn't provided, or if user configured C
+    if (!s_cfg_temp_f) snprintf(s_weather_temp, sizeof(s_weather_temp), "%dC", (int)t->value->int32);
+  }
   t = dict_find(iter, MESSAGE_KEY_WeatherCode);
   if (t) {
     int c = (int)t->value->int32;
@@ -756,7 +886,7 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
     snprintf(s_weather_desc, sizeof(s_weather_desc), "%s", d);
   }
 
-  // Solar: JS sends Unix timestamps, convert to minutes-since-midnight in local time
+  // Solar: Unix timestamps → minutes since midnight
   t = dict_find(iter, MESSAGE_KEY_SunriseTime);
   if (t) {
     time_t ts = (time_t)(uint32_t)t->value->uint32;
@@ -770,9 +900,36 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
     if (lt) s_sunset_min = lt->tm_hour * 60 + lt->tm_min;
   }
 
+  // Config keys
+  t = dict_find(iter, MESSAGE_KEY_CfgTimePos);
+  if (t) s_cfg_time_pos = (int)t->value->int32;
+
+  for (int i = 0; i < NUM_SLOTS; i++) {
+    // MESSAGE_KEY_CfgSlot1 = key 6, CfgSlot2 = 7, ..., CfgSlot6 = 11
+    t = dict_find(iter, MESSAGE_KEY_CfgSlot1 + i);
+    if (t) s_cfg_slots[i] = (int)t->value->int32;
+  }
+
+  t = dict_find(iter, MESSAGE_KEY_CfgTempUnit);
+  if (t) {
+    s_cfg_temp_f = (t->value->int32 == 0);
+    // Re-format weather temp if we have raw data (would need re-fetch; just clear to trigger refresh)
+    // For now just note the preference — JS will send the right unit on next fetch
+  }
+  t = dict_find(iter, MESSAGE_KEY_CfgDistUnit);
+  if (t) s_cfg_dist_mi = (t->value->int32 == 0);
+
+  t = dict_find(iter, MESSAGE_KEY_CfgClockFormat);
+  if (t) s_cfg_24h = (t->value->int32 == 1);
+
+  prv_save_config();
+  prv_update_targets();
   layer_mark_dirty(s_canvas_layer);
 }
 
+// ---------------------------------------------------------------------------
+// Window / App lifecycle
+// ---------------------------------------------------------------------------
 static void window_load(Window *window) {
   Layer *root = window_get_root_layer(window);
   s_canvas_layer = layer_create(layer_get_bounds(root));
@@ -780,40 +937,31 @@ static void window_load(Window *window) {
   layer_add_child(root, s_canvas_layer);
 
   GRect ub = layer_get_unobstructed_bounds(root);
-  s_target_h = prv_compute_target_h(ub.size.h, CURRENT_LAYOUT);
-  s_h = s_target_h;  // start at full height immediately (countdown disabled)
+  s_target_h = prv_compute_target_h(ub.size.h, s_layout);
+  s_h = s_target_h;
 
   UnobstructedAreaHandlers ua = { .change = unobstructed_change };
   unobstructed_area_service_subscribe(ua, NULL);
   accel_tap_service_subscribe(accel_tap_handler);
-#if defined(PBL_TOUCH)
-  touch_service_subscribe(touch_handler, NULL);
-#endif
 
-  // COUNTDOWN DISABLED — to re-enable:
-  //   1. Set s_phase = PHASE_COUNTDOWN below
-  //   2. Set s_countdown_digit = 9, s_h = H_MIN, s_cd_sub = CD_HOLD_MAX
-  //   3. Uncomment schedule(COUNTDOWN_HOLD_MS)
-  //   4. Restore tap handler countdown skip in accel_tap_handler
-  //   5. Restore countdown block in draw_layer
+  // COUNTDOWN DISABLED — to re-enable see v3.44 comments
   s_phase = PHASE_DONE;
   s_overshot = false; s_ease_idx = 0;
   layer_mark_dirty(s_canvas_layer);
-  // schedule(COUNTDOWN_HOLD_MS);  // re-enable with countdown
 }
 
 static void window_unload(Window *window) {
   unobstructed_area_service_unsubscribe();
   accel_tap_service_unsubscribe();
-#if defined(PBL_TOUCH)
-  touch_service_unsubscribe();
-#endif
   if (s_timer) { app_timer_cancel(s_timer); s_timer = NULL; }
   layer_destroy(s_canvas_layer);
 }
 
 static void init(void) {
   s_fg = GColorWhite; s_bg = GColorBlack;
+
+  prv_load_config();  // load persisted config before building UI
+
   s_window = window_create();
   window_set_background_color(s_window, GColorBlack);
   window_set_window_handlers(s_window, (WindowHandlers){ .load = window_load, .unload = window_unload });
@@ -832,7 +980,7 @@ static void init(void) {
   prv_update_health();
 #endif
   app_message_register_inbox_received(inbox_received);
-  app_message_open(512, 64);  // 512B for weather + solar + future config keys
+  app_message_open(512, 64);
 }
 
 static void deinit(void) {
