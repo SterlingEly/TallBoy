@@ -8,8 +8,8 @@
   "sdkVersion": "3",
   "projectType": "native",
   "enableMultiJS": false,
-  "watchapp": {"watchface": true, "configurable": true},
-  "capabilities": ["health"],
+  "watchapp": {"watchface": true},
+  "capabilities": ["health", "configurable"],
   "targetPlatforms": ["aplite","basalt","diorite","emery","flint","gabbro"],
   "resources": {
     "media": [
