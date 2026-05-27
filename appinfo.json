@@ -8,9 +8,9 @@
   "sdkVersion": "3",
   "projectType": "native",
   "enableMultiJS": false,
-  "watchapp": {"watchface": true},
+  "watchapp": {"watchface": true, "configurable": true},
   "capabilities": ["health"],
-  "targetPlatforms": ["aplite","basalt","diorite","emery","flint"],
+  "targetPlatforms": ["aplite","basalt","diorite","emery","flint","gabbro"],
   "resources": {
     "media": [
       {"type":"png","name":"TALLBOY_DUMMY1","file":"images/dummy-1.png"},
