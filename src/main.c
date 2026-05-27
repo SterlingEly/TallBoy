@@ -1,25 +1,21 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v3.46b
+// TallBoy — main.c  v3.46c
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.46b gesture changes:
+// v3.46c: touch fix from pebble-2048-touch reference (lanrat):
 //
-//   SHAKE (accel_tap): restored to old behavior — advances
-//     layout forward through the cycle (FULL→INFO→STACK_L→
-//     STACK_R→FULL) with squish animation. Same as pre-v3.46.
+//   1. touch_service_is_enabled() guard on subscribe/unsubscribe.
+//      Without this, subscribing when the sensor is off silently
+//      fails and no events arrive.
 //
-//   TOUCH (PBL_TOUCH, emery): restored to corner-radius
-//     sampler — cycles s_radius_idx through s_radius_opts[]
-//     (16px / 24px / 32px corners) and redraws. Diagnostic:
-//     if the corner ever changes on device, touch is firing.
-//     Once touch is confirmed working we'll decide final use.
-//
-// Rationale: touch handler fires on any event (down/up/move).
-// The radius sampler gives a visible, low-noise signal that
-// touch is actually being received by the watchface. If touch
-// is still broken it won't change; if it works we'll see it.
+//   2. TouchEvent struct fields confirmed:
+//        event->type  — TouchEvent_Touchdown / Liftoff / PositionUpdate
+//        event->x     — int16_t
+//        event->y     — int16_t
+//      Filtering to TouchEvent_Touchdown prevents the radius
+//      cycling on every drag PositionUpdate frame.
 // ============================================================
 
 // #define DEBUG_TEXT_BOXES
@@ -185,7 +181,6 @@ static void prv_load_config(void) {
   }
 }
 
-// FULL → INFO (if configured) → STACK_L → STACK_R → FULL
 static int prv_next_layout(int current) {
   bool has_info = (s_cfg_time_pos > 0 && s_cfg_time_pos < NUM_SLOTS);
   switch (current) {
@@ -744,14 +739,12 @@ static void unobstructed_change(AnimationProgress progress, void *ctx) {
   if (s_phase == PHASE_DONE) { s_h = s_target_h; layer_mark_dirty(s_canvas_layer); }
 }
 
-// Shake: advance layout forward through cycle (original behavior).
-// FULL→INFO→STACK_L→STACK_R→FULL, squish animation on transitions.
+// Shake: advance layout forward (original behavior).
 static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   if (s_phase != PHASE_DONE) return;
   s_layout = prv_next_layout(s_layout);
   prv_update_targets();
   if (s_layout == LAYOUT_FULL) {
-    // Returning to full: shake animation
     s_phase = PHASE_SHAKE_CYCLE; s_anim_step = 0;
     s_h = s_target_h; schedule(ANIM_STEP_MS);
   } else {
@@ -760,14 +753,14 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   layer_mark_dirty(s_canvas_layer);
 }
 
-// Touch: corner-radius sampler (diagnostic + useful for picking radius).
-// Cycles through s_radius_opts[]: 16px → 24px → 32px → 16px...
-// If the corner visibly changes on device, touch_service is working.
-// Handler signature confirmed: void(*)(const TouchEvent *, void *)
-// Fires on any touch event (down/up/move) — no type filtering yet.
+// Touch: corner-radius sampler (emery only, PBL_TOUCH).
+// Cycles: 16px → 24px → 32px → 16px...
+// Only fires on Touchdown to avoid repeat-firing during drag.
+// KEY FIX: touch_service_is_enabled() must return true or subscribe silently
+// does nothing. This was the root cause of touch never working.
 #if defined(PBL_TOUCH)
 static void touch_handler(const TouchEvent *event, void *context) {
-  (void)event; (void)context;
+  if (event->type != TouchEvent_Touchdown) return;
 #if defined(PBL_PLATFORM_EMERY)
   s_radius_idx = (s_radius_idx + 1) % RADIUS_COUNT;
   layer_mark_dirty(s_canvas_layer);
@@ -840,8 +833,14 @@ static void window_load(Window *window) {
   UnobstructedAreaHandlers ua = { .change = unobstructed_change };
   unobstructed_area_service_subscribe(ua, NULL);
   accel_tap_service_subscribe(accel_tap_handler);
+
+  // KEY FIX: only subscribe if the touch sensor is actually enabled.
+  // Without this guard, touch_service_subscribe silently fails when
+  // the sensor is off, and no events are ever delivered.
 #if defined(PBL_TOUCH)
-  touch_service_subscribe(touch_handler, NULL);
+  if (touch_service_is_enabled()) {
+    touch_service_subscribe(touch_handler, NULL);
+  }
 #endif
 
   s_phase = PHASE_DONE;
@@ -853,7 +852,9 @@ static void window_unload(Window *window) {
   unobstructed_area_service_unsubscribe();
   accel_tap_service_unsubscribe();
 #if defined(PBL_TOUCH)
-  touch_service_unsubscribe();
+  if (touch_service_is_enabled()) {
+    touch_service_unsubscribe();
+  }
 #endif
   if (s_timer) { app_timer_cancel(s_timer); s_timer = NULL; }
   layer_destroy(s_canvas_layer);
