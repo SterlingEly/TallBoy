@@ -1,27 +1,25 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v3.43a
+// TallBoy — main.c  v3.44
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.43a fixes:
+// v3.44:
+//   - Countdown disabled: app starts directly in PHASE_DONE.
+//     All countdown code preserved (PHASE_COUNTDOWN, CdSubPhase,
+//     s_countdown_digit, prv_start_blink, CD_* cases in timer_cb)
+//     — just not triggered at startup. Restore by setting
+//     s_phase = PHASE_COUNTDOWN in window_load and uncommenting
+//     the schedule(COUNTDOWN_HOLD_MS) call.
+//     Plan: re-enable with animated center-line motion later.
 //
-// SQUISH CENTERED (full screen):
-//   cy was ub_top + MARGIN_OUTER + s_h/2, so it moved as s_h
-//   changed — digit slid down from top instead of squishing in place.
-//   Fix: cy = ub_top + MARGIN_OUTER + s_target_h/2 (fixed center).
-//   Also applied to countdown for consistency.
+//   - Solar data: s_sunrise_min / s_sunset_min now stored as
+//     minutes-since-midnight (converted from Unix timestamps
+//     in inbox_received). MESSAGE_KEY_SunriseTime / SunsetTime
+//     accepted from JS.
 //
-// STACKED INFO COLUMN BOTTOM MARGIN:
-//   glyph_bot now = area.bottom - MARGIN_OUTER + INFO_GLYPH_H.
-//   The + INFO_GLYPH_H compensates for slot distribution: slot_h
-//   is the distance between glyph tops, so the last glyph extends
-//   INFO_GLYPH_H below its slot start. Without this the last line
-//   sat too high. With it the last glyph bottom lands at MARGIN_OUTER
-//   from the column edge.
-//
-// All other v3.43 fixes (stacked quick-look gap, ease table,
-// shake simplification, quick-look bottom margin) unchanged.
+//   - app_message inbox size bumped to 512B to accommodate
+//     full config payload (weather + solar + config keys).
 // ============================================================
 
 // #define DEBUG_TEXT_BOXES
@@ -99,14 +97,14 @@ static int s_lseq_idx = 0;
 static const int EASE[10] = { 4, 6, 8, 10, 12, 12, 10, 8, 6, 4 };
 #define EASE_LEN  10
 
-#define ANIM_STEP_MS    16
-#define ANIM_SNAP_MS    80
-#define ANIM_OVERSHOOT  UNIT
+#define ANIM_STEP_MS      16
+#define ANIM_SNAP_MS      80
+#define ANIM_OVERSHOOT    UNIT
 #define ANTICIPATION_PX   HALF_UNIT
 #define ANTICIPATION_MS   16
-#define COUNTDOWN_HOLD_MS  120
-#define BLINK_REPS           2
-#define STEPS_AVG_MAX_MIN  120
+#define COUNTDOWN_HOLD_MS 120   // used if countdown re-enabled
+#define BLINK_REPS          2
+#define STEPS_AVG_MAX_MIN 120
 #define DOT " \xc2\xb7 "
 
 #define QUICK_LOOK_ACTIVE(ub_h)  ((ub_h) < (SCREEN_H - UNIT))
@@ -130,10 +128,10 @@ static int        s_h = 0, s_target_h = 0;
 static int        s_h_min = 0;
 static int        s_ease_idx = 0;
 static GColor     s_fg, s_bg;
-static Phase      s_phase = PHASE_COUNTDOWN;
+static Phase      s_phase = PHASE_DONE;  // countdown disabled — start directly in DONE
 static int        s_anim_step = 0, s_anim_rep = 0;
 static bool       s_going_down = true, s_overshot = false;
-static int        s_countdown_digit = 9;
+static int        s_countdown_digit = 9;  // preserved for when countdown is re-enabled
 static CdSubPhase s_cd_sub = CD_HOLD_MAX;
 static AppTimer  *s_timer = NULL;
 static bool       s_digit_pending = false;
@@ -142,7 +140,7 @@ static int        s_battery_pct = 100;
 static bool       s_charging = false, s_bt_connected = true;
 static int        s_steps = 0, s_distance_m = 0, s_calories = 0, s_heart_rate = 0;
 static int        s_steps_expected = -1;
-static int        s_sunrise_min = -1, s_sunset_min = -1;
+static int        s_sunrise_min = -1, s_sunset_min = -1;  // minutes since midnight
 static char       s_weather_temp[8] = "";
 static char       s_weather_desc[32] = "";
 
@@ -442,12 +440,6 @@ static void draw_text_at_glyph_y(GContext *ctx, const char *text,
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 }
 
-// Stacked info column.
-// glyph_top: first glyph top at MARGIN_OUTER from area top (2u = 16px)
-// glyph_bot: last glyph BOTTOM at MARGIN_OUTER from area bottom.
-//   = area.bottom - MARGIN_OUTER + INFO_GLYPH_H
-//   The + INFO_GLYPH_H compensates for slot_h measuring glyph tops:
-//   last glyph extends INFO_GLYPH_H below its slot start.
 static void draw_info_column(GContext *ctx, GRect area, struct tm *t) {
   char lines[INFO_LINES_MAX][INFO_LINE_BUF];
   int n = build_info_lines_stacked(lines, INFO_LINES_MAX, t);
@@ -503,21 +495,18 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   int h_tens = hr/10, h_ones = hr%10, m_tens = s_minute/10, m_ones = s_minute%10;
   int bot_margin = BOTTOM_MARGIN(ub_h);
 
-  if (s_phase == PHASE_COUNTDOWN) {
-    // Fixed center based on target height — squishes symmetrically in place
-    int cy = ub_top + MARGIN_OUTER + s_target_h / 2;
-    draw_digits_vec(ctx, s_countdown_digit, s_countdown_digit,
-                    s_countdown_digit, s_countdown_digit, s_h, cy);
-    return;
-  }
+  // COUNTDOWN DISABLED — preserved for re-enable with animated center-line motion
+  // if (s_phase == PHASE_COUNTDOWN) {
+  //   int cy = ub_top + MARGIN_OUTER + s_target_h / 2;
+  //   draw_digits_vec(ctx, s_countdown_digit, s_countdown_digit,
+  //                   s_countdown_digit, s_countdown_digit, s_h, cy);
+  //   return;
+  // }
 
   time_t now_t = time(NULL);
   struct tm *tm_now = (s_phase == PHASE_DONE) ? localtime(&now_t) : NULL;
 
   if (layout == LAYOUT_FULL) {
-    // Fixed center: cy stays constant as s_h changes → symmetric squish
-    // cy = ub_top + MARGIN_OUTER + s_target_h/2
-    // top gap = MARGIN_OUTER, bottom gap = ub_h - MARGIN_OUTER - s_target_h = BOTTOM_MARGIN(ub_h)
     int cy = ub_top + MARGIN_OUTER + s_target_h / 2;
     draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy);
 
@@ -541,8 +530,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     if (below_n > 0)
       draw_info_block_up(ctx, all_lines, lines_above, below_n, below_end, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
 
-    // Info layout: use midpoint of available space for digit center
-    // (s_target_h already accounts for info blocks, so cy is also fixed)
     draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy);
 
   } else {
@@ -603,6 +590,7 @@ static void prv_start_expand(void) {
   schedule(ANIM_STEP_MS);
 }
 
+// Preserved for countdown re-enable
 static void prv_start_blink(void) {
   s_h = s_target_h;
   s_going_down = true; s_anim_rep = 0; s_overshot = false;
@@ -622,6 +610,7 @@ static void timer_cb(void *data) {
       schedule(ANIM_STEP_MS);
       break;
 
+    // COUNTDOWN PHASES — preserved, not triggered (s_phase never set to PHASE_COUNTDOWN)
     case PHASE_COUNTDOWN:
       switch (s_cd_sub) {
         case CD_SHRINK:
@@ -701,7 +690,8 @@ static void unobstructed_change(AnimationProgress progress, void *ctx) {
 }
 
 static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
-  if (s_phase == PHASE_COUNTDOWN) { prv_start_blink(); return; }
+  // COUNTDOWN DISABLED: tap-to-skip-countdown path removed
+  // if (s_phase == PHASE_COUNTDOWN) { prv_start_blink(); return; }
   if (s_phase != PHASE_DONE) return;
 
   s_lseq_idx = (s_lseq_idx + 1) % LSEQ_COUNT;
@@ -753,6 +743,8 @@ static void bt_handler(bool connected) {
 
 static void inbox_received(DictionaryIterator *iter, void *context) {
   Tuple *t;
+
+  // Weather
   t = dict_find(iter, MESSAGE_KEY_WeatherTempF);
   if (t) snprintf(s_weather_temp, sizeof(s_weather_temp), "%dF", (int)t->value->int32);
   t = dict_find(iter, MESSAGE_KEY_WeatherTempC);
@@ -763,6 +755,21 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
     const char *d = (c==0)?"clear":(c<=3)?"cloudy":(c<=49)?"fog":(c<=69)?"rain":(c<=79)?"snow":(c<=99)?"storm":"weather";
     snprintf(s_weather_desc, sizeof(s_weather_desc), "%s", d);
   }
+
+  // Solar: JS sends Unix timestamps, convert to minutes-since-midnight in local time
+  t = dict_find(iter, MESSAGE_KEY_SunriseTime);
+  if (t) {
+    time_t ts = (time_t)(uint32_t)t->value->uint32;
+    struct tm *lt = localtime(&ts);
+    if (lt) s_sunrise_min = lt->tm_hour * 60 + lt->tm_min;
+  }
+  t = dict_find(iter, MESSAGE_KEY_SunsetTime);
+  if (t) {
+    time_t ts = (time_t)(uint32_t)t->value->uint32;
+    struct tm *lt = localtime(&ts);
+    if (lt) s_sunset_min = lt->tm_hour * 60 + lt->tm_min;
+  }
+
   layer_mark_dirty(s_canvas_layer);
 }
 
@@ -774,7 +781,7 @@ static void window_load(Window *window) {
 
   GRect ub = layer_get_unobstructed_bounds(root);
   s_target_h = prv_compute_target_h(ub.size.h, CURRENT_LAYOUT);
-  s_h = s_target_h;
+  s_h = s_target_h;  // start at full height immediately (countdown disabled)
 
   UnobstructedAreaHandlers ua = { .change = unobstructed_change };
   unobstructed_area_service_subscribe(ua, NULL);
@@ -783,10 +790,16 @@ static void window_load(Window *window) {
   touch_service_subscribe(touch_handler, NULL);
 #endif
 
-  s_phase = PHASE_COUNTDOWN; s_countdown_digit = 9;
-  s_overshot = false; s_ease_idx = 0; s_cd_sub = CD_HOLD_MAX;
+  // COUNTDOWN DISABLED — to re-enable:
+  //   1. Set s_phase = PHASE_COUNTDOWN below
+  //   2. Set s_countdown_digit = 9, s_h = H_MIN, s_cd_sub = CD_HOLD_MAX
+  //   3. Uncomment schedule(COUNTDOWN_HOLD_MS)
+  //   4. Restore tap handler countdown skip in accel_tap_handler
+  //   5. Restore countdown block in draw_layer
+  s_phase = PHASE_DONE;
+  s_overshot = false; s_ease_idx = 0;
   layer_mark_dirty(s_canvas_layer);
-  schedule(COUNTDOWN_HOLD_MS);
+  // schedule(COUNTDOWN_HOLD_MS);  // re-enable with countdown
 }
 
 static void window_unload(Window *window) {
@@ -819,7 +832,7 @@ static void init(void) {
   prv_update_health();
 #endif
   app_message_register_inbox_received(inbox_received);
-  app_message_open(256, 64);
+  app_message_open(512, 64);  // 512B for weather + solar + future config keys
 }
 
 static void deinit(void) {
