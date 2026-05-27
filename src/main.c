@@ -1,14 +1,25 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v3.46a
+// TallBoy — main.c  v3.46b
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.46a build fixes:
-//   1. misleading-indentation: braced CD_SHRINK else path
-//   2. prv_advance_layout wrapped in #if defined(PBL_TOUCH)
-//      — was unused on non-touch platforms (flint, aplite, etc.)
-//   3. db[] distance buffer: 12 → 16 bytes (Wformat-truncation)
+// v3.46b gesture changes:
+//
+//   SHAKE (accel_tap): restored to old behavior — advances
+//     layout forward through the cycle (FULL→INFO→STACK_L→
+//     STACK_R→FULL) with squish animation. Same as pre-v3.46.
+//
+//   TOUCH (PBL_TOUCH, emery): restored to corner-radius
+//     sampler — cycles s_radius_idx through s_radius_opts[]
+//     (16px / 24px / 32px corners) and redraws. Diagnostic:
+//     if the corner ever changes on device, touch is firing.
+//     Once touch is confirmed working we'll decide final use.
+//
+// Rationale: touch handler fires on any event (down/up/move).
+// The radius sampler gives a visible, low-noise signal that
+// touch is actually being received by the watchface. If touch
+// is still broken it won't change; if it works we'll see it.
 // ============================================================
 
 // #define DEBUG_TEXT_BOXES
@@ -408,7 +419,7 @@ static void prv_render_slot_wide(char *buf, int len, SlotType slot, struct tm *t
 #if defined(PBL_HEALTH)
       { char sb[16]; prv_fmt_steps_long(sb, sizeof(sb), s_steps);
         if (s_distance_m > 0) {
-          char db[16]; prv_fmt_distance(db, sizeof(db));  // 16: avoids Wformat-truncation
+          char db[16]; prv_fmt_distance(db, sizeof(db));
           snprintf(buf, len, "%s steps" DOT "%s", sb, db);
         } else snprintf(buf, len, "%s steps", sb); }
 #else
@@ -656,23 +667,6 @@ static void prv_start_blink(void) {
   s_phase = PHASE_BLINK; layer_mark_dirty(s_canvas_layer); schedule(ANIM_STEP_MS);
 }
 
-// prv_advance_layout: called only from touch_handler on PBL_TOUCH platforms.
-// Guard prevents unused-function warning on non-touch builds.
-#if defined(PBL_TOUCH)
-static void prv_advance_layout(void) {
-  if (s_phase != PHASE_DONE) return;
-  s_layout = prv_next_layout(s_layout);
-  prv_update_targets();
-  if (s_layout == LAYOUT_FULL) {
-    s_phase = PHASE_SHAKE_CYCLE; s_anim_step = 0;
-    s_h = s_target_h; schedule(ANIM_STEP_MS);
-  } else {
-    s_h_min = H_MIN; prv_start_anticipate();
-  }
-  layer_mark_dirty(s_canvas_layer);
-}
-#endif /* PBL_TOUCH */
-
 static void timer_cb(void *data) {
   s_timer = NULL;
   switch (s_phase) {
@@ -687,7 +681,7 @@ static void timer_cb(void *data) {
         case CD_SHRINK:
           s_h -= 6; layer_mark_dirty(s_canvas_layer);
           if (s_h <= H_MIN) { s_h = H_MIN; s_cd_sub = CD_HOLD_MIN; schedule(ANIM_SNAP_MS); }
-          else { schedule(ANIM_STEP_MS); }  // braced: fixes -Wmisleading-indentation
+          else { schedule(ANIM_STEP_MS); }
           break;
         case CD_HOLD_MIN:
           if (s_countdown_digit == 0) { prv_start_blink(); break; }
@@ -750,24 +744,34 @@ static void unobstructed_change(AnimationProgress progress, void *ctx) {
   if (s_phase == PHASE_DONE) { s_h = s_target_h; layer_mark_dirty(s_canvas_layer); }
 }
 
-// Shake: always return to LAYOUT_FULL with shake animation.
-// Shake-in-place when already FULL gives satisfying pulse feedback.
+// Shake: advance layout forward through cycle (original behavior).
+// FULL→INFO→STACK_L→STACK_R→FULL, squish animation on transitions.
 static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   if (s_phase != PHASE_DONE) return;
-  s_layout = LAYOUT_FULL;
+  s_layout = prv_next_layout(s_layout);
   prv_update_targets();
-  s_phase = PHASE_SHAKE_CYCLE; s_anim_step = 0;
-  s_h = s_target_h; schedule(ANIM_STEP_MS);
+  if (s_layout == LAYOUT_FULL) {
+    // Returning to full: shake animation
+    s_phase = PHASE_SHAKE_CYCLE; s_anim_step = 0;
+    s_h = s_target_h; schedule(ANIM_STEP_MS);
+  } else {
+    s_h_min = H_MIN; prv_start_anticipate();
+  }
   layer_mark_dirty(s_canvas_layer);
 }
 
-// Touch: advance to next layout (emery/gabbro, PBL_TOUCH only).
-// Handler fires on any touch event — filter to touch-down once
-// TouchEvent type enum name is confirmed from pebble.h.
+// Touch: corner-radius sampler (diagnostic + useful for picking radius).
+// Cycles through s_radius_opts[]: 16px → 24px → 32px → 16px...
+// If the corner visibly changes on device, touch_service is working.
+// Handler signature confirmed: void(*)(const TouchEvent *, void *)
+// Fires on any touch event (down/up/move) — no type filtering yet.
 #if defined(PBL_TOUCH)
 static void touch_handler(const TouchEvent *event, void *context) {
   (void)event; (void)context;
-  prv_advance_layout();
+#if defined(PBL_PLATFORM_EMERY)
+  s_radius_idx = (s_radius_idx + 1) % RADIUS_COUNT;
+  layer_mark_dirty(s_canvas_layer);
+#endif
 }
 #endif
 
