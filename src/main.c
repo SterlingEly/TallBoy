@@ -1,25 +1,14 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v3.46
+// TallBoy — main.c  v3.46a
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.46:
-//   Touch restored (emery/gabbro, PBL_TOUCH):
-//     Confirmed API: touch_service_subscribe(handler, context)
-//     Handler signature: void(*)(const TouchEvent *, void *)
-//     TouchEvent struct fields (type enum, x, y) unknown —
-//     fires on any touch. TODO: filter to touch-down only once
-//     event type enum name is confirmed from pebble.h / docs.
-//
-//   Interaction model redesigned:
-//     TOUCH  = advance layout forward through cycle (squish anim)
-//     SHAKE  = always return to LAYOUT_FULL (shake anim)
-//     This gives two independent directional gestures.
-//     Shake-in-place on LAYOUT_FULL still gives satisfying feedback.
-//
-//   Also removed unused s_lseq_idx (leftover from old seq system).
-//   Bare % in SLOT_PACE stacked fallback fixed: "87%%" not "87%".
+// v3.46a build fixes:
+//   1. misleading-indentation: braced CD_SHRINK else path
+//   2. prv_advance_layout wrapped in #if defined(PBL_TOUCH)
+//      — was unused on non-touch platforms (flint, aplite, etc.)
+//   3. db[] distance buffer: 12 → 16 bytes (Wformat-truncation)
 // ============================================================
 
 // #define DEBUG_TEXT_BOXES
@@ -419,7 +408,7 @@ static void prv_render_slot_wide(char *buf, int len, SlotType slot, struct tm *t
 #if defined(PBL_HEALTH)
       { char sb[16]; prv_fmt_steps_long(sb, sizeof(sb), s_steps);
         if (s_distance_m > 0) {
-          char db[12]; prv_fmt_distance(db, sizeof(db));
+          char db[16]; prv_fmt_distance(db, sizeof(db));  // 16: avoids Wformat-truncation
           snprintf(buf, len, "%s steps" DOT "%s", sb, db);
         } else snprintf(buf, len, "%s steps", sb); }
 #else
@@ -478,7 +467,7 @@ static void prv_render_slot_stacked(char *buf, int len, SlotType slot, struct tm
       if (s_steps_expected > 0) snprintf(buf, len, "%d%% pace", (s_steps*100)/s_steps_expected);
       else snprintf(buf, len, "-- pace");
 #else
-      snprintf(buf, len, "87%% pace");  // %% = literal % in snprintf
+      snprintf(buf, len, "87%% pace");
 #endif
       break;
     case SLOT_HRCAL:
@@ -633,9 +622,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Shared layout-advance logic (used by both touch and shake-advance)
-// ---------------------------------------------------------------------------
 static void timer_cb(void *data);
 
 static void schedule(uint32_t ms) {
@@ -670,14 +656,14 @@ static void prv_start_blink(void) {
   s_phase = PHASE_BLINK; layer_mark_dirty(s_canvas_layer); schedule(ANIM_STEP_MS);
 }
 
-// Advance to the next layout in the forward cycle.
-// If phase is busy, ignore — prevents input stacking during animation.
+// prv_advance_layout: called only from touch_handler on PBL_TOUCH platforms.
+// Guard prevents unused-function warning on non-touch builds.
+#if defined(PBL_TOUCH)
 static void prv_advance_layout(void) {
   if (s_phase != PHASE_DONE) return;
   s_layout = prv_next_layout(s_layout);
   prv_update_targets();
   if (s_layout == LAYOUT_FULL) {
-    // Wrapping back to full: use shake animation for satisfying feedback
     s_phase = PHASE_SHAKE_CYCLE; s_anim_step = 0;
     s_h = s_target_h; schedule(ANIM_STEP_MS);
   } else {
@@ -685,6 +671,7 @@ static void prv_advance_layout(void) {
   }
   layer_mark_dirty(s_canvas_layer);
 }
+#endif /* PBL_TOUCH */
 
 static void timer_cb(void *data) {
   s_timer = NULL;
@@ -700,7 +687,8 @@ static void timer_cb(void *data) {
         case CD_SHRINK:
           s_h -= 6; layer_mark_dirty(s_canvas_layer);
           if (s_h <= H_MIN) { s_h = H_MIN; s_cd_sub = CD_HOLD_MIN; schedule(ANIM_SNAP_MS); }
-          else schedule(ANIM_STEP_MS); break;
+          else { schedule(ANIM_STEP_MS); }  // braced: fixes -Wmisleading-indentation
+          break;
         case CD_HOLD_MIN:
           if (s_countdown_digit == 0) { prv_start_blink(); break; }
           s_countdown_digit--; layer_mark_dirty(s_canvas_layer);
@@ -731,7 +719,7 @@ static void timer_cb(void *data) {
       if (done) {
         if (s_digit_pending) { s_hour = s_pending_hour; s_minute = s_pending_minute; s_digit_pending = false; }
         prv_start_expand();
-      } else schedule(ANIM_STEP_MS);
+      } else { schedule(ANIM_STEP_MS); }
       break;
     }
 
@@ -762,8 +750,8 @@ static void unobstructed_change(AnimationProgress progress, void *ctx) {
   if (s_phase == PHASE_DONE) { s_h = s_target_h; layer_mark_dirty(s_canvas_layer); }
 }
 
-// Shake: always return to LAYOUT_FULL.
-// Shake-in-place when already FULL gives pulse feedback.
+// Shake: always return to LAYOUT_FULL with shake animation.
+// Shake-in-place when already FULL gives satisfying pulse feedback.
 static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   if (s_phase != PHASE_DONE) return;
   s_layout = LAYOUT_FULL;
@@ -773,11 +761,9 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   layer_mark_dirty(s_canvas_layer);
 }
 
-// Touch: advance to next layout in forward cycle.
-// API: touch_service_subscribe(handler, context)
-//      handler = void(*)(const TouchEvent *, void *)
-// TouchEvent fields (type enum, x, y) unknown — any touch advances.
-// TODO: filter to touch-down type only once enum name is confirmed.
+// Touch: advance to next layout (emery/gabbro, PBL_TOUCH only).
+// Handler fires on any touch event — filter to touch-down once
+// TouchEvent type enum name is confirmed from pebble.h.
 #if defined(PBL_TOUCH)
 static void touch_handler(const TouchEvent *event, void *context) {
   (void)event; (void)context;
@@ -854,7 +840,7 @@ static void window_load(Window *window) {
   touch_service_subscribe(touch_handler, NULL);
 #endif
 
-  s_phase = PHASE_DONE;  // countdown disabled; re-enable in future pass
+  s_phase = PHASE_DONE;
   s_overshot = false; s_ease_idx = 0;
   layer_mark_dirty(s_canvas_layer);
 }
