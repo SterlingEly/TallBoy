@@ -1,42 +1,13 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v3.47
+// TallBoy — main.c  v3.47a
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.47 changes:
-//
-//   TOUCH: click_config_provider now binds real (no-op) button
-//     handlers — matches pebble-calculator exactly. Empty provider
-//     may not fully initialize the input subsystem.
-//
-//   SLOTS: expanded from 8 to 15 types:
-//     0=empty, 1=day, 2=date, 3=day+date, 4=temp, 5=weather
-//     6=steps, 7=distance, 8=exp_steps, 9=pace
-//     10=calories, 11=heart_rate, 12=sunrise, 13=sunset
-//     14=daylight, 15=battery, 16=bluetooth
-//
-//   ICONS: Radium2 pixel-drawn icons (both sizes):
-//     footprint/steps, battery (charging bolt), BT rune+!,
-//     heart, calories/flame, sun, cloud, partly-cloudy,
-//     rain, snow, storm. Sized to font cap height:
-//     small=11px (GOTHIC_18_BOLD), large=14px (GOTHIC_24_BOLD)
-//
-//   WIDE COMBOS: adjacent same-side slot pairs auto-combine:
-//     day+date → "Wed, May 28"
-//     temp+weather → "72F & rain"
-//     steps+distance → "3,450 steps · 1.7 mi"
-//     exp_steps+pace → "exp 3,200 · 108%"
-//     calories+heart → "212 cal · 72 bpm"
-//     sunrise+sunset → "6:02am · 8:14pm"
-//     battery+bluetooth → "82% bat ·" (bt blank when connected)
-//
-//   STACKED ALIGNMENT: info lines align to the open side:
-//     LAYOUT_STACK_L (digits left): info right-aligned
-//     LAYOUT_STACK_R (digits right): info left-aligned
-//
-//   CONFIG: drag-to-reorder HTML config with "Time" as a
-//     draggable item among 6 data slots.
+// v3.47a: fix -Werror=misleading-indentation on 3 else clauses:
+//   SLOT_DATE, SLOT_DAY_DATE, SLOT_BATTERY in prv_slot_text().
+//   All braced: else { snprintf(...); } return true;
+//   (timer_cb CD_SHRINK was already correctly braced.)
 // ============================================================
 
 // #define DEBUG_TEXT_BOXES
@@ -91,7 +62,7 @@ typedef enum {
   #define INFO_LINE_STEP_WIDE 22
   #define INFO_FONT_KEY    FONT_KEY_GOTHIC_24_BOLD
   #define UNIT                 8
-  #define ICON_W              14   // large: GOTHIC_24_BOLD cap height
+  #define ICON_W              14
   static const uint16_t s_radius_opts[] = { UNIT*2, UNIT*3, UNIT*4 };
   #define RADIUS_COUNT 3
   static int s_radius_idx = 0;
@@ -113,7 +84,7 @@ typedef enum {
   #define INFO_LINE_STEP_WIDE 17
   #define INFO_FONT_KEY    FONT_KEY_GOTHIC_18_BOLD
   #define UNIT                 6
-  #define ICON_W              11   // small: GOTHIC_18_BOLD cap height
+  #define ICON_W              11
 #endif
 
 #define ICON_LARGE       (ICON_W == 14)
@@ -162,9 +133,6 @@ typedef enum {
   PHASE_SHAKE_CYCLE
 } Phase;
 
-// ============================================================
-// STATE
-// ============================================================
 static Window    *s_window;
 static Layer     *s_canvas_layer;
 static int        s_hour = 0, s_minute = 0;
@@ -187,10 +155,8 @@ static int        s_weather_temp_f = -999, s_weather_temp_c = -999;
 static int        s_weather_code = 0;
 static int        s_layout = LAYOUT_FULL;
 
-// Config: ordered_slots[0..6] = ordered list of (SlotType | TIME_MARKER)
-// TIME_MARKER (17) means "time goes here"
 #define TIME_MARKER 17
-static int  s_cfg_order[NUM_SLOTS + 1] = { 1,2,3,17,4,5,6 }; // default: 3+3, time in middle
+static int  s_cfg_order[NUM_SLOTS + 1] = { 1,2,3,17,4,5,6 };
 static bool s_cfg_temp_f    = true;
 static bool s_cfg_dist_mi   = true;
 static bool s_cfg_24h       = false;
@@ -219,16 +185,12 @@ static void prv_load_config(void) {
   }
 }
 
-// Find time position: index of TIME_MARKER in s_cfg_order
 static int prv_time_pos(void) {
   for (int i = 0; i < NUM_SLOTS + 1; i++)
     if (s_cfg_order[i] == TIME_MARKER) return i;
-  return 3; // fallback
+  return 3;
 }
 
-// Fill above/below arrays from s_cfg_order, splitting at time position
-// Returns count above, count below via pointers.
-// above_slots[] and below_slots[] filled with SlotType values (not TIME_MARKER).
 static void prv_split_slots(int *above_slots, int *n_above,
                              int *below_slots, int *n_below) {
   int tp = prv_time_pos();
@@ -240,7 +202,6 @@ static void prv_split_slots(int *above_slots, int *n_above,
   }
 }
 
-// Count non-empty, non-time slots above and below time
 static void prv_info_count(int *above, int *below) {
   int ab[NUM_SLOTS], bb[NUM_SLOTS], na = 0, nb = 0;
   prv_split_slots(ab, &na, bb, &nb);
@@ -250,9 +211,6 @@ static void prv_info_count(int *above, int *below) {
   *above = a; *below = b;
 }
 
-// ============================================================
-// NEXT LAYOUT
-// ============================================================
 static int prv_next_layout(int current) {
   int a, b; prv_info_count(&a, &b);
   bool has_info = (a > 0 || b > 0);
@@ -265,9 +223,6 @@ static int prv_next_layout(int current) {
   }
 }
 
-// ============================================================
-// PACE / COLOR
-// ============================================================
 #if defined(PBL_COLOR)
 static GColor prv_pace_color(int steps_today, int steps_expected) {
   if (steps_expected <= 0 || steps_today <= 0) return GColorBlack;
@@ -287,9 +242,6 @@ static bool prv_bg_needs_dark_fg(GColor bg) {
 }
 #endif
 
-// ============================================================
-// HEALTH
-// ============================================================
 #if defined(PBL_HEALTH)
 static HealthMinuteData s_minute_buf[STEPS_AVG_MAX_MIN];
 static int prv_calc_steps_expected(void) {
@@ -332,9 +284,7 @@ static void prv_update_health(void) {
 #endif
 
 // ============================================================
-// ICONS  (ported from Radium2, pixel-drawn, two sizes)
-// ox,oy = top-left of icon bounding box; col = fill/stroke color
-// large=true for GOTHIC_24_BOLD (14px), false for GOTHIC_18_BOLD (11px)
+// ICONS
 // ============================================================
 static void icon_footprint(GContext *ctx, int fx, int fy, GColor col, bool large) {
   graphics_context_set_fill_color(ctx, col);
@@ -589,10 +539,9 @@ static void draw_stacked_vec(GContext *ctx, int h_tens, int h_ones, int m_tens, 
 
 // ============================================================
 // INFO LINE RENDERING
-// Icon+text drawing helper: center icon+gap+text unit at cx
 // ============================================================
 static void draw_icon_text(GContext *ctx, void (*icon_fn)(GContext*,int,int,GColor,bool),
-                            int icon_extra, // extra param for battery pct or weather code
+                            int icon_extra,
                             bool is_battery, bool is_weather,
                             int code_or_pct,
                             const char *text, GFont font,
@@ -606,18 +555,15 @@ static void draw_icon_text(GContext *ctx, void (*icon_fn)(GContext*,int,int,GCol
              : cx - unit_w / 2;
   int text_x = icon_x + ICON_W + ICON_TEXT_GAP;
   int iy = y - INFO_TOP_PAD + (INFO_LINE_H - ICON_W) / 2;
-  // draw icon
   if      (is_battery) icon_battery(ctx, icon_x, iy, s_fg, code_or_pct, large);
   else if (is_weather) icon_weather(ctx, icon_x, iy, s_fg, code_or_pct, large);
   else                 icon_fn(ctx, icon_x, iy, s_fg, large);
-  // draw text
   graphics_context_set_text_color(ctx, s_fg);
   graphics_draw_text(ctx, text, font,
     GRect(text_x, y - INFO_TOP_PAD, width - text_x, INFO_LINE_H),
     GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 }
 
-// Format helpers
 static void prv_fmt_dist(char *buf, int len) {
   if (s_cfg_dist_mi) { int mx=(s_distance_m*10)/1609; snprintf(buf,len,"%d.%dmi",mx/10,mx%10); }
   else               { int kx=(s_distance_m*10)/1000; snprintf(buf,len,"%d.%dkm",kx/10,kx%10); }
@@ -635,8 +581,6 @@ static const char *s_day_names[]   = {"Sunday","Monday","Tuesday","Wednesday","T
 static const char *s_day_short[]   = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
 static const char *s_month_names[] = {"Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
 
-// Render a single slot to text (stacked = short, wide = long)
-// Returns false if slot is empty
 static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool wide) {
   switch (slot) {
     case SLOT_EMPTY:  return false;
@@ -644,11 +588,11 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       snprintf(buf,len, wide ? "%s" : "%s",
         t ? (wide?s_day_names[t->tm_wday]:s_day_short[t->tm_wday]) : "Mon"); return true;
     case SLOT_DATE:
-      if (t) snprintf(buf,len,"%s %d",s_month_names[t->tm_mon],t->tm_mday);
-      else snprintf(buf,len,"Jan 1"); return true;
+      if (t) { snprintf(buf,len,"%s %d",s_month_names[t->tm_mon],t->tm_mday); }
+      else { snprintf(buf,len,"Jan 1"); } return true;
     case SLOT_DAY_DATE:
-      if (t) snprintf(buf,len,"%s, %s %d",s_day_short[t->tm_wday],s_month_names[t->tm_mon],t->tm_mday);
-      else snprintf(buf,len,"Mon, Jan 1"); return true;
+      if (t) { snprintf(buf,len,"%s, %s %d",s_day_short[t->tm_wday],s_month_names[t->tm_mon],t->tm_mday); }
+      else { snprintf(buf,len,"Mon, Jan 1"); } return true;
     case SLOT_TEMP:
       if (s_weather_temp_f > -900) {
         if (s_cfg_temp_f) snprintf(buf,len,"%dF",s_weather_temp_f);
@@ -726,15 +670,14 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
         snprintf(buf,len,"%dh%02dm",mins/60,mins%60);
       } else snprintf(buf,len,"--h--m"); return true;
     case SLOT_BATTERY:
-      if (s_charging) snprintf(buf,len,"%d%% +",s_battery_pct);
-      else snprintf(buf,len,"%d%%",s_battery_pct); return true;
+      if (s_charging) { snprintf(buf,len,"%d%% +",s_battery_pct); }
+      else { snprintf(buf,len,"%d%%",s_battery_pct); } return true;
     case SLOT_BLUETOOTH:
       snprintf(buf,len,"%s",s_bt_connected?"":"no bt"); return true;
     default: return false;
   }
 }
 
-// Get icon function for a slot (returns NULL for text-only slots)
 typedef void (*IconFn)(GContext*,int,int,GColor,bool);
 static IconFn prv_slot_icon(SlotType slot, bool *is_battery, bool *is_weather, int *extra) {
   *is_battery=false; *is_weather=false; *extra=0;
@@ -748,12 +691,10 @@ static IconFn prv_slot_icon(SlotType slot, bool *is_battery, bool *is_weather, i
     case SLOT_BLUETOOTH: return icon_bt;
     case SLOT_TEMP: *is_weather=true; *extra=s_weather_code; return NULL;
     case SLOT_WEATHER: *is_weather=true; *extra=s_weather_code; return NULL;
-    default: return NULL; // text-only: day, date, day+date
+    default: return NULL;
   }
 }
 
-// Build flat array of rendered lines from a slot list.
-// wide=true collapses natural pairs; returns line count.
 typedef struct { char text[INFO_LINE_BUF]; bool has_icon; IconFn icon_fn;
                  bool is_battery; bool is_weather; int icon_extra; } InfoLine;
 
@@ -768,17 +709,15 @@ static int build_lines(InfoLine *lines, int max, int *slots, int n_slots,
     if (!prv_slot_text(buf, sizeof(buf), slot, t, wide)) continue;
     snprintf(line->text, INFO_LINE_BUF, "%s", buf);
     bool ib, iw; int ie;
-    line->icon_fn   = prv_slot_icon(slot, &ib, &iw, &ie);
+    line->icon_fn    = prv_slot_icon(slot, &ib, &iw, &ie);
     line->is_battery = ib; line->is_weather = iw; line->icon_extra = ie;
-    line->has_icon  = (line->icon_fn != NULL || ib || iw);
-    // Skip bluetooth line if connected and text is empty
+    line->has_icon   = (line->icon_fn != NULL || ib || iw);
     if (slot == SLOT_BLUETOOTH && s_bt_connected) continue;
     count++;
   }
   return count;
 }
 
-// Draw a single info line at glyph baseline y
 static void draw_info_line(GContext *ctx, InfoLine *line, int y, int width,
                             int cx, GTextAlignment align) {
   GFont font = fonts_get_system_font(INFO_FONT_KEY);
@@ -794,9 +733,6 @@ static void draw_info_line(GContext *ctx, InfoLine *line, int y, int width,
   }
 }
 
-// ============================================================
-// LAYOUT HELPERS
-// ============================================================
 static int prv_info_block_h(int n, int step) {
   return n <= 0 ? 0 : INFO_GLYPH_H + (n-1) * step;
 }
@@ -818,9 +754,6 @@ static void prv_update_targets(void) {
   s_target_h = prv_compute_target_h(ub.size.h, s_layout);
 }
 
-// ============================================================
-// DRAW LAYER
-// ============================================================
 static void draw_layer(Layer *layer, GContext *ctx) {
   Layer *root  = window_get_root_layer(s_window);
   GRect ub     = layer_get_unobstructed_bounds(root);
@@ -865,8 +798,7 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int above_start = ub_top + HALF_UNIT;
     int above_end   = above_start + prv_info_block_h(an, INFO_LINE_STEP_WIDE);
     int below_end   = ub_bot - HALF_UNIT;
-    int below_start = below_end - prv_info_block_h(bn, INFO_LINE_STEP_WIDE);
-    int time_cy     = (above_end + HALF_UNIT + below_start - HALF_UNIT) / 2;
+    int time_cy     = (above_end + HALF_UNIT + (below_end - prv_info_block_h(bn, INFO_LINE_STEP_WIDE)) - HALF_UNIT) / 2;
     int line_w      = SCREEN_W - 2 * SIDE_MARGIN;
     int line_cx     = SCREEN_W / 2;
 
@@ -874,14 +806,12 @@ static void draw_layer(Layer *layer, GContext *ctx) {
       draw_info_line(ctx, &above_lines[i],
         above_start + i * INFO_LINE_STEP_WIDE, line_w, line_cx, GTextAlignmentCenter);
     for (int i = 0; i < bn; i++) {
-      int gy = below_end - prv_info_block_h(bn, INFO_LINE_STEP_WIDE)
-             + i * INFO_LINE_STEP_WIDE;
+      int gy = below_end - prv_info_block_h(bn, INFO_LINE_STEP_WIDE) + i * INFO_LINE_STEP_WIDE;
       draw_info_line(ctx, &below_lines[i], gy, line_w, line_cx, GTextAlignmentCenter);
     }
     draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy);
 
   } else {
-    // Stacked layouts
     int dh    = prv_compute_stacked_h(ub_h);
     int h_cy  = ub_top + MARGIN_OUTER + dh / 2;
     int m_cy  = ub_bot - bot_margin - dh / 2;
@@ -889,19 +819,16 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     GTextAlignment info_align;
 
     if (s_layout == LAYOUT_STACK_R) {
-      // Digits right → info on left → left-aligned
       ones_x = SCREEN_W - SIDE_MARGIN - SLOT_W; tens_x = ones_x - SLOT_W;
       info_x = SIDE_MARGIN; info_w = tens_x - SIDE_MARGIN * 2;
       info_align = GTextAlignmentLeft;
     } else {
-      // Digits left → info on right → right-aligned
       tens_x = SIDE_MARGIN; ones_x = SIDE_MARGIN + SLOT_W;
       info_x = ones_x + SLOT_W + SIDE_MARGIN; info_w = SCREEN_W - info_x - SIDE_MARGIN;
       info_align = GTextAlignmentRight;
     }
 
     if (tm_now && info_w > 20) {
-      // Build all non-empty slots for stacked column
       int all_s[NUM_SLOTS], n_all = 0;
       for (int i = 0; i < NUM_SLOTS + 1; i++)
         if (s_cfg_order[i] != TIME_MARKER && s_cfg_order[i] != SLOT_EMPTY)
@@ -912,8 +839,7 @@ static void draw_layer(Layer *layer, GContext *ctx) {
         int glyph_top = ub_top + MARGIN_OUTER;
         int glyph_bot = ub_bot - MARGIN_OUTER + INFO_GLYPH_H;
         int step = cn > 1 ? (glyph_bot - glyph_top - INFO_GLYPH_H) / (cn - 1) : 0;
-        int line_cx = (info_align == GTextAlignmentLeft)
-          ? info_x + info_w / 2 : info_x + info_w / 2;
+        int line_cx = info_x + info_w / 2;
         for (int i = 0; i < cn; i++)
           draw_info_line(ctx, &col_lines[i], glyph_top + i * step,
             info_w, line_cx, info_align);
@@ -923,9 +849,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   }
 }
 
-// ============================================================
-// ANIMATION
-// ============================================================
 static void timer_cb(void *data);
 static void schedule(uint32_t ms) {
   if (s_timer) app_timer_cancel(s_timer);
@@ -999,9 +922,6 @@ static void timer_cb(void *data) {
   }
 }
 
-// ============================================================
-// EVENT HANDLERS
-// ============================================================
 static void unobstructed_change(AnimationProgress progress, void *ctx) {
   prv_update_targets();
   if (s_phase == PHASE_DONE) { s_h = s_target_h; layer_mark_dirty(s_canvas_layer); }
@@ -1027,8 +947,6 @@ static void touch_handler(const TouchEvent *event, void *context) {
 }
 #endif
 
-// Click config provider: bind no-op handlers to all buttons.
-// A populated click config provider is required for touch routing.
 static void prv_noop_click(ClickRecognizerRef ref, void *ctx) { (void)ref; (void)ctx; }
 static void prv_click_config_provider(void *context) {
   window_single_click_subscribe(BUTTON_ID_UP,     prv_noop_click);
@@ -1068,7 +986,6 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
   if (t) { time_t ts=(time_t)(uint32_t)t->value->uint32; struct tm*lt=localtime(&ts); if(lt)s_sunrise_min=lt->tm_hour*60+lt->tm_min; }
   t = dict_find(iter, MESSAGE_KEY_SunsetTime);
   if (t) { time_t ts=(time_t)(uint32_t)t->value->uint32; struct tm*lt=localtime(&ts); if(lt)s_sunset_min=lt->tm_hour*60+lt->tm_min; }
-  // Ordered slot config: slots 0-6 encode the full ordered list incl TIME_MARKER
   for (int i = 0; i < NUM_SLOTS + 1; i++) {
     t = dict_find(iter, MESSAGE_KEY_CfgSlot1 + i);
     if (t) s_cfg_order[i] = (int)t->value->int32;
@@ -1111,7 +1028,6 @@ static void init(void) {
   prv_load_config();
   s_window = window_create();
   window_set_background_color(s_window, GColorBlack);
-  // Bind real (no-op) button handlers — required for touch event routing
   window_set_click_config_provider(s_window, prv_click_config_provider);
   window_set_window_handlers(s_window, (WindowHandlers){ .load=window_load, .unload=window_unload });
   window_stack_push(s_window, true);
