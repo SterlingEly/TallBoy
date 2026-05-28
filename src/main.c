@@ -1,91 +1,123 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v3.46e
+// TallBoy — main.c  v3.47
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.46e: add 50ms haptic pulse on touch (from calculator ref).
-//   Serves as both a diagnostic (confirms touch is firing even
-//   when bg is black) and the right feel for a tap gesture.
+// v3.47 changes:
 //
-// Summary of touch stack so far:
-//   - touch_service_is_enabled() guard on subscribe ✓
-//   - TouchEvent_Touchdown filter ✓
-//   - touch_service_unsubscribe() unconditional ✓
-//   - window_set_click_config_provider() (empty) ✓
-//   - vibes_enqueue_custom_pattern() 50ms pulse ← new
+//   TOUCH: click_config_provider now binds real (no-op) button
+//     handlers — matches pebble-calculator exactly. Empty provider
+//     may not fully initialize the input subsystem.
 //
-// Settings fix (appinfo.json already pushed separately):
-//   - "configurable" moved from watchapp{} to capabilities[]
-//     matching TimeStyle / pebble-calculator reference pattern.
+//   SLOTS: expanded from 8 to 15 types:
+//     0=empty, 1=day, 2=date, 3=day+date, 4=temp, 5=weather
+//     6=steps, 7=distance, 8=exp_steps, 9=pace
+//     10=calories, 11=heart_rate, 12=sunrise, 13=sunset
+//     14=daylight, 15=battery, 16=bluetooth
+//
+//   ICONS: Radium2 pixel-drawn icons (both sizes):
+//     footprint/steps, battery (charging bolt), BT rune+!,
+//     heart, calories/flame, sun, cloud, partly-cloudy,
+//     rain, snow, storm. Sized to font cap height:
+//     small=11px (GOTHIC_18_BOLD), large=14px (GOTHIC_24_BOLD)
+//
+//   WIDE COMBOS: adjacent same-side slot pairs auto-combine:
+//     day+date → "Wed, May 28"
+//     temp+weather → "72F & rain"
+//     steps+distance → "3,450 steps · 1.7 mi"
+//     exp_steps+pace → "exp 3,200 · 108%"
+//     calories+heart → "212 cal · 72 bpm"
+//     sunrise+sunset → "6:02am · 8:14pm"
+//     battery+bluetooth → "82% bat ·" (bt blank when connected)
+//
+//   STACKED ALIGNMENT: info lines align to the open side:
+//     LAYOUT_STACK_L (digits left): info right-aligned
+//     LAYOUT_STACK_R (digits right): info left-aligned
+//
+//   CONFIG: drag-to-reorder HTML config with "Time" as a
+//     draggable item among 6 data slots.
 // ============================================================
 
 // #define DEBUG_TEXT_BOXES
 
+// ============================================================
+// SLOT TYPES
+// ============================================================
 typedef enum {
-  SLOT_EMPTY   = 0,
-  SLOT_DATE    = 1,
-  SLOT_WEATHER = 2,
-  SLOT_SOLAR   = 3,
-  SLOT_STEPS   = 4,
-  SLOT_PACE    = 5,
-  SLOT_HRCAL   = 6,
-  SLOT_BATTERY = 7
+  SLOT_EMPTY      =  0,
+  SLOT_DAY        =  1,
+  SLOT_DATE       =  2,
+  SLOT_DAY_DATE   =  3,
+  SLOT_TEMP       =  4,
+  SLOT_WEATHER    =  5,
+  SLOT_STEPS      =  6,
+  SLOT_DISTANCE   =  7,
+  SLOT_EXP_STEPS  =  8,
+  SLOT_PACE       =  9,
+  SLOT_CALORIES   = 10,
+  SLOT_HEART      = 11,
+  SLOT_SUNRISE    = 12,
+  SLOT_SUNSET     = 13,
+  SLOT_DAYLIGHT   = 14,
+  SLOT_BATTERY    = 15,
+  SLOT_BLUETOOTH  = 16
 } SlotType;
 
 #define LAYOUT_FULL    0
 #define LAYOUT_INFO    1
 #define LAYOUT_STACK_R 2
 #define LAYOUT_STACK_L 3
+#define SHAKE_LEN      7
 
-#define SHAKE_LEN  7
-
+// ============================================================
+// PLATFORM CONSTANTS
+// ============================================================
 #if defined(PBL_PLATFORM_EMERY)
-  #define SCREEN_W          200
-  #define SCREEN_H          228
-  #define SLOT_W             40
-  #define COLON_SLOT_X       80
-  #define SLOT_H_TENS        12
-  #define SLOT_H_ONES        52
-  #define SLOT_M_TENS       108
-  #define SLOT_M_ONES       148
-  #define SIDE_MARGIN        12
-  #define HALF_UNIT           4
-  #define INFO_LINE_H        28
-  #define INFO_GLYPH_H       18
-  #define INFO_TOP_PAD       10
-  #define INFO_DESCENDER      4
-  #define INFO_CAP_OFFSET     3
-  #define INFO_BOT_ADJUST     2
-  #define INFO_LINE_STEP     26
+  #define SCREEN_W           200
+  #define SCREEN_H           228
+  #define SLOT_W              40
+  #define COLON_SLOT_X        80
+  #define SLOT_H_TENS         12
+  #define SLOT_H_ONES         52
+  #define SLOT_M_TENS        108
+  #define SLOT_M_ONES        148
+  #define SIDE_MARGIN         12
+  #define HALF_UNIT            4
+  #define INFO_LINE_H         28
+  #define INFO_GLYPH_H        18
+  #define INFO_TOP_PAD        10
+  #define INFO_LINE_STEP      26
   #define INFO_LINE_STEP_WIDE 22
   #define INFO_FONT_KEY    FONT_KEY_GOTHIC_24_BOLD
-  #define UNIT                8
+  #define UNIT                 8
+  #define ICON_W              14   // large: GOTHIC_24_BOLD cap height
   static const uint16_t s_radius_opts[] = { UNIT*2, UNIT*3, UNIT*4 };
   #define RADIUS_COUNT 3
   static int s_radius_idx = 0;
 #else
-  #define SCREEN_W          144
-  #define SCREEN_H          168
-  #define SLOT_W             30
-  #define COLON_SLOT_X       57
-  #define SLOT_H_TENS         6
-  #define SLOT_H_ONES        36
-  #define SLOT_M_TENS        78
-  #define SLOT_M_ONES       108
-  #define SIDE_MARGIN         6
-  #define HALF_UNIT           3
-  #define INFO_LINE_H        20
-  #define INFO_GLYPH_H       14
-  #define INFO_TOP_PAD        6
-  #define INFO_DESCENDER      3
-  #define INFO_CAP_OFFSET     2
-  #define INFO_BOT_ADJUST     1
-  #define INFO_LINE_STEP     20
+  #define SCREEN_W           144
+  #define SCREEN_H           168
+  #define SLOT_W              30
+  #define COLON_SLOT_X        57
+  #define SLOT_H_TENS          6
+  #define SLOT_H_ONES         36
+  #define SLOT_M_TENS         78
+  #define SLOT_M_ONES        108
+  #define SIDE_MARGIN          6
+  #define HALF_UNIT            3
+  #define INFO_LINE_H         20
+  #define INFO_GLYPH_H        14
+  #define INFO_TOP_PAD         6
+  #define INFO_LINE_STEP      20
   #define INFO_LINE_STEP_WIDE 17
   #define INFO_FONT_KEY    FONT_KEY_GOTHIC_18_BOLD
-  #define UNIT                6
+  #define UNIT                 6
+  #define ICON_W              11   // small: GOTHIC_18_BOLD cap height
 #endif
+
+#define ICON_LARGE       (ICON_W == 14)
+#define ICON_TEXT_GAP    2
 
 #define MARGIN_CANVAS   UNIT
 #define MARGIN_DIGIT    UNIT
@@ -94,7 +126,7 @@ typedef enum {
 #define GLYPH_W         (UNIT * 4)
 #define H_MIN           (UNIT * 11)
 #define H_ABSOLUTE_MIN  (UNIT * 5)
-#define INFO_LINE_BUF   40
+#define INFO_LINE_BUF   48
 #define INFO_LINES_MAX  8
 #define NUM_SLOTS       6
 
@@ -107,11 +139,10 @@ static const int EASE[10] = { 4, 6, 8, 10, 12, 12, 10, 8, 6, 4 };
 #define ANTICIPATION_PX   HALF_UNIT
 #define ANTICIPATION_MS   16
 #define COUNTDOWN_HOLD_MS 120
-#define BLINK_REPS          2
+#define BLINK_REPS        2
 #define STEPS_AVG_MAX_MIN 120
-#define DOT " \xc2\xb7 "
+#define DOT               " \xc2\xb7 "
 
-// Touch haptic — 50ms pulse, same as pebble-calculator
 #if defined(PBL_TOUCH)
 static const uint32_t TOUCH_VIBE_MS[] = {50};
 static const VibePattern TOUCH_VIBE = { .durations = TOUCH_VIBE_MS, .num_segments = 1 };
@@ -131,12 +162,13 @@ typedef enum {
   PHASE_SHAKE_CYCLE
 } Phase;
 
+// ============================================================
+// STATE
+// ============================================================
 static Window    *s_window;
 static Layer     *s_canvas_layer;
 static int        s_hour = 0, s_minute = 0;
-static int        s_h = 0, s_target_h = 0;
-static int        s_h_min = 0;
-static int        s_ease_idx = 0;
+static int        s_h = 0, s_target_h = 0, s_h_min = 0, s_ease_idx = 0;
 static GColor     s_fg, s_bg;
 static Phase      s_phase = PHASE_DONE;
 static int        s_anim_step = 0, s_anim_rep = 0;
@@ -151,35 +183,33 @@ static bool       s_charging = false, s_bt_connected = true;
 static int        s_steps = 0, s_distance_m = 0, s_calories = 0, s_heart_rate = 0;
 static int        s_steps_expected = -1;
 static int        s_sunrise_min = -1, s_sunset_min = -1;
-static char       s_weather_temp[8] = "";
-static char       s_weather_desc[32] = "";
+static int        s_weather_temp_f = -999, s_weather_temp_c = -999;
+static int        s_weather_code = 0;
 static int        s_layout = LAYOUT_FULL;
 
-static int  s_cfg_time_pos = 3;
-static int  s_cfg_slots[NUM_SLOTS] = {1,2,3,4,5,6};
+// Config: ordered_slots[0..6] = ordered list of (SlotType | TIME_MARKER)
+// TIME_MARKER (17) means "time goes here"
+#define TIME_MARKER 17
+static int  s_cfg_order[NUM_SLOTS + 1] = { 1,2,3,17,4,5,6 }; // default: 3+3, time in middle
 static bool s_cfg_temp_f    = true;
 static bool s_cfg_dist_mi   = true;
 static bool s_cfg_24h       = false;
 
-#define PERSIST_CFG_TIME_POS   1
-#define PERSIST_CFG_SLOTS      2
-#define PERSIST_CFG_FLAGS      3
+#define PERSIST_CFG_ORDER  1
+#define PERSIST_CFG_FLAGS  2
 
 static void prv_save_config(void) {
-  persist_write_int(PERSIST_CFG_TIME_POS, s_cfg_time_pos);
   int32_t packed = 0;
-  for (int i = 0; i < NUM_SLOTS; i++) packed |= (s_cfg_slots[i] & 0x7) << (i * 4);
-  persist_write_int(PERSIST_CFG_SLOTS, packed);
+  for (int i = 0; i < NUM_SLOTS + 1; i++) packed |= (s_cfg_order[i] & 0x1f) << (i * 5);
+  persist_write_int(PERSIST_CFG_ORDER, packed);
   int32_t flags = (s_cfg_temp_f ? 1 : 0) | (s_cfg_dist_mi ? 2 : 0) | (s_cfg_24h ? 4 : 0);
   persist_write_int(PERSIST_CFG_FLAGS, flags);
 }
 
 static void prv_load_config(void) {
-  if (persist_exists(PERSIST_CFG_TIME_POS))
-    s_cfg_time_pos = persist_read_int(PERSIST_CFG_TIME_POS);
-  if (persist_exists(PERSIST_CFG_SLOTS)) {
-    int32_t packed = persist_read_int(PERSIST_CFG_SLOTS);
-    for (int i = 0; i < NUM_SLOTS; i++) s_cfg_slots[i] = (packed >> (i * 4)) & 0x7;
+  if (persist_exists(PERSIST_CFG_ORDER)) {
+    int32_t packed = persist_read_int(PERSIST_CFG_ORDER);
+    for (int i = 0; i < NUM_SLOTS + 1; i++) s_cfg_order[i] = (packed >> (i * 5)) & 0x1f;
   }
   if (persist_exists(PERSIST_CFG_FLAGS)) {
     int32_t flags = persist_read_int(PERSIST_CFG_FLAGS);
@@ -189,8 +219,43 @@ static void prv_load_config(void) {
   }
 }
 
+// Find time position: index of TIME_MARKER in s_cfg_order
+static int prv_time_pos(void) {
+  for (int i = 0; i < NUM_SLOTS + 1; i++)
+    if (s_cfg_order[i] == TIME_MARKER) return i;
+  return 3; // fallback
+}
+
+// Fill above/below arrays from s_cfg_order, splitting at time position
+// Returns count above, count below via pointers.
+// above_slots[] and below_slots[] filled with SlotType values (not TIME_MARKER).
+static void prv_split_slots(int *above_slots, int *n_above,
+                             int *below_slots, int *n_below) {
+  int tp = prv_time_pos();
+  *n_above = 0; *n_below = 0;
+  for (int i = 0; i < NUM_SLOTS + 1; i++) {
+    if (s_cfg_order[i] == TIME_MARKER) continue;
+    if (i < tp) above_slots[(*n_above)++] = s_cfg_order[i];
+    else        below_slots[(*n_below)++] = s_cfg_order[i];
+  }
+}
+
+// Count non-empty, non-time slots above and below time
+static void prv_info_count(int *above, int *below) {
+  int ab[NUM_SLOTS], bb[NUM_SLOTS], na = 0, nb = 0;
+  prv_split_slots(ab, &na, bb, &nb);
+  int a = 0, b = 0;
+  for (int i = 0; i < na; i++) if (ab[i] != SLOT_EMPTY) a++;
+  for (int i = 0; i < nb; i++) if (bb[i] != SLOT_EMPTY) b++;
+  *above = a; *below = b;
+}
+
+// ============================================================
+// NEXT LAYOUT
+// ============================================================
 static int prv_next_layout(int current) {
-  bool has_info = (s_cfg_time_pos > 0 && s_cfg_time_pos < NUM_SLOTS);
+  int a, b; prv_info_count(&a, &b);
+  bool has_info = (a > 0 || b > 0);
   switch (current) {
     case LAYOUT_FULL:    return has_info ? LAYOUT_INFO : LAYOUT_STACK_L;
     case LAYOUT_INFO:    return LAYOUT_STACK_L;
@@ -200,6 +265,9 @@ static int prv_next_layout(int current) {
   }
 }
 
+// ============================================================
+// PACE / COLOR
+// ============================================================
 #if defined(PBL_COLOR)
 static GColor prv_pace_color(int steps_today, int steps_expected) {
   if (steps_expected <= 0 || steps_today <= 0) return GColorBlack;
@@ -219,11 +287,13 @@ static bool prv_bg_needs_dark_fg(GColor bg) {
 }
 #endif
 
+// ============================================================
+// HEALTH
+// ============================================================
 #if defined(PBL_HEALTH)
 static HealthMinuteData s_minute_buf[STEPS_AVG_MAX_MIN];
 static int prv_calc_steps_expected(void) {
-  time_t now = time(NULL);
-  struct tm *t = localtime(&now);
+  time_t now = time(NULL); struct tm *t = localtime(&now);
   int elapsed_min = t->tm_hour * 60 + t->tm_min;
   if (elapsed_min < 2) return -1;
   int window = elapsed_min < STEPS_AVG_MAX_MIN ? elapsed_min : STEPS_AVG_MAX_MIN;
@@ -247,26 +317,222 @@ static void prv_update_health(void) {
   time_t start = time_start_of_today(), now = time(NULL);
   mask = health_service_metric_accessible(HealthMetricStepCount, start, now);
   s_steps = (mask & HealthServiceAccessibilityMaskAvailable)
-            ? (int)health_service_sum_today(HealthMetricStepCount) : 0;
+    ? (int)health_service_sum_today(HealthMetricStepCount) : 0;
   mask = health_service_metric_accessible(HealthMetricWalkedDistanceMeters, start, now);
   s_distance_m = (mask & HealthServiceAccessibilityMaskAvailable)
-                 ? (int)health_service_sum_today(HealthMetricWalkedDistanceMeters) : 0;
+    ? (int)health_service_sum_today(HealthMetricWalkedDistanceMeters) : 0;
   mask = health_service_metric_accessible(HealthMetricActiveKCalories, start, now);
   s_calories = (mask & HealthServiceAccessibilityMaskAvailable)
-               ? (int)health_service_sum_today(HealthMetricActiveKCalories) : 0;
+    ? (int)health_service_sum_today(HealthMetricActiveKCalories) : 0;
   mask = health_service_metric_accessible(HealthMetricHeartRateBPM, start, now);
   s_heart_rate = (mask & HealthServiceAccessibilityMaskAvailable)
-                 ? (int)health_service_peek_current_value(HealthMetricHeartRateBPM) : 0;
+    ? (int)health_service_peek_current_value(HealthMetricHeartRateBPM) : 0;
   s_steps_expected = prv_calc_steps_expected();
 }
 #endif
 
+// ============================================================
+// ICONS  (ported from Radium2, pixel-drawn, two sizes)
+// ox,oy = top-left of icon bounding box; col = fill/stroke color
+// large=true for GOTHIC_24_BOLD (14px), false for GOTHIC_18_BOLD (11px)
+// ============================================================
+static void icon_footprint(GContext *ctx, int fx, int fy, GColor col, bool large) {
+  graphics_context_set_fill_color(ctx, col);
+  if (!large) {
+    graphics_fill_rect(ctx, GRect(fx,   fy,   4, 5), 2, GCornersAll);
+    graphics_fill_rect(ctx, GRect(fx+1, fy+4, 2, 4), 1, GCornersAll);
+  } else {
+    graphics_fill_rect(ctx, GRect(fx,   fy,   5, 7), 2, GCornersAll);
+    graphics_fill_rect(ctx, GRect(fx+1, fy+6, 3, 4), 1, GCornersAll);
+  }
+}
+static void icon_steps(GContext *ctx, int ox, int oy, GColor col, bool large) {
+  if (!large) { icon_footprint(ctx, ox+5, oy-1, col, false); icon_footprint(ctx, ox, oy+2, col, false); }
+  else        { icon_footprint(ctx, ox+7, oy,   col, true);  icon_footprint(ctx, ox, oy+3, col, true); }
+}
+static void icon_battery(GContext *ctx, int ox, int oy, GColor col, int pct, bool large) {
+  graphics_context_set_fill_color(ctx, col);
+  if (s_charging) {
+    if (!large) {
+      graphics_fill_rect(ctx, GRect(ox+5,oy+0,4,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+4,oy+1,4,1),0,GCornerNone);
+      graphics_fill_rect(ctx, GRect(ox+3,oy+2,4,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+2,oy+3,4,1),0,GCornerNone);
+      graphics_fill_rect(ctx, GRect(ox+1,oy+4,7,2),0,GCornerNone);
+      graphics_fill_rect(ctx, GRect(ox+3,oy+6,4,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+2,oy+7,4,1),0,GCornerNone);
+      graphics_fill_rect(ctx, GRect(ox+1,oy+8,4,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+0,oy+9,4,1),0,GCornerNone);
+    } else {
+      graphics_fill_rect(ctx, GRect(ox+7,oy+0,5,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+6,oy+1,5,1),0,GCornerNone);
+      graphics_fill_rect(ctx, GRect(ox+5,oy+2,5,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+4,oy+3,5,1),0,GCornerNone);
+      graphics_fill_rect(ctx, GRect(ox+3,oy+4,5,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+1,oy+5,11,2),0,GCornerNone);
+      graphics_fill_rect(ctx, GRect(ox+5,oy+7,5,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+4,oy+8,5,1),0,GCornerNone);
+      graphics_fill_rect(ctx, GRect(ox+3,oy+9,5,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+2,oy+10,5,1),0,GCornerNone);
+      graphics_fill_rect(ctx, GRect(ox+1,oy+11,5,1),0,GCornerNone);
+    }
+  } else {
+    graphics_context_set_stroke_color(ctx, col); graphics_context_set_stroke_width(ctx, 1);
+    if (!large) {
+      graphics_draw_rect(ctx, GRect(ox,oy+2,9,7));
+      graphics_fill_rect(ctx, GRect(ox+9,oy+4,2,3),0,GCornerNone);
+      int fw = (7*pct)/100; if (fw<1&&pct>0) fw=1;
+      if (fw>0) graphics_fill_rect(ctx, GRect(ox+1,oy+3,fw,5),0,GCornerNone);
+    } else {
+      graphics_draw_rect(ctx, GRect(ox,oy+1,12,10));
+      graphics_fill_rect(ctx, GRect(ox+12,oy+4,2,4),0,GCornerNone);
+      int fw = (10*pct)/100; if (fw<1&&pct>0) fw=1;
+      if (fw>0) graphics_fill_rect(ctx, GRect(ox+1,oy+2,fw,8),0,GCornerNone);
+    }
+  }
+}
+static void icon_bt(GContext *ctx, int ox, int oy, GColor col, bool large) {
+  graphics_context_set_stroke_color(ctx, col); graphics_context_set_stroke_width(ctx, 1);
+  if (!large) {
+    graphics_draw_line(ctx, GPoint(ox+3,oy+0),  GPoint(ox+3,oy+10));
+    graphics_draw_pixel(ctx, GPoint(ox+2,oy+4)); graphics_draw_pixel(ctx, GPoint(ox+1,oy+3));
+    graphics_draw_pixel(ctx, GPoint(ox+2,oy+7)); graphics_draw_pixel(ctx, GPoint(ox+1,oy+8));
+    graphics_draw_pixel(ctx, GPoint(ox+4,oy+1)); graphics_draw_pixel(ctx, GPoint(ox+5,oy+2));
+    graphics_draw_pixel(ctx, GPoint(ox+6,oy+3)); graphics_draw_pixel(ctx, GPoint(ox+5,oy+4));
+    graphics_draw_pixel(ctx, GPoint(ox+4,oy+5)); graphics_draw_pixel(ctx, GPoint(ox+4,oy+6));
+    graphics_draw_pixel(ctx, GPoint(ox+5,oy+7)); graphics_draw_pixel(ctx, GPoint(ox+6,oy+8));
+    graphics_draw_pixel(ctx, GPoint(ox+5,oy+9)); graphics_draw_pixel(ctx, GPoint(ox+4,oy+10));
+    graphics_draw_line(ctx, GPoint(ox+9,oy+1),  GPoint(ox+9,oy+6));
+    graphics_draw_line(ctx, GPoint(ox+10,oy+1), GPoint(ox+10,oy+6));
+    graphics_draw_pixel(ctx, GPoint(ox+9,oy+8)); graphics_draw_pixel(ctx, GPoint(ox+10,oy+8));
+    graphics_draw_pixel(ctx, GPoint(ox+9,oy+9)); graphics_draw_pixel(ctx, GPoint(ox+10,oy+9));
+  } else {
+    graphics_draw_line(ctx, GPoint(ox+4,oy+0),  GPoint(ox+4,oy+13));
+    graphics_draw_pixel(ctx, GPoint(ox+3,oy+4)); graphics_draw_pixel(ctx, GPoint(ox+2,oy+3)); graphics_draw_pixel(ctx, GPoint(ox+1,oy+2));
+    graphics_draw_pixel(ctx, GPoint(ox+3,oy+9)); graphics_draw_pixel(ctx, GPoint(ox+2,oy+10)); graphics_draw_pixel(ctx, GPoint(ox+1,oy+11));
+    graphics_draw_pixel(ctx, GPoint(ox+5,oy+1)); graphics_draw_pixel(ctx, GPoint(ox+6,oy+2)); graphics_draw_pixel(ctx, GPoint(ox+7,oy+3));
+    graphics_draw_pixel(ctx, GPoint(ox+8,oy+4)); graphics_draw_pixel(ctx, GPoint(ox+7,oy+5)); graphics_draw_pixel(ctx, GPoint(ox+6,oy+6)); graphics_draw_pixel(ctx, GPoint(ox+5,oy+7));
+    graphics_draw_pixel(ctx, GPoint(ox+5,oy+8)); graphics_draw_pixel(ctx, GPoint(ox+6,oy+9)); graphics_draw_pixel(ctx, GPoint(ox+7,oy+10));
+    graphics_draw_pixel(ctx, GPoint(ox+8,oy+11)); graphics_draw_pixel(ctx, GPoint(ox+7,oy+12)); graphics_draw_pixel(ctx, GPoint(ox+6,oy+13)); graphics_draw_pixel(ctx, GPoint(ox+5,oy+14));
+    graphics_draw_line(ctx, GPoint(ox+11,oy+1),  GPoint(ox+11,oy+9));
+    graphics_draw_line(ctx, GPoint(ox+12,oy+1),  GPoint(ox+12,oy+9));
+    graphics_draw_line(ctx, GPoint(ox+11,oy+11), GPoint(ox+12,oy+11));
+  }
+}
+static void icon_heart(GContext *ctx, int ox, int oy, GColor col, bool large) {
+  graphics_context_set_fill_color(ctx, col);
+  if (!large) {
+    int y=oy+1;
+    graphics_fill_rect(ctx,GRect(ox+1,y+0,3,2),1,GCornersTop); graphics_fill_rect(ctx,GRect(ox+7,y+0,3,2),1,GCornersTop);
+    graphics_fill_rect(ctx,GRect(ox+0,y+1,4,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+7,y+1,3,1),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+0,y+2,10,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+1,y+3,8,1),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+2,y+4,6,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+3,y+5,4,1),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+4,y+6,2,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+5,y+7,1,1),0,GCornerNone);
+  } else {
+    int y=oy+1;
+    graphics_fill_rect(ctx,GRect(ox+1,y+0,4,2),1,GCornersTop); graphics_fill_rect(ctx,GRect(ox+9,y+0,4,2),1,GCornersTop);
+    graphics_fill_rect(ctx,GRect(ox+0,y+1,5,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+9,y+1,4,1),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+0,y+2,6,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+8,y+2,5,1),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+0,y+3,13,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+1,y+4,11,1),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+2,y+5,9,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+3,y+6,7,1),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+4,y+7,5,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+5,y+8,3,1),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+6,y+9,1,1),0,GCornerNone);
+  }
+}
+static void icon_calories(GContext *ctx, int ox, int oy, GColor col, bool large) {
+  graphics_context_set_fill_color(ctx, col);
+  if (!large) {
+    graphics_fill_rect(ctx,GRect(ox+2,oy+7,7,3),2,GCornersBottom);
+    graphics_fill_rect(ctx,GRect(ox+3,oy+4,5,4),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+4,oy+1,3,4),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+5,oy+0,1,2),0,GCornerNone);
+  } else {
+    graphics_fill_rect(ctx,GRect(ox+2,oy+9,10,5),2,GCornersBottom);
+    graphics_fill_rect(ctx,GRect(ox+3,oy+5,8,5),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+5,oy+2,4,4),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+6,oy+0,2,3),0,GCornerNone);
+  }
+}
+static void icon_sun(GContext *ctx, int ox, int oy, GColor col, bool large) {
+  graphics_context_set_stroke_color(ctx, col); graphics_context_set_stroke_width(ctx, 1);
+  int sz=large?14:11, icx=ox+sz/2, icy=oy+sz/2;
+  graphics_draw_circle(ctx, GPoint(icx,icy), 3);
+  graphics_draw_pixel(ctx,GPoint(icx,oy));     graphics_draw_pixel(ctx,GPoint(icx,oy+1));
+  graphics_draw_pixel(ctx,GPoint(icx,oy+sz-1));graphics_draw_pixel(ctx,GPoint(icx,oy+sz-2));
+  graphics_draw_pixel(ctx,GPoint(ox,icy));     graphics_draw_pixel(ctx,GPoint(ox+1,icy));
+  graphics_draw_pixel(ctx,GPoint(ox+sz-1,icy));graphics_draw_pixel(ctx,GPoint(ox+sz-2,icy));
+}
+static void icon_cloud(GContext *ctx, int ox, int oy, GColor col, bool large) {
+  graphics_context_set_fill_color(ctx, col);
+  if (!large) {
+    graphics_fill_rect(ctx,GRect(ox+2,oy+2,4,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+3,oy+1,3,2),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+6,oy+2,3,2),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+1,oy+3,9,4),0,GCornerNone);
+  } else {
+    graphics_fill_rect(ctx,GRect(ox+3,oy+2,5,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+4,oy+0,4,3),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+8,oy+1,4,3),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+1,oy+3,13,6),0,GCornerNone);
+  }
+}
+static void icon_partly_cloudy(GContext *ctx, int ox, int oy, GColor col, bool large) {
+  graphics_context_set_stroke_color(ctx, col); graphics_context_set_stroke_width(ctx, 1);
+  if (!large) {
+    graphics_draw_circle(ctx, GPoint(ox+7,oy+3), 2);
+    graphics_draw_pixel(ctx,GPoint(ox+7,oy)); graphics_draw_pixel(ctx,GPoint(ox+10,oy+3)); graphics_draw_pixel(ctx,GPoint(ox+7,oy+6));
+    graphics_context_set_fill_color(ctx, col);
+    graphics_fill_rect(ctx,GRect(ox+2,oy+4,3,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+5,oy+4,2,1),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+1,oy+5,7,4),0,GCornerNone);
+  } else {
+    graphics_draw_circle(ctx, GPoint(ox+10,oy+3), 3);
+    graphics_draw_pixel(ctx,GPoint(ox+10,oy)); graphics_draw_pixel(ctx,GPoint(ox+14,oy+3)); graphics_draw_pixel(ctx,GPoint(ox+10,oy+7));
+    graphics_context_set_fill_color(ctx, col);
+    graphics_fill_rect(ctx,GRect(ox+2,oy+5,4,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+6,oy+5,3,1),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+1,oy+6,10,6),0,GCornerNone);
+  }
+}
+static void icon_rain(GContext *ctx, int ox, int oy, GColor col, bool large) {
+  icon_cloud(ctx,ox,oy,col,large);
+  graphics_context_set_stroke_color(ctx,col); graphics_context_set_stroke_width(ctx,1);
+  if (!large) {
+    graphics_draw_pixel(ctx,GPoint(ox+2,oy+8)); graphics_draw_pixel(ctx,GPoint(ox+2,oy+10));
+    graphics_draw_pixel(ctx,GPoint(ox+5,oy+9)); graphics_draw_pixel(ctx,GPoint(ox+5,oy+11));
+    graphics_draw_pixel(ctx,GPoint(ox+8,oy+8)); graphics_draw_pixel(ctx,GPoint(ox+8,oy+10));
+  } else {
+    graphics_draw_pixel(ctx,GPoint(ox+2,oy+9));  graphics_draw_pixel(ctx,GPoint(ox+2,oy+11));
+    graphics_draw_pixel(ctx,GPoint(ox+6,oy+10)); graphics_draw_pixel(ctx,GPoint(ox+6,oy+12));
+    graphics_draw_pixel(ctx,GPoint(ox+10,oy+9)); graphics_draw_pixel(ctx,GPoint(ox+10,oy+11));
+  }
+}
+static void icon_snow(GContext *ctx, int ox, int oy, GColor col, bool large) {
+  graphics_context_set_stroke_color(ctx,col); graphics_context_set_stroke_width(ctx,1);
+  int sz=large?14:11, icx=ox+sz/2, icy=oy+sz/2;
+  graphics_draw_line(ctx,GPoint(ox+1,icy),GPoint(ox+sz-2,icy));
+  graphics_draw_line(ctx,GPoint(icx,oy+1),GPoint(icx,oy+sz-2));
+  graphics_draw_line(ctx,GPoint(ox+2,oy+2),GPoint(ox+sz-3,oy+sz-3));
+  graphics_draw_line(ctx,GPoint(ox+sz-3,oy+2),GPoint(ox+2,oy+sz-3));
+}
+static void icon_storm(GContext *ctx, int ox, int oy, GColor col, bool large) {
+  icon_cloud(ctx,ox,oy,col,large);
+  graphics_context_set_stroke_color(ctx,col); graphics_context_set_stroke_width(ctx,1);
+  if (!large) {
+    graphics_draw_pixel(ctx,GPoint(ox+5,oy+7)); graphics_draw_pixel(ctx,GPoint(ox+5,oy+8));
+    graphics_draw_pixel(ctx,GPoint(ox+4,oy+8)); graphics_draw_pixel(ctx,GPoint(ox+4,oy+9));
+    graphics_draw_pixel(ctx,GPoint(ox+6,oy+9)); graphics_draw_pixel(ctx,GPoint(ox+6,oy+10));
+    graphics_draw_pixel(ctx,GPoint(ox+5,oy+10));graphics_draw_pixel(ctx,GPoint(ox+5,oy+11));
+  } else {
+    graphics_draw_pixel(ctx,GPoint(ox+7,oy+9)); graphics_draw_pixel(ctx,GPoint(ox+7,oy+10));
+    graphics_draw_pixel(ctx,GPoint(ox+6,oy+10));graphics_draw_pixel(ctx,GPoint(ox+6,oy+11));
+    graphics_draw_pixel(ctx,GPoint(ox+8,oy+11));graphics_draw_pixel(ctx,GPoint(ox+8,oy+12));
+    graphics_draw_pixel(ctx,GPoint(ox+7,oy+12));graphics_draw_pixel(ctx,GPoint(ox+7,oy+13));
+  }
+}
+static void icon_weather(GContext *ctx, int ox, int oy, GColor col, int code, bool large) {
+  if      (code == 0)                            icon_sun(ctx,ox,oy,col,large);
+  else if (code <= 3)                            icon_partly_cloudy(ctx,ox,oy,col,large);
+  else if (code <= 48)                           icon_cloud(ctx,ox,oy,col,large);
+  else if ((code>=51&&code<=69)||(code>=80&&code<=82)) icon_rain(ctx,ox,oy,col,large);
+  else if ((code>=71&&code<=77)||(code>=85&&code<=86)) icon_snow(ctx,ox,oy,col,large);
+  else if (code >= 95)                           icon_storm(ctx,ox,oy,col,large);
+  else                                           icon_cloud(ctx,ox,oy,col,large);
+}
+
+// ============================================================
+// DIGIT DRAWING
+// ============================================================
 static void fill_arc(GContext *ctx, int cx, int cy, int ro, int ri, int a0, int a1) {
   GRect b = GRect(cx - ro, cy - ro, ro * 2, ro * 2);
   graphics_fill_radial(ctx, b, GOvalScaleModeFitCircle, (uint16_t)(ro - ri),
                        DEG_TO_TRIGANGLE(a0), DEG_TO_TRIGANGLE(a1));
 }
-
 static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int h) {
   graphics_context_set_fill_color(ctx, s_fg);
   const int ro = UNIT * 2, ri = UNIT, sw = UNIT;
@@ -300,266 +566,261 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int h) 
   #undef HBAR
   #undef NUB
 }
-
 static void draw_colon_vec(GContext *ctx, int slot_x, int cy, int h) {
   graphics_context_set_fill_color(ctx, s_fg);
   int r = UNIT / 2, dx = slot_x + SLOT_W / 2;
-  graphics_fill_radial(ctx, GRect(dx-r, cy-h/4-r+2, r*2, r*2),
-                       GOvalScaleModeFitCircle, (uint16_t)r, 0, DEG_TO_TRIGANGLE(360));
-  graphics_fill_radial(ctx, GRect(dx-r, cy+h/4-r-2, r*2, r*2),
-                       GOvalScaleModeFitCircle, (uint16_t)r, 0, DEG_TO_TRIGANGLE(360));
+  graphics_fill_radial(ctx, GRect(dx-r, cy-h/4-r+2, r*2, r*2), GOvalScaleModeFitCircle, (uint16_t)r, 0, DEG_TO_TRIGANGLE(360));
+  graphics_fill_radial(ctx, GRect(dx-r, cy+h/4-r-2, r*2, r*2), GOvalScaleModeFitCircle, (uint16_t)r, 0, DEG_TO_TRIGANGLE(360));
 }
-
-static void draw_digits_vec(GContext *ctx, int h_tens, int h_ones,
-                             int m_tens, int m_ones, int h, int cy) {
+static void draw_digits_vec(GContext *ctx, int h_tens, int h_ones, int m_tens, int m_ones, int h, int cy) {
   draw_digit_vec(ctx, h_tens, SLOT_H_TENS, cy, h);
   draw_digit_vec(ctx, h_ones, SLOT_H_ONES, cy, h);
   draw_colon_vec(ctx, COLON_SLOT_X, cy, h);
   draw_digit_vec(ctx, m_tens, SLOT_M_TENS, cy, h);
   draw_digit_vec(ctx, m_ones, SLOT_M_ONES, cy, h);
 }
-
-static void draw_stacked_vec(GContext *ctx, int h_tens, int h_ones,
-                              int m_tens, int m_ones, int dh,
-                              int tens_x, int ones_x, int h_cy, int m_cy) {
+static void draw_stacked_vec(GContext *ctx, int h_tens, int h_ones, int m_tens, int m_ones,
+                              int dh, int tens_x, int ones_x, int h_cy, int m_cy) {
   draw_digit_vec(ctx, h_tens, tens_x, h_cy, dh);
   draw_digit_vec(ctx, h_ones, ones_x, h_cy, dh);
   draw_digit_vec(ctx, m_tens, tens_x, m_cy, dh);
   draw_digit_vec(ctx, m_ones, ones_x, m_cy, dh);
 }
 
+// ============================================================
+// INFO LINE RENDERING
+// Icon+text drawing helper: center icon+gap+text unit at cx
+// ============================================================
+static void draw_icon_text(GContext *ctx, void (*icon_fn)(GContext*,int,int,GColor,bool),
+                            int icon_extra, // extra param for battery pct or weather code
+                            bool is_battery, bool is_weather,
+                            int code_or_pct,
+                            const char *text, GFont font,
+                            int y, int width, int cx, GTextAlignment align) {
+  bool large = ICON_LARGE;
+  GSize sz = graphics_text_layout_get_content_size(
+    text, font, GRect(0,0,200,20), GTextOverflowModeFill, GTextAlignmentLeft);
+  int unit_w = ICON_W + ICON_TEXT_GAP + sz.w;
+  int icon_x = (align == GTextAlignmentLeft)  ? 0
+             : (align == GTextAlignmentRight) ? (width - unit_w)
+             : cx - unit_w / 2;
+  int text_x = icon_x + ICON_W + ICON_TEXT_GAP;
+  int iy = y - INFO_TOP_PAD + (INFO_LINE_H - ICON_W) / 2;
+  // draw icon
+  if      (is_battery) icon_battery(ctx, icon_x, iy, s_fg, code_or_pct, large);
+  else if (is_weather) icon_weather(ctx, icon_x, iy, s_fg, code_or_pct, large);
+  else                 icon_fn(ctx, icon_x, iy, s_fg, large);
+  // draw text
+  graphics_context_set_text_color(ctx, s_fg);
+  graphics_draw_text(ctx, text, font,
+    GRect(text_x, y - INFO_TOP_PAD, width - text_x, INFO_LINE_H),
+    GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+}
+
+// Format helpers
+static void prv_fmt_dist(char *buf, int len) {
+  if (s_cfg_dist_mi) { int mx=(s_distance_m*10)/1609; snprintf(buf,len,"%d.%dmi",mx/10,mx%10); }
+  else               { int kx=(s_distance_m*10)/1000; snprintf(buf,len,"%d.%dkm",kx/10,kx%10); }
+}
+static void prv_fmt_steps(char *buf, int len, int steps) {
+  if (steps>=1000) snprintf(buf,len,"%d,%03d",steps/1000,steps%1000);
+  else snprintf(buf,len,"%d",steps);
+}
+static void prv_fmt_time_min(char *buf, int len, int m) {
+  if (m<0) { snprintf(buf,len,"--"); return; }
+  int h=(m/60)%12; if(!h)h=12;
+  snprintf(buf,len,"%d:%02d%s",h,m%60,m<720?"am":"pm");
+}
+static const char *s_day_names[]   = {"Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"};
+static const char *s_day_short[]   = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+static const char *s_month_names[] = {"Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
+
+// Render a single slot to text (stacked = short, wide = long)
+// Returns false if slot is empty
+static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool wide) {
+  switch (slot) {
+    case SLOT_EMPTY:  return false;
+    case SLOT_DAY:
+      snprintf(buf,len, wide ? "%s" : "%s",
+        t ? (wide?s_day_names[t->tm_wday]:s_day_short[t->tm_wday]) : "Mon"); return true;
+    case SLOT_DATE:
+      if (t) snprintf(buf,len,"%s %d",s_month_names[t->tm_mon],t->tm_mday);
+      else snprintf(buf,len,"Jan 1"); return true;
+    case SLOT_DAY_DATE:
+      if (t) snprintf(buf,len,"%s, %s %d",s_day_short[t->tm_wday],s_month_names[t->tm_mon],t->tm_mday);
+      else snprintf(buf,len,"Mon, Jan 1"); return true;
+    case SLOT_TEMP:
+      if (s_weather_temp_f > -900) {
+        if (s_cfg_temp_f) snprintf(buf,len,"%dF",s_weather_temp_f);
+        else snprintf(buf,len,"%dC",s_weather_temp_c);
+      } else snprintf(buf,len,"--"); return true;
+    case SLOT_WEATHER: {
+      const char *desc = (s_weather_code==0)?"clear":(s_weather_code<=3)?"partly cloudy":
+        (s_weather_code<=48)?"foggy":(s_weather_code<=69)?"rainy":
+        (s_weather_code<=79)?"snowy":(s_weather_code<=99)?"stormy":"weather";
+      if (s_weather_temp_f > -900) {
+        int t2 = s_cfg_temp_f ? s_weather_temp_f : s_weather_temp_c;
+        char u = s_cfg_temp_f ? 'F' : 'C';
+        if (wide) snprintf(buf,len,"%d%c & %s",t2,u,desc);
+        else snprintf(buf,len,"%d%c",t2,u);
+      } else snprintf(buf,len,"--"); return true; }
+    case SLOT_STEPS:
+#if defined(PBL_HEALTH)
+      { char sb[16]; prv_fmt_steps(sb,sizeof(sb),s_steps);
+        if (wide&&s_distance_m>0){char db[16];prv_fmt_dist(db,sizeof(db));snprintf(buf,len,"%s steps"DOT"%s",sb,db);}
+        else snprintf(buf,len,"%s steps",sb); }
+#else
+      snprintf(buf,len,wide?"3,450 steps\xc2\xb7 1.7mi":"3,450 steps");
+#endif
+      return true;
+    case SLOT_DISTANCE:
+#if defined(PBL_HEALTH)
+      { char db[16]; prv_fmt_dist(db,sizeof(db)); snprintf(buf,len,"%s",db); }
+#else
+      snprintf(buf,len,"1.7mi");
+#endif
+      return true;
+    case SLOT_EXP_STEPS:
+#if defined(PBL_HEALTH)
+      if (s_steps_expected>0) { char eb[16]; prv_fmt_steps(eb,sizeof(eb),s_steps_expected); snprintf(buf,len,"exp %s",eb); }
+      else snprintf(buf,len,"exp --");
+#else
+      snprintf(buf,len,"exp 3,200");
+#endif
+      return true;
+    case SLOT_PACE:
+#if defined(PBL_HEALTH)
+      if (s_steps_expected>0) {
+        if (wide) { char eb[16]; prv_fmt_steps(eb,sizeof(eb),s_steps_expected);
+          snprintf(buf,len,"exp %s"DOT"%d%%",eb,(s_steps*100)/s_steps_expected); }
+        else snprintf(buf,len,"%d%% pace",(s_steps*100)/s_steps_expected);
+      } else snprintf(buf,len,"-- pace");
+#else
+      snprintf(buf,len,wide?"exp 3,200\xc2\xb7 108%":"108%% pace");
+#endif
+      return true;
+    case SLOT_CALORIES:
+#if defined(PBL_HEALTH)
+      if (s_calories>0) { if(wide&&s_heart_rate>0)snprintf(buf,len,"%d cal"DOT"%d bpm",s_calories,s_heart_rate);
+        else snprintf(buf,len,"%d cal",s_calories); }
+      else snprintf(buf,len,"-- cal");
+#else
+      snprintf(buf,len,wide?"212 cal\xc2\xb7 72 bpm":"212 cal");
+#endif
+      return true;
+    case SLOT_HEART:
+#if defined(PBL_HEALTH)
+      if (s_heart_rate>0) snprintf(buf,len,"%d bpm",s_heart_rate);
+      else snprintf(buf,len,"-- bpm");
+#else
+      snprintf(buf,len,"72 bpm");
+#endif
+      return true;
+    case SLOT_SUNRISE:
+      { char rb[12]; prv_fmt_time_min(rb,sizeof(rb),s_sunrise_min); snprintf(buf,len,"%s",rb); } return true;
+    case SLOT_SUNSET:
+      { char sb2[12]; prv_fmt_time_min(sb2,sizeof(sb2),s_sunset_min); snprintf(buf,len,"%s",sb2); } return true;
+    case SLOT_DAYLIGHT:
+      if (s_sunrise_min>=0&&s_sunset_min>=0) {
+        int mins=s_sunset_min-s_sunrise_min; if(mins<0)mins=0;
+        snprintf(buf,len,"%dh%02dm",mins/60,mins%60);
+      } else snprintf(buf,len,"--h--m"); return true;
+    case SLOT_BATTERY:
+      if (s_charging) snprintf(buf,len,"%d%% +",s_battery_pct);
+      else snprintf(buf,len,"%d%%",s_battery_pct); return true;
+    case SLOT_BLUETOOTH:
+      snprintf(buf,len,"%s",s_bt_connected?"":"no bt"); return true;
+    default: return false;
+  }
+}
+
+// Get icon function for a slot (returns NULL for text-only slots)
+typedef void (*IconFn)(GContext*,int,int,GColor,bool);
+static IconFn prv_slot_icon(SlotType slot, bool *is_battery, bool *is_weather, int *extra) {
+  *is_battery=false; *is_weather=false; *extra=0;
+  switch(slot) {
+    case SLOT_STEPS: case SLOT_DISTANCE: return icon_steps;
+    case SLOT_EXP_STEPS: case SLOT_PACE: return icon_steps;
+    case SLOT_CALORIES: return icon_calories;
+    case SLOT_HEART: return icon_heart;
+    case SLOT_SUNRISE: case SLOT_SUNSET: case SLOT_DAYLIGHT: return icon_sun;
+    case SLOT_BATTERY: *is_battery=true; *extra=s_battery_pct; return NULL;
+    case SLOT_BLUETOOTH: return icon_bt;
+    case SLOT_TEMP: *is_weather=true; *extra=s_weather_code; return NULL;
+    case SLOT_WEATHER: *is_weather=true; *extra=s_weather_code; return NULL;
+    default: return NULL; // text-only: day, date, day+date
+  }
+}
+
+// Build flat array of rendered lines from a slot list.
+// wide=true collapses natural pairs; returns line count.
+typedef struct { char text[INFO_LINE_BUF]; bool has_icon; IconFn icon_fn;
+                 bool is_battery; bool is_weather; int icon_extra; } InfoLine;
+
+static int build_lines(InfoLine *lines, int max, int *slots, int n_slots,
+                       struct tm *t, bool wide) {
+  int count = 0;
+  for (int i = 0; i < n_slots && count < max; i++) {
+    SlotType slot = (SlotType)slots[i];
+    if (slot == SLOT_EMPTY) continue;
+    InfoLine *line = &lines[count];
+    char buf[INFO_LINE_BUF];
+    if (!prv_slot_text(buf, sizeof(buf), slot, t, wide)) continue;
+    snprintf(line->text, INFO_LINE_BUF, "%s", buf);
+    bool ib, iw; int ie;
+    line->icon_fn   = prv_slot_icon(slot, &ib, &iw, &ie);
+    line->is_battery = ib; line->is_weather = iw; line->icon_extra = ie;
+    line->has_icon  = (line->icon_fn != NULL || ib || iw);
+    // Skip bluetooth line if connected and text is empty
+    if (slot == SLOT_BLUETOOTH && s_bt_connected) continue;
+    count++;
+  }
+  return count;
+}
+
+// Draw a single info line at glyph baseline y
+static void draw_info_line(GContext *ctx, InfoLine *line, int y, int width,
+                            int cx, GTextAlignment align) {
+  GFont font = fonts_get_system_font(INFO_FONT_KEY);
+  if (line->has_icon) {
+    draw_icon_text(ctx, line->icon_fn, line->icon_extra,
+                   line->is_battery, line->is_weather, line->icon_extra,
+                   line->text, font, y, width, cx, align);
+  } else {
+    graphics_context_set_text_color(ctx, s_fg);
+    GRect r = GRect(0, y - INFO_TOP_PAD, width, INFO_LINE_H);
+    graphics_draw_text(ctx, line->text, font, r,
+      GTextOverflowModeTrailingEllipsis, align, NULL);
+  }
+}
+
+// ============================================================
+// LAYOUT HELPERS
+// ============================================================
 static int prv_info_block_h(int n, int step) {
-  if (n <= 0) return 0;
-  return INFO_GLYPH_H + (n - 1) * step;
+  return n <= 0 ? 0 : INFO_GLYPH_H + (n-1) * step;
 }
-
-static void prv_info_split(int *above, int *below) {
-  int total = 0;
-  for (int i = 0; i < NUM_SLOTS; i++) if (s_cfg_slots[i] != SLOT_EMPTY) total++;
-  int pos = s_cfg_time_pos; if (pos > total) pos = total;
-  *above = pos; *below = total - pos;
-}
-
 static int prv_compute_target_h(int ub_h, int layout) {
   if (layout != LAYOUT_INFO) return ub_h - MARGIN_OUTER - BOTTOM_MARGIN(ub_h);
-  int above, below; prv_info_split(&above, &below);
-  int reserved = HALF_UNIT + prv_info_block_h(above, INFO_LINE_STEP_WIDE) + HALF_UNIT;
-  reserved    += HALF_UNIT + prv_info_block_h(below, INFO_LINE_STEP_WIDE) + HALF_UNIT;
+  int a, b; prv_info_count(&a, &b);
+  int reserved = HALF_UNIT + prv_info_block_h(a, INFO_LINE_STEP_WIDE) + HALF_UNIT
+               + HALF_UNIT + prv_info_block_h(b, INFO_LINE_STEP_WIDE) + HALF_UNIT;
   int h = ub_h - reserved;
   return h < H_MIN ? H_MIN : h;
 }
-
 static int prv_compute_stacked_h(int ub_h) {
   int h = (ub_h - MARGIN_OUTER - BOTTOM_MARGIN(ub_h) - UNIT) / 2;
   return h < H_ABSOLUTE_MIN ? H_ABSOLUTE_MIN : h;
 }
-
 static void prv_update_targets(void) {
   Layer *root = window_get_root_layer(s_window);
   GRect ub = layer_get_unobstructed_bounds(root);
   s_target_h = prv_compute_target_h(ub.size.h, s_layout);
 }
 
-static const char *s_day_names[] = {
-  "Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"
-};
-static const char *s_month_names[] = {
-  "Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"
-};
-
-static void prv_fmt_distance(char *buf, int len) {
-  if (s_cfg_dist_mi) {
-    int mx = (s_distance_m * 10) / 1609; snprintf(buf, len, "%d.%d mi", mx/10, mx%10);
-  } else {
-    int kx = (s_distance_m * 10) / 1000; snprintf(buf, len, "%d.%d km", kx/10, kx%10);
-  }
-}
-static void prv_fmt_steps_short(char *buf, int len, int steps) {
-  if (steps >= 10000) snprintf(buf, len, "%d,%03d", steps/1000, steps%1000);
-  else if (steps >= 1000) snprintf(buf, len, "%d.%dk", steps/1000, (steps%1000)/100);
-  else snprintf(buf, len, "%d", steps);
-}
-static void prv_fmt_steps_long(char *buf, int len, int steps) {
-  if (steps >= 1000) snprintf(buf, len, "%d,%03d", steps/1000, steps%1000);
-  else snprintf(buf, len, "%d", steps);
-}
-static void prv_fmt_time_min(char *buf, int len, int total_min) {
-  if (total_min < 0) { snprintf(buf, len, "--"); return; }
-  int h = (total_min / 60) % 12; if (!h) h = 12;
-  snprintf(buf, len, "%d:%02d%s", h, total_min % 60, total_min < 720 ? "am" : "pm");
-}
-static void prv_fmt_bat_bt(char *buf, int len) {
-  if (!s_bt_connected) snprintf(buf, len, "no phone");
-  else if (s_charging) snprintf(buf, len, "%d%% bat +", s_battery_pct);
-  else snprintf(buf, len, "%d%% bat", s_battery_pct);
-}
-static void prv_fmt_temp(char *buf, int len) {
-  if (s_weather_temp[0]) snprintf(buf, len, "%s", s_weather_temp);
-  else snprintf(buf, len, "--");
-}
-
-static void prv_render_slot_wide(char *buf, int len, SlotType slot, struct tm *t) {
-  switch (slot) {
-    case SLOT_DATE:
-      if (t) snprintf(buf, len, "%s, %s %d", s_day_names[t->tm_wday], s_month_names[t->tm_mon], t->tm_mday);
-      else   snprintf(buf, len, "Mon, Jan 1");
-      break;
-    case SLOT_WEATHER:
-      if (s_weather_temp[0] && s_weather_desc[0])
-        snprintf(buf, len, "%.7s & %.29s", s_weather_temp, s_weather_desc);
-      else if (s_weather_temp[0]) snprintf(buf, len, "%s", s_weather_temp);
-      else snprintf(buf, len, "72 F & sunny");
-      break;
-    case SLOT_SOLAR:
-      if (s_sunrise_min >= 0 || s_sunset_min >= 0) {
-        char rise[12], set[12];
-        prv_fmt_time_min(rise, sizeof(rise), s_sunrise_min);
-        prv_fmt_time_min(set,  sizeof(set),  s_sunset_min);
-        snprintf(buf, len, "%s" DOT "%s", rise, set);
-      } else snprintf(buf, len, "6:02am" DOT "8:14pm");
-      break;
-    case SLOT_STEPS:
-#if defined(PBL_HEALTH)
-      { char sb[16]; prv_fmt_steps_long(sb, sizeof(sb), s_steps);
-        if (s_distance_m > 0) {
-          char db[16]; prv_fmt_distance(db, sizeof(db));
-          snprintf(buf, len, "%s steps" DOT "%s", sb, db);
-        } else snprintf(buf, len, "%s steps", sb); }
-#else
-      snprintf(buf, len, "3,500 steps" DOT "2.1 mi");
-#endif
-      break;
-    case SLOT_PACE:
-#if defined(PBL_HEALTH)
-      if (s_steps_expected > 0) {
-        char eb[16]; prv_fmt_steps_long(eb, sizeof(eb), s_steps_expected);
-        snprintf(buf, len, "exp %s" DOT "%d%%", eb, (s_steps*100)/s_steps_expected);
-      } else snprintf(buf, len, "exp -- " DOT " --");
-#else
-      snprintf(buf, len, "exp 3,500" DOT "100%%");
-#endif
-      break;
-    case SLOT_HRCAL:
-#if defined(PBL_HEALTH)
-      { bool hr = s_heart_rate > 0, cal = s_calories > 0;
-        if (hr && cal)  snprintf(buf, len, "%d bpm" DOT "%d cal", s_heart_rate, s_calories);
-        else if (hr)    snprintf(buf, len, "%d bpm", s_heart_rate);
-        else if (cal)   snprintf(buf, len, "%d cal", s_calories);
-        else            snprintf(buf, len, "-- bpm" DOT "-- cal"); }
-#else
-      snprintf(buf, len, "72 bpm" DOT "212 cal");
-#endif
-      break;
-    case SLOT_BATTERY: prv_fmt_bat_bt(buf, len); break;
-    default: buf[0] = '\0'; break;
-  }
-}
-
-static void prv_render_slot_stacked(char *buf, int len, SlotType slot, struct tm *t) {
-  switch (slot) {
-    case SLOT_DATE:
-      if (t) snprintf(buf, len, "%s %d", s_month_names[t->tm_mon], t->tm_mday);
-      else   snprintf(buf, len, "Jan 1");
-      break;
-    case SLOT_WEATHER: prv_fmt_temp(buf, len); break;
-    case SLOT_SOLAR:
-      if (s_sunrise_min >= 0 || s_sunset_min >= 0) {
-        char rise[12]; prv_fmt_time_min(rise, sizeof(rise), s_sunrise_min);
-        snprintf(buf, len, "%s rise", rise);
-      } else snprintf(buf, len, "no solar");
-      break;
-    case SLOT_STEPS:
-#if defined(PBL_HEALTH)
-      { char sb[16]; prv_fmt_steps_short(sb, sizeof(sb), s_steps);
-        snprintf(buf, len, "%s steps", sb); }
-#else
-      snprintf(buf, len, "3.5k steps");
-#endif
-      break;
-    case SLOT_PACE:
-#if defined(PBL_HEALTH)
-      if (s_steps_expected > 0) snprintf(buf, len, "%d%% pace", (s_steps*100)/s_steps_expected);
-      else snprintf(buf, len, "-- pace");
-#else
-      snprintf(buf, len, "87%% pace");
-#endif
-      break;
-    case SLOT_HRCAL:
-#if defined(PBL_HEALTH)
-      if (s_heart_rate > 0) snprintf(buf, len, "%d bpm", s_heart_rate);
-      else if (s_calories > 0) snprintf(buf, len, "%d cal", s_calories);
-      else snprintf(buf, len, "-- bpm");
-#else
-      snprintf(buf, len, "72 bpm");
-#endif
-      break;
-    case SLOT_BATTERY: prv_fmt_bat_bt(buf, len); break;
-    default: buf[0] = '\0'; break;
-  }
-}
-
-static int build_info_lines_wide(char lines[][INFO_LINE_BUF], int max_lines, struct tm *t) {
-  int n = 0;
-  for (int i = 0; i < NUM_SLOTS && n < max_lines; i++) {
-    SlotType slot = (SlotType)s_cfg_slots[i];
-    if (slot == SLOT_EMPTY) continue;
-    prv_render_slot_wide(lines[n], INFO_LINE_BUF, slot, t);
-    if (lines[n][0]) n++;
-  }
-  return n;
-}
-
-static int build_info_lines_stacked(char lines[][INFO_LINE_BUF], int max_lines, struct tm *t) {
-  int n = 0;
-  for (int i = 0; i < NUM_SLOTS && n < max_lines; i++) {
-    SlotType slot = (SlotType)s_cfg_slots[i];
-    if (slot == SLOT_EMPTY) continue;
-    prv_render_slot_stacked(lines[n], INFO_LINE_BUF, slot, t);
-    if (lines[n][0]) n++;
-  }
-  return n;
-}
-
-static GFont prv_info_font(void) { return fonts_get_system_font(INFO_FONT_KEY); }
-
-static void draw_text_at_glyph_y(GContext *ctx, const char *text,
-                                  int x, int glyph_y, int width) {
-  GRect r = GRect(x, glyph_y - INFO_TOP_PAD, width, INFO_LINE_H);
-#if defined(DEBUG_TEXT_BOXES)
-  graphics_context_set_fill_color(ctx, GColorMagenta);
-  graphics_fill_rect(ctx, r, 0, GCornerNone);
-#endif
-  graphics_context_set_text_color(ctx, s_fg);
-  graphics_draw_text(ctx, text, prv_info_font(), r,
-                     GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
-}
-
-static void draw_info_column(GContext *ctx, GRect area, struct tm *t) {
-  char lines[INFO_LINES_MAX][INFO_LINE_BUF];
-  int n = build_info_lines_stacked(lines, INFO_LINES_MAX, t);
-  if (!n) return;
-  int glyph_top = area.origin.y + MARGIN_OUTER;
-  int glyph_bot = area.origin.y + area.size.h - MARGIN_OUTER + INFO_GLYPH_H;
-  int slot_h = n > 1 ? (glyph_bot - glyph_top - INFO_GLYPH_H) / (n - 1) : 0;
-  for (int i = 0; i < n; i++)
-    draw_text_at_glyph_y(ctx, lines[i], area.origin.x, glyph_top + i * slot_h, area.size.w);
-}
-
-static void draw_info_block_down(GContext *ctx, char lines[][INFO_LINE_BUF], int n,
-                                  int glyph_y_start, int width, int x) {
-  for (int i = 0; i < n; i++)
-    draw_text_at_glyph_y(ctx, lines[i], x, glyph_y_start + i * INFO_LINE_STEP_WIDE, width);
-}
-
-static void draw_info_block_up(GContext *ctx, char lines[][INFO_LINE_BUF],
-                                int first_idx, int n, int glyph_bot, int width, int x) {
-  if (n <= 0) return;
-  for (int i = 0; i < n; i++) {
-    int glyph_y = glyph_bot - INFO_GLYPH_H - (n - 1 - i) * INFO_LINE_STEP_WIDE;
-    draw_text_at_glyph_y(ctx, lines[first_idx + i], x, glyph_y, width);
-  }
-}
-
+// ============================================================
+// DRAW LAYER
+// ============================================================
 static void draw_layer(Layer *layer, GContext *ctx) {
   Layer *root  = window_get_root_layer(s_window);
   GRect ub     = layer_get_unobstructed_bounds(root);
@@ -585,9 +846,8 @@ static void draw_layer(Layer *layer, GContext *ctx) {
 
   int hr_12 = s_hour;
   if (!s_cfg_24h) { hr_12 = s_hour % 12; if (!hr_12) hr_12 = 12; }
-  int h_tens = hr_12/10, h_ones = hr_12%10, m_tens = s_minute/10, m_ones = s_minute%10;
+  int h_tens=hr_12/10, h_ones=hr_12%10, m_tens=s_minute/10, m_ones=s_minute%10;
   int bot_margin = BOTTOM_MARGIN(ub_h);
-
   time_t now_t = time(NULL);
   struct tm *tm_now = (s_phase == PHASE_DONE) ? localtime(&now_t) : NULL;
 
@@ -596,158 +856,156 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy);
 
   } else if (s_layout == LAYOUT_INFO) {
-    int lines_above, lines_below;
-    prv_info_split(&lines_above, &lines_below);
+    int above_s[NUM_SLOTS], below_s[NUM_SLOTS], na=0, nb=0;
+    prv_split_slots(above_s, &na, below_s, &nb);
+    InfoLine above_lines[INFO_LINES_MAX], below_lines[INFO_LINES_MAX];
+    int an = build_lines(above_lines, INFO_LINES_MAX, above_s, na, tm_now, true);
+    int bn = build_lines(below_lines, INFO_LINES_MAX, below_s, nb, tm_now, true);
 
     int above_start = ub_top + HALF_UNIT;
-    int above_end   = above_start + prv_info_block_h(lines_above, INFO_LINE_STEP_WIDE);
+    int above_end   = above_start + prv_info_block_h(an, INFO_LINE_STEP_WIDE);
     int below_end   = ub_bot - HALF_UNIT;
-    int below_start = below_end - prv_info_block_h(lines_below, INFO_LINE_STEP_WIDE);
+    int below_start = below_end - prv_info_block_h(bn, INFO_LINE_STEP_WIDE);
     int time_cy     = (above_end + HALF_UNIT + below_start - HALF_UNIT) / 2;
+    int line_w      = SCREEN_W - 2 * SIDE_MARGIN;
+    int line_cx     = SCREEN_W / 2;
 
-    char all_lines[INFO_LINES_MAX][INFO_LINE_BUF];
-    int total = build_info_lines_wide(all_lines, INFO_LINES_MAX, tm_now);
-
-    int an = lines_above < total ? lines_above : total;
-    draw_info_block_down(ctx, all_lines, an, above_start, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
-    int bn = total - lines_above; if (bn > lines_below) bn = lines_below;
-    if (bn > 0)
-      draw_info_block_up(ctx, all_lines, lines_above, bn, below_end, SCREEN_W - 2*SIDE_MARGIN, SIDE_MARGIN);
-
+    for (int i = 0; i < an; i++)
+      draw_info_line(ctx, &above_lines[i],
+        above_start + i * INFO_LINE_STEP_WIDE, line_w, line_cx, GTextAlignmentCenter);
+    for (int i = 0; i < bn; i++) {
+      int gy = below_end - prv_info_block_h(bn, INFO_LINE_STEP_WIDE)
+             + i * INFO_LINE_STEP_WIDE;
+      draw_info_line(ctx, &below_lines[i], gy, line_w, line_cx, GTextAlignmentCenter);
+    }
     draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy);
 
   } else {
+    // Stacked layouts
     int dh    = prv_compute_stacked_h(ub_h);
     int h_cy  = ub_top + MARGIN_OUTER + dh / 2;
     int m_cy  = ub_bot - bot_margin - dh / 2;
     int tens_x, ones_x, info_x, info_w;
+    GTextAlignment info_align;
 
     if (s_layout == LAYOUT_STACK_R) {
+      // Digits right → info on left → left-aligned
       ones_x = SCREEN_W - SIDE_MARGIN - SLOT_W; tens_x = ones_x - SLOT_W;
       info_x = SIDE_MARGIN; info_w = tens_x - SIDE_MARGIN * 2;
+      info_align = GTextAlignmentLeft;
     } else {
+      // Digits left → info on right → right-aligned
       tens_x = SIDE_MARGIN; ones_x = SIDE_MARGIN + SLOT_W;
       info_x = ones_x + SLOT_W + SIDE_MARGIN; info_w = SCREEN_W - info_x - SIDE_MARGIN;
+      info_align = GTextAlignmentRight;
     }
 
-    if (tm_now && info_w > 20)
-      draw_info_column(ctx, GRect(info_x, ub_top, info_w, ub_h), tm_now);
+    if (tm_now && info_w > 20) {
+      // Build all non-empty slots for stacked column
+      int all_s[NUM_SLOTS], n_all = 0;
+      for (int i = 0; i < NUM_SLOTS + 1; i++)
+        if (s_cfg_order[i] != TIME_MARKER && s_cfg_order[i] != SLOT_EMPTY)
+          all_s[n_all++] = s_cfg_order[i];
+      InfoLine col_lines[INFO_LINES_MAX];
+      int cn = build_lines(col_lines, INFO_LINES_MAX, all_s, n_all, tm_now, false);
+      if (cn > 0) {
+        int glyph_top = ub_top + MARGIN_OUTER;
+        int glyph_bot = ub_bot - MARGIN_OUTER + INFO_GLYPH_H;
+        int step = cn > 1 ? (glyph_bot - glyph_top - INFO_GLYPH_H) / (cn - 1) : 0;
+        int line_cx = (info_align == GTextAlignmentLeft)
+          ? info_x + info_w / 2 : info_x + info_w / 2;
+        for (int i = 0; i < cn; i++)
+          draw_info_line(ctx, &col_lines[i], glyph_top + i * step,
+            info_w, line_cx, info_align);
+      }
+    }
     draw_stacked_vec(ctx, h_tens, h_ones, m_tens, m_ones, dh, tens_x, ones_x, h_cy, m_cy);
   }
 }
 
+// ============================================================
+// ANIMATION
+// ============================================================
 static void timer_cb(void *data);
-
 static void schedule(uint32_t ms) {
   if (s_timer) app_timer_cancel(s_timer);
   s_timer = app_timer_register(ms, timer_cb, NULL);
 }
-
 static bool prv_ease_expand_step(void) {
   if (s_overshot) { s_h = s_target_h; s_overshot = false; return true; }
-  int step = (s_ease_idx < EASE_LEN) ? EASE[s_ease_idx] : EASE[EASE_LEN - 1];
-  s_ease_idx++;
+  int step = (s_ease_idx < EASE_LEN) ? EASE[s_ease_idx] : EASE[EASE_LEN-1]; s_ease_idx++;
   s_h += step;
   int peak = s_target_h + ANIM_OVERSHOOT;
   if (s_h >= peak) { s_h = peak; s_overshot = true; schedule(ANIM_SNAP_MS); return false; }
   if (s_h >= s_target_h) { s_h = s_target_h; return true; }
-  schedule(ANIM_STEP_MS);
-  return false;
+  schedule(ANIM_STEP_MS); return false;
 }
-
 static bool prv_ease_shrink_step(void) {
-  int step = (s_ease_idx < EASE_LEN) ? EASE[EASE_LEN - 1 - s_ease_idx] : EASE[0];
-  s_ease_idx++;
+  int step = (s_ease_idx < EASE_LEN) ? EASE[EASE_LEN-1-s_ease_idx] : EASE[0]; s_ease_idx++;
   s_h -= step;
   if (s_h <= s_h_min) { s_h = s_h_min; return true; }
   return false;
 }
-
 static void prv_start_anticipate(void) { s_phase = PHASE_ANTICIPATE; schedule(ANTICIPATION_MS); }
-static void prv_start_expand(void) { s_phase = PHASE_EXPAND; s_ease_idx = 0; s_overshot = false; schedule(ANIM_STEP_MS); }
+static void prv_start_expand(void)     { s_phase = PHASE_EXPAND; s_ease_idx = 0; s_overshot = false; schedule(ANIM_STEP_MS); }
 static void prv_start_blink(void) {
   s_h = s_target_h; s_going_down = true; s_anim_rep = 0; s_overshot = false;
   s_phase = PHASE_BLINK; layer_mark_dirty(s_canvas_layer); schedule(ANIM_STEP_MS);
 }
-
 static void timer_cb(void *data) {
   s_timer = NULL;
   switch (s_phase) {
-
     case PHASE_ANTICIPATE:
       s_h += ANTICIPATION_PX; layer_mark_dirty(s_canvas_layer);
-      s_phase = PHASE_SQUISH; s_ease_idx = 0; s_h_min = H_MIN; schedule(ANIM_STEP_MS);
-      break;
-
+      s_phase = PHASE_SQUISH; s_ease_idx = 0; s_h_min = H_MIN; schedule(ANIM_STEP_MS); break;
     case PHASE_COUNTDOWN:
       switch (s_cd_sub) {
         case CD_SHRINK:
           s_h -= 6; layer_mark_dirty(s_canvas_layer);
-          if (s_h <= H_MIN) { s_h = H_MIN; s_cd_sub = CD_HOLD_MIN; schedule(ANIM_SNAP_MS); }
-          else { schedule(ANIM_STEP_MS); }
-          break;
+          if (s_h<=H_MIN) { s_h=H_MIN; s_cd_sub=CD_HOLD_MIN; schedule(ANIM_SNAP_MS); }
+          else { schedule(ANIM_STEP_MS); } break;
         case CD_HOLD_MIN:
-          if (s_countdown_digit == 0) { prv_start_blink(); break; }
+          if (s_countdown_digit==0) { prv_start_blink(); break; }
           s_countdown_digit--; layer_mark_dirty(s_canvas_layer);
-          s_cd_sub = CD_EXPAND; s_ease_idx = 0; s_overshot = false; schedule(ANIM_STEP_MS); break;
-        case CD_EXPAND: {
-          bool done = prv_ease_expand_step(); layer_mark_dirty(s_canvas_layer);
-          if (done) { s_cd_sub = CD_HOLD_MAX; schedule(COUNTDOWN_HOLD_MS); } break; }
-        case CD_HOLD_MAX: s_cd_sub = CD_SHRINK; schedule(ANIM_STEP_MS); break;
-      }
-      break;
-
+          s_cd_sub=CD_EXPAND; s_ease_idx=0; s_overshot=false; schedule(ANIM_STEP_MS); break;
+        case CD_EXPAND: { bool d=prv_ease_expand_step(); layer_mark_dirty(s_canvas_layer);
+          if(d){s_cd_sub=CD_HOLD_MAX;schedule(COUNTDOWN_HOLD_MS);} break; }
+        case CD_HOLD_MAX: s_cd_sub=CD_SHRINK; schedule(ANIM_STEP_MS); break;
+      } break;
     case PHASE_BLINK:
       if (s_going_down) {
         s_h -= 6; layer_mark_dirty(s_canvas_layer);
-        if (s_h <= H_MIN) { s_h = H_MIN; s_going_down = false; s_overshot = false; }
+        if (s_h<=H_MIN) { s_h=H_MIN; s_going_down=false; s_overshot=false; }
         schedule(ANIM_STEP_MS);
       } else {
-        bool done = prv_ease_expand_step(); layer_mark_dirty(s_canvas_layer);
-        if (done) {
-          if (++s_anim_rep < BLINK_REPS) { s_going_down = true; s_overshot = false; s_ease_idx = 0; schedule(ANIM_STEP_MS); }
-          else { s_phase = PHASE_DONE; layer_mark_dirty(s_canvas_layer); }
-        }
-      }
-      break;
-
+        bool d=prv_ease_expand_step(); layer_mark_dirty(s_canvas_layer);
+        if(d) { if(++s_anim_rep<BLINK_REPS){s_going_down=true;s_overshot=false;s_ease_idx=0;schedule(ANIM_STEP_MS);}
+          else{s_phase=PHASE_DONE;layer_mark_dirty(s_canvas_layer);} }
+      } break;
     case PHASE_SQUISH: {
-      bool done = prv_ease_shrink_step(); layer_mark_dirty(s_canvas_layer);
-      if (done) {
-        if (s_digit_pending) { s_hour = s_pending_hour; s_minute = s_pending_minute; s_digit_pending = false; }
-        prv_start_expand();
-      } else { schedule(ANIM_STEP_MS); }
-      break;
-    }
-
+      bool d=prv_ease_shrink_step(); layer_mark_dirty(s_canvas_layer);
+      if(d) { if(s_digit_pending){s_hour=s_pending_hour;s_minute=s_pending_minute;s_digit_pending=false;} prv_start_expand(); }
+      else schedule(ANIM_STEP_MS); break; }
     case PHASE_EXPAND: {
-      bool done = prv_ease_expand_step(); layer_mark_dirty(s_canvas_layer);
-      if (done) { s_phase = PHASE_DONE; layer_mark_dirty(s_canvas_layer); }
-      break;
-    }
-
+      bool d=prv_ease_expand_step(); layer_mark_dirty(s_canvas_layer);
+      if(d){s_phase=PHASE_DONE;layer_mark_dirty(s_canvas_layer);} break; }
     case PHASE_SHAKE_CYCLE: {
-      static const int OFF[SHAKE_LEN] = { 0,-UNIT,-(UNIT*2),-(UNIT*3),-(UNIT*2),-UNIT,0 };
-      if (++s_anim_step < SHAKE_LEN) {
-        int h = s_target_h + OFF[s_anim_step];
-        s_h = h < H_ABSOLUTE_MIN ? H_ABSOLUTE_MIN : h;
+      static const int OFF[SHAKE_LEN]={0,-UNIT,-(UNIT*2),-(UNIT*3),-(UNIT*2),-UNIT,0};
+      if(++s_anim_step<SHAKE_LEN) {
+        int h=s_target_h+OFF[s_anim_step]; s_h=h<H_ABSOLUTE_MIN?H_ABSOLUTE_MIN:h;
         layer_mark_dirty(s_canvas_layer); schedule(ANIM_STEP_MS);
-      } else {
-        s_h = s_target_h; s_phase = PHASE_DONE; layer_mark_dirty(s_canvas_layer);
-      }
-      break;
-    }
-
+      } else { s_h=s_target_h; s_phase=PHASE_DONE; layer_mark_dirty(s_canvas_layer); } break; }
     case PHASE_DONE: break;
   }
 }
 
+// ============================================================
+// EVENT HANDLERS
+// ============================================================
 static void unobstructed_change(AnimationProgress progress, void *ctx) {
   prv_update_targets();
   if (s_phase == PHASE_DONE) { s_h = s_target_h; layer_mark_dirty(s_canvas_layer); }
 }
-
-// Shake: advance layout forward.
 static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   if (s_phase != PHASE_DONE) return;
   s_layout = prv_next_layout(s_layout);
@@ -755,15 +1013,9 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   if (s_layout == LAYOUT_FULL) {
     s_phase = PHASE_SHAKE_CYCLE; s_anim_step = 0;
     s_h = s_target_h; schedule(ANIM_STEP_MS);
-  } else {
-    s_h_min = H_MIN; prv_start_anticipate();
-  }
+  } else { s_h_min = H_MIN; prv_start_anticipate(); }
   layer_mark_dirty(s_canvas_layer);
 }
-
-// Touch: corner-radius sampler with haptic feedback (emery, PBL_TOUCH).
-// 50ms vibe fires on every Touchdown — works as touch diagnostic even
-// when the bg is black and the radius change is invisible.
 #if defined(PBL_TOUCH)
 static void touch_handler(const TouchEvent *event, void *context) {
   if (event->type != TouchEvent_Touchdown) return;
@@ -775,59 +1027,55 @@ static void touch_handler(const TouchEvent *event, void *context) {
 }
 #endif
 
-// Empty click config provider — required to initialize the input
-// system for this window, which in turn enables touch event routing.
-static void prv_click_config_provider(void *context) {}
+// Click config provider: bind no-op handlers to all buttons.
+// A populated click config provider is required for touch routing.
+static void prv_noop_click(ClickRecognizerRef ref, void *ctx) { (void)ref; (void)ctx; }
+static void prv_click_config_provider(void *context) {
+  window_single_click_subscribe(BUTTON_ID_UP,     prv_noop_click);
+  window_single_click_subscribe(BUTTON_ID_SELECT, prv_noop_click);
+  window_single_click_subscribe(BUTTON_ID_DOWN,   prv_noop_click);
+}
 
 static void tick_handler(struct tm *t, TimeUnits units) {
   bool animated = (s_layout == LAYOUT_FULL || s_layout == LAYOUT_INFO);
   if (s_phase == PHASE_DONE && animated) {
-    s_pending_hour = t->tm_hour; s_pending_minute = t->tm_min; s_digit_pending = true;
-    s_h_min = H_MIN; prv_start_anticipate();
+    s_pending_hour=t->tm_hour; s_pending_minute=t->tm_min; s_digit_pending=true;
+    s_h_min=H_MIN; prv_start_anticipate();
   } else if (s_phase == PHASE_SQUISH) {
-    s_pending_hour = t->tm_hour; s_pending_minute = t->tm_min; s_digit_pending = true;
-  } else {
-    s_hour = t->tm_hour; s_minute = t->tm_min; layer_mark_dirty(s_canvas_layer);
-  }
+    s_pending_hour=t->tm_hour; s_pending_minute=t->tm_min; s_digit_pending=true;
+  } else { s_hour=t->tm_hour; s_minute=t->tm_min; layer_mark_dirty(s_canvas_layer); }
 #if defined(PBL_HEALTH)
   prv_update_health();
 #endif
 }
-
 static void battery_handler(BatteryChargeState state) {
-  s_battery_pct = state.charge_percent; s_charging = state.is_charging;
+  s_battery_pct=state.charge_percent; s_charging=state.is_charging;
   layer_mark_dirty(s_canvas_layer);
 }
 static void bt_handler(bool connected) {
-  s_bt_connected = connected; layer_mark_dirty(s_canvas_layer);
+  s_bt_connected=connected; layer_mark_dirty(s_canvas_layer);
 }
 
 static void inbox_received(DictionaryIterator *iter, void *context) {
   Tuple *t;
   t = dict_find(iter, MESSAGE_KEY_WeatherTempF);
-  if (t) snprintf(s_weather_temp, sizeof(s_weather_temp), "%dF", (int)t->value->int32);
+  if (t) s_weather_temp_f = (int)t->value->int32;
   t = dict_find(iter, MESSAGE_KEY_WeatherTempC);
-  if (t && !s_cfg_temp_f && !s_weather_temp[0])
-    snprintf(s_weather_temp, sizeof(s_weather_temp), "%dC", (int)t->value->int32);
+  if (t) s_weather_temp_c = (int)t->value->int32;
   t = dict_find(iter, MESSAGE_KEY_WeatherCode);
-  if (t) {
-    int c = (int)t->value->int32;
-    const char *d = (c==0)?"clear":(c<=3)?"cloudy":(c<=49)?"fog":(c<=69)?"rain":(c<=79)?"snow":(c<=99)?"storm":"weather";
-    snprintf(s_weather_desc, sizeof(s_weather_desc), "%s", d);
-  }
+  if (t) s_weather_code = (int)t->value->int32;
   t = dict_find(iter, MESSAGE_KEY_SunriseTime);
-  if (t) { time_t ts = (time_t)(uint32_t)t->value->uint32; struct tm *lt = localtime(&ts); if (lt) s_sunrise_min = lt->tm_hour * 60 + lt->tm_min; }
+  if (t) { time_t ts=(time_t)(uint32_t)t->value->uint32; struct tm*lt=localtime(&ts); if(lt)s_sunrise_min=lt->tm_hour*60+lt->tm_min; }
   t = dict_find(iter, MESSAGE_KEY_SunsetTime);
-  if (t) { time_t ts = (time_t)(uint32_t)t->value->uint32; struct tm *lt = localtime(&ts); if (lt) s_sunset_min = lt->tm_hour * 60 + lt->tm_min; }
-  t = dict_find(iter, MESSAGE_KEY_CfgTimePos);
-  if (t) s_cfg_time_pos = (int)t->value->int32;
-  for (int i = 0; i < NUM_SLOTS; i++) {
+  if (t) { time_t ts=(time_t)(uint32_t)t->value->uint32; struct tm*lt=localtime(&ts); if(lt)s_sunset_min=lt->tm_hour*60+lt->tm_min; }
+  // Ordered slot config: slots 0-6 encode the full ordered list incl TIME_MARKER
+  for (int i = 0; i < NUM_SLOTS + 1; i++) {
     t = dict_find(iter, MESSAGE_KEY_CfgSlot1 + i);
-    if (t) s_cfg_slots[i] = (int)t->value->int32;
+    if (t) s_cfg_order[i] = (int)t->value->int32;
   }
-  t = dict_find(iter, MESSAGE_KEY_CfgTempUnit);    if (t) s_cfg_temp_f  = (t->value->int32 == 0);
-  t = dict_find(iter, MESSAGE_KEY_CfgDistUnit);    if (t) s_cfg_dist_mi = (t->value->int32 == 0);
-  t = dict_find(iter, MESSAGE_KEY_CfgClockFormat); if (t) s_cfg_24h     = (t->value->int32 == 1);
+  t = dict_find(iter, MESSAGE_KEY_CfgTempUnit);    if(t) s_cfg_temp_f  = (t->value->int32==0);
+  t = dict_find(iter, MESSAGE_KEY_CfgDistUnit);    if(t) s_cfg_dist_mi = (t->value->int32==0);
+  t = dict_find(iter, MESSAGE_KEY_CfgClockFormat); if(t) s_cfg_24h     = (t->value->int32==1);
   prv_save_config(); prv_update_targets(); layer_mark_dirty(s_canvas_layer);
 }
 
@@ -836,25 +1084,18 @@ static void window_load(Window *window) {
   s_canvas_layer = layer_create(layer_get_bounds(root));
   layer_set_update_proc(s_canvas_layer, draw_layer);
   layer_add_child(root, s_canvas_layer);
-
   GRect ub = layer_get_unobstructed_bounds(root);
   s_target_h = prv_compute_target_h(ub.size.h, s_layout);
   s_h = s_target_h;
-
   UnobstructedAreaHandlers ua = { .change = unobstructed_change };
   unobstructed_area_service_subscribe(ua, NULL);
   accel_tap_service_subscribe(accel_tap_handler);
 #if defined(PBL_TOUCH)
-  if (touch_service_is_enabled()) {
-    touch_service_subscribe(touch_handler, NULL);
-  }
+  if (touch_service_is_enabled()) { touch_service_subscribe(touch_handler, NULL); }
 #endif
-
-  s_phase = PHASE_DONE;
-  s_overshot = false; s_ease_idx = 0;
+  s_phase = PHASE_DONE; s_overshot = false; s_ease_idx = 0;
   layer_mark_dirty(s_canvas_layer);
 }
-
 static void window_unload(Window *window) {
   unobstructed_area_service_unsubscribe();
   accel_tap_service_unsubscribe();
@@ -870,14 +1111,12 @@ static void init(void) {
   prv_load_config();
   s_window = window_create();
   window_set_background_color(s_window, GColorBlack);
+  // Bind real (no-op) button handlers — required for touch event routing
   window_set_click_config_provider(s_window, prv_click_config_provider);
-  window_set_window_handlers(s_window, (WindowHandlers){ .load = window_load, .unload = window_unload });
+  window_set_window_handlers(s_window, (WindowHandlers){ .load=window_load, .unload=window_unload });
   window_stack_push(s_window, true);
-
-  time_t now = time(NULL);
-  struct tm *t = localtime(&now);
+  time_t now = time(NULL); struct tm *t = localtime(&now);
   s_hour = t->tm_hour; s_minute = t->tm_min;
-
   tick_timer_service_subscribe(MINUTE_UNIT, tick_handler);
   battery_state_service_subscribe(battery_handler);
   battery_handler(battery_state_service_peek());
@@ -889,12 +1128,10 @@ static void init(void) {
   app_message_register_inbox_received(inbox_received);
   app_message_open(512, 64);
 }
-
 static void deinit(void) {
   tick_timer_service_unsubscribe();
   battery_state_service_unsubscribe();
   bluetooth_connection_service_unsubscribe();
   window_destroy(s_window);
 }
-
 int main(void) { init(); app_event_loop(); deinit(); }
