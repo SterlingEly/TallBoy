@@ -1,20 +1,17 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v3.47a
+// TallBoy — main.c  v3.47b
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.47a: fix -Werror=misleading-indentation on 3 else clauses:
-//   SLOT_DATE, SLOT_DAY_DATE, SLOT_BATTERY in prv_slot_text().
-//   All braced: else { snprintf(...); } return true;
-//   (timer_cb CD_SHRINK was already correctly braced.)
+// v3.47b: fix final -Werror=misleading-indentation:
+//   PHASE_SQUISH in timer_cb:
+//   else schedule(ANIM_STEP_MS); break; }
+//   → else { schedule(ANIM_STEP_MS); } break; }
 // ============================================================
 
 // #define DEBUG_TEXT_BOXES
 
-// ============================================================
-// SLOT TYPES
-// ============================================================
 typedef enum {
   SLOT_EMPTY      =  0,
   SLOT_DAY        =  1,
@@ -41,9 +38,6 @@ typedef enum {
 #define LAYOUT_STACK_L 3
 #define SHAKE_LEN      7
 
-// ============================================================
-// PLATFORM CONSTANTS
-// ============================================================
 #if defined(PBL_PLATFORM_EMERY)
   #define SCREEN_W           200
   #define SCREEN_H           228
@@ -89,7 +83,6 @@ typedef enum {
 
 #define ICON_LARGE       (ICON_W == 14)
 #define ICON_TEXT_GAP    2
-
 #define MARGIN_CANVAS   UNIT
 #define MARGIN_DIGIT    UNIT
 #define MARGIN_OUTER    (MARGIN_CANVAS + MARGIN_DIGIT)
@@ -103,7 +96,6 @@ typedef enum {
 
 static const int EASE[10] = { 4, 6, 8, 10, 12, 12, 10, 8, 6, 4 };
 #define EASE_LEN  10
-
 #define ANIM_STEP_MS      16
 #define ANIM_SNAP_MS      80
 #define ANIM_OVERSHOOT    UNIT
@@ -124,13 +116,8 @@ static const VibePattern TOUCH_VIBE = { .durations = TOUCH_VIBE_MS, .num_segment
 
 typedef enum { CD_SHRINK, CD_HOLD_MIN, CD_EXPAND, CD_HOLD_MAX } CdSubPhase;
 typedef enum {
-  PHASE_COUNTDOWN,
-  PHASE_BLINK,
-  PHASE_DONE,
-  PHASE_ANTICIPATE,
-  PHASE_SQUISH,
-  PHASE_EXPAND,
-  PHASE_SHAKE_CYCLE
+  PHASE_COUNTDOWN, PHASE_BLINK, PHASE_DONE,
+  PHASE_ANTICIPATE, PHASE_SQUISH, PHASE_EXPAND, PHASE_SHAKE_CYCLE
 } Phase;
 
 static Window    *s_window;
@@ -157,9 +144,9 @@ static int        s_layout = LAYOUT_FULL;
 
 #define TIME_MARKER 17
 static int  s_cfg_order[NUM_SLOTS + 1] = { 1,2,3,17,4,5,6 };
-static bool s_cfg_temp_f    = true;
-static bool s_cfg_dist_mi   = true;
-static bool s_cfg_24h       = false;
+static bool s_cfg_temp_f  = true;
+static bool s_cfg_dist_mi = true;
+static bool s_cfg_24h     = false;
 
 #define PERSIST_CFG_ORDER  1
 #define PERSIST_CFG_FLAGS  2
@@ -171,7 +158,6 @@ static void prv_save_config(void) {
   int32_t flags = (s_cfg_temp_f ? 1 : 0) | (s_cfg_dist_mi ? 2 : 0) | (s_cfg_24h ? 4 : 0);
   persist_write_int(PERSIST_CFG_FLAGS, flags);
 }
-
 static void prv_load_config(void) {
   if (persist_exists(PERSIST_CFG_ORDER)) {
     int32_t packed = persist_read_int(PERSIST_CFG_ORDER);
@@ -184,24 +170,19 @@ static void prv_load_config(void) {
     s_cfg_24h     = (flags & 4) != 0;
   }
 }
-
 static int prv_time_pos(void) {
   for (int i = 0; i < NUM_SLOTS + 1; i++)
     if (s_cfg_order[i] == TIME_MARKER) return i;
   return 3;
 }
-
-static void prv_split_slots(int *above_slots, int *n_above,
-                             int *below_slots, int *n_below) {
-  int tp = prv_time_pos();
-  *n_above = 0; *n_below = 0;
+static void prv_split_slots(int *above_slots, int *n_above, int *below_slots, int *n_below) {
+  int tp = prv_time_pos(); *n_above = 0; *n_below = 0;
   for (int i = 0; i < NUM_SLOTS + 1; i++) {
     if (s_cfg_order[i] == TIME_MARKER) continue;
     if (i < tp) above_slots[(*n_above)++] = s_cfg_order[i];
     else        below_slots[(*n_below)++] = s_cfg_order[i];
   }
 }
-
 static void prv_info_count(int *above, int *below) {
   int ab[NUM_SLOTS], bb[NUM_SLOTS], na = 0, nb = 0;
   prv_split_slots(ab, &na, bb, &nb);
@@ -210,7 +191,6 @@ static void prv_info_count(int *above, int *below) {
   for (int i = 0; i < nb; i++) if (bb[i] != SLOT_EMPTY) b++;
   *above = a; *below = b;
 }
-
 static int prv_next_layout(int current) {
   int a, b; prv_info_count(&a, &b);
   bool has_info = (a > 0 || b > 0);
@@ -335,7 +315,7 @@ static void icon_battery(GContext *ctx, int ox, int oy, GColor col, int pct, boo
 static void icon_bt(GContext *ctx, int ox, int oy, GColor col, bool large) {
   graphics_context_set_stroke_color(ctx, col); graphics_context_set_stroke_width(ctx, 1);
   if (!large) {
-    graphics_draw_line(ctx, GPoint(ox+3,oy+0),  GPoint(ox+3,oy+10));
+    graphics_draw_line(ctx, GPoint(ox+3,oy+0), GPoint(ox+3,oy+10));
     graphics_draw_pixel(ctx, GPoint(ox+2,oy+4)); graphics_draw_pixel(ctx, GPoint(ox+1,oy+3));
     graphics_draw_pixel(ctx, GPoint(ox+2,oy+7)); graphics_draw_pixel(ctx, GPoint(ox+1,oy+8));
     graphics_draw_pixel(ctx, GPoint(ox+4,oy+1)); graphics_draw_pixel(ctx, GPoint(ox+5,oy+2));
@@ -398,10 +378,10 @@ static void icon_sun(GContext *ctx, int ox, int oy, GColor col, bool large) {
   graphics_context_set_stroke_color(ctx, col); graphics_context_set_stroke_width(ctx, 1);
   int sz=large?14:11, icx=ox+sz/2, icy=oy+sz/2;
   graphics_draw_circle(ctx, GPoint(icx,icy), 3);
-  graphics_draw_pixel(ctx,GPoint(icx,oy));     graphics_draw_pixel(ctx,GPoint(icx,oy+1));
-  graphics_draw_pixel(ctx,GPoint(icx,oy+sz-1));graphics_draw_pixel(ctx,GPoint(icx,oy+sz-2));
-  graphics_draw_pixel(ctx,GPoint(ox,icy));     graphics_draw_pixel(ctx,GPoint(ox+1,icy));
-  graphics_draw_pixel(ctx,GPoint(ox+sz-1,icy));graphics_draw_pixel(ctx,GPoint(ox+sz-2,icy));
+  graphics_draw_pixel(ctx,GPoint(icx,oy));      graphics_draw_pixel(ctx,GPoint(icx,oy+1));
+  graphics_draw_pixel(ctx,GPoint(icx,oy+sz-1)); graphics_draw_pixel(ctx,GPoint(icx,oy+sz-2));
+  graphics_draw_pixel(ctx,GPoint(ox,icy));       graphics_draw_pixel(ctx,GPoint(ox+1,icy));
+  graphics_draw_pixel(ctx,GPoint(ox+sz-1,icy));  graphics_draw_pixel(ctx,GPoint(ox+sz-2,icy));
 }
 static void icon_cloud(GContext *ctx, int ox, int oy, GColor col, bool large) {
   graphics_context_set_fill_color(ctx, col);
@@ -459,20 +439,20 @@ static void icon_storm(GContext *ctx, int ox, int oy, GColor col, bool large) {
     graphics_draw_pixel(ctx,GPoint(ox+6,oy+9)); graphics_draw_pixel(ctx,GPoint(ox+6,oy+10));
     graphics_draw_pixel(ctx,GPoint(ox+5,oy+10));graphics_draw_pixel(ctx,GPoint(ox+5,oy+11));
   } else {
-    graphics_draw_pixel(ctx,GPoint(ox+7,oy+9)); graphics_draw_pixel(ctx,GPoint(ox+7,oy+10));
-    graphics_draw_pixel(ctx,GPoint(ox+6,oy+10));graphics_draw_pixel(ctx,GPoint(ox+6,oy+11));
-    graphics_draw_pixel(ctx,GPoint(ox+8,oy+11));graphics_draw_pixel(ctx,GPoint(ox+8,oy+12));
-    graphics_draw_pixel(ctx,GPoint(ox+7,oy+12));graphics_draw_pixel(ctx,GPoint(ox+7,oy+13));
+    graphics_draw_pixel(ctx,GPoint(ox+7,oy+9));  graphics_draw_pixel(ctx,GPoint(ox+7,oy+10));
+    graphics_draw_pixel(ctx,GPoint(ox+6,oy+10)); graphics_draw_pixel(ctx,GPoint(ox+6,oy+11));
+    graphics_draw_pixel(ctx,GPoint(ox+8,oy+11)); graphics_draw_pixel(ctx,GPoint(ox+8,oy+12));
+    graphics_draw_pixel(ctx,GPoint(ox+7,oy+12)); graphics_draw_pixel(ctx,GPoint(ox+7,oy+13));
   }
 }
 static void icon_weather(GContext *ctx, int ox, int oy, GColor col, int code, bool large) {
-  if      (code == 0)                            icon_sun(ctx,ox,oy,col,large);
-  else if (code <= 3)                            icon_partly_cloudy(ctx,ox,oy,col,large);
-  else if (code <= 48)                           icon_cloud(ctx,ox,oy,col,large);
+  if      (code == 0)                                  icon_sun(ctx,ox,oy,col,large);
+  else if (code <= 3)                                  icon_partly_cloudy(ctx,ox,oy,col,large);
+  else if (code <= 48)                                 icon_cloud(ctx,ox,oy,col,large);
   else if ((code>=51&&code<=69)||(code>=80&&code<=82)) icon_rain(ctx,ox,oy,col,large);
   else if ((code>=71&&code<=77)||(code>=85&&code<=86)) icon_snow(ctx,ox,oy,col,large);
-  else if (code >= 95)                           icon_storm(ctx,ox,oy,col,large);
-  else                                           icon_cloud(ctx,ox,oy,col,large);
+  else if (code >= 95)                                 icon_storm(ctx,ox,oy,col,large);
+  else                                                 icon_cloud(ctx,ox,oy,col,large);
 }
 
 // ============================================================
@@ -523,32 +503,25 @@ static void draw_colon_vec(GContext *ctx, int slot_x, int cy, int h) {
   graphics_fill_radial(ctx, GRect(dx-r, cy+h/4-r-2, r*2, r*2), GOvalScaleModeFitCircle, (uint16_t)r, 0, DEG_TO_TRIGANGLE(360));
 }
 static void draw_digits_vec(GContext *ctx, int h_tens, int h_ones, int m_tens, int m_ones, int h, int cy) {
-  draw_digit_vec(ctx, h_tens, SLOT_H_TENS, cy, h);
-  draw_digit_vec(ctx, h_ones, SLOT_H_ONES, cy, h);
+  draw_digit_vec(ctx, h_tens, SLOT_H_TENS, cy, h); draw_digit_vec(ctx, h_ones, SLOT_H_ONES, cy, h);
   draw_colon_vec(ctx, COLON_SLOT_X, cy, h);
-  draw_digit_vec(ctx, m_tens, SLOT_M_TENS, cy, h);
-  draw_digit_vec(ctx, m_ones, SLOT_M_ONES, cy, h);
+  draw_digit_vec(ctx, m_tens, SLOT_M_TENS, cy, h); draw_digit_vec(ctx, m_ones, SLOT_M_ONES, cy, h);
 }
 static void draw_stacked_vec(GContext *ctx, int h_tens, int h_ones, int m_tens, int m_ones,
                               int dh, int tens_x, int ones_x, int h_cy, int m_cy) {
-  draw_digit_vec(ctx, h_tens, tens_x, h_cy, dh);
-  draw_digit_vec(ctx, h_ones, ones_x, h_cy, dh);
-  draw_digit_vec(ctx, m_tens, tens_x, m_cy, dh);
-  draw_digit_vec(ctx, m_ones, ones_x, m_cy, dh);
+  draw_digit_vec(ctx, h_tens, tens_x, h_cy, dh); draw_digit_vec(ctx, h_ones, ones_x, h_cy, dh);
+  draw_digit_vec(ctx, m_tens, tens_x, m_cy, dh); draw_digit_vec(ctx, m_ones, ones_x, m_cy, dh);
 }
 
 // ============================================================
 // INFO LINE RENDERING
 // ============================================================
 static void draw_icon_text(GContext *ctx, void (*icon_fn)(GContext*,int,int,GColor,bool),
-                            int icon_extra,
-                            bool is_battery, bool is_weather,
-                            int code_or_pct,
+                            int icon_extra, bool is_battery, bool is_weather, int code_or_pct,
                             const char *text, GFont font,
                             int y, int width, int cx, GTextAlignment align) {
   bool large = ICON_LARGE;
-  GSize sz = graphics_text_layout_get_content_size(
-    text, font, GRect(0,0,200,20), GTextOverflowModeFill, GTextAlignmentLeft);
+  GSize sz = graphics_text_layout_get_content_size(text, font, GRect(0,0,200,20), GTextOverflowModeFill, GTextAlignmentLeft);
   int unit_w = ICON_W + ICON_TEXT_GAP + sz.w;
   int icon_x = (align == GTextAlignmentLeft)  ? 0
              : (align == GTextAlignmentRight) ? (width - unit_w)
@@ -559,8 +532,7 @@ static void draw_icon_text(GContext *ctx, void (*icon_fn)(GContext*,int,int,GCol
   else if (is_weather) icon_weather(ctx, icon_x, iy, s_fg, code_or_pct, large);
   else                 icon_fn(ctx, icon_x, iy, s_fg, large);
   graphics_context_set_text_color(ctx, s_fg);
-  graphics_draw_text(ctx, text, font,
-    GRect(text_x, y - INFO_TOP_PAD, width - text_x, INFO_LINE_H),
+  graphics_draw_text(ctx, text, font, GRect(text_x, y - INFO_TOP_PAD, width - text_x, INFO_LINE_H),
     GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 }
 
@@ -583,21 +555,24 @@ static const char *s_month_names[] = {"Jan","Feb","Mar","Apr","May","Jun","Jul",
 
 static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool wide) {
   switch (slot) {
-    case SLOT_EMPTY:  return false;
+    case SLOT_EMPTY: return false;
     case SLOT_DAY:
-      snprintf(buf,len, wide ? "%s" : "%s",
-        t ? (wide?s_day_names[t->tm_wday]:s_day_short[t->tm_wday]) : "Mon"); return true;
+      snprintf(buf,len,"%s", t ? (wide?s_day_names[t->tm_wday]:s_day_short[t->tm_wday]) : "Mon");
+      return true;
     case SLOT_DATE:
       if (t) { snprintf(buf,len,"%s %d",s_month_names[t->tm_mon],t->tm_mday); }
-      else { snprintf(buf,len,"Jan 1"); } return true;
+      else   { snprintf(buf,len,"Jan 1"); }
+      return true;
     case SLOT_DAY_DATE:
       if (t) { snprintf(buf,len,"%s, %s %d",s_day_short[t->tm_wday],s_month_names[t->tm_mon],t->tm_mday); }
-      else { snprintf(buf,len,"Mon, Jan 1"); } return true;
+      else   { snprintf(buf,len,"Mon, Jan 1"); }
+      return true;
     case SLOT_TEMP:
       if (s_weather_temp_f > -900) {
         if (s_cfg_temp_f) snprintf(buf,len,"%dF",s_weather_temp_f);
         else snprintf(buf,len,"%dC",s_weather_temp_c);
-      } else snprintf(buf,len,"--"); return true;
+      } else snprintf(buf,len,"--");
+      return true;
     case SLOT_WEATHER: {
       const char *desc = (s_weather_code==0)?"clear":(s_weather_code<=3)?"partly cloudy":
         (s_weather_code<=48)?"foggy":(s_weather_code<=69)?"rainy":
@@ -607,7 +582,8 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
         char u = s_cfg_temp_f ? 'F' : 'C';
         if (wide) snprintf(buf,len,"%d%c & %s",t2,u,desc);
         else snprintf(buf,len,"%d%c",t2,u);
-      } else snprintf(buf,len,"--"); return true; }
+      } else snprintf(buf,len,"--");
+      return true; }
     case SLOT_STEPS:
 #if defined(PBL_HEALTH)
       { char sb[16]; prv_fmt_steps(sb,sizeof(sb),s_steps);
@@ -645,9 +621,10 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       return true;
     case SLOT_CALORIES:
 #if defined(PBL_HEALTH)
-      if (s_calories>0) { if(wide&&s_heart_rate>0)snprintf(buf,len,"%d cal"DOT"%d bpm",s_calories,s_heart_rate);
-        else snprintf(buf,len,"%d cal",s_calories); }
-      else snprintf(buf,len,"-- cal");
+      if (s_calories>0) {
+        if(wide&&s_heart_rate>0) snprintf(buf,len,"%d cal"DOT"%d bpm",s_calories,s_heart_rate);
+        else snprintf(buf,len,"%d cal",s_calories);
+      } else snprintf(buf,len,"-- cal");
 #else
       snprintf(buf,len,wide?"212 cal\xc2\xb7 72 bpm":"212 cal");
 #endif
@@ -661,19 +638,24 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
 #endif
       return true;
     case SLOT_SUNRISE:
-      { char rb[12]; prv_fmt_time_min(rb,sizeof(rb),s_sunrise_min); snprintf(buf,len,"%s",rb); } return true;
+      { char rb[12]; prv_fmt_time_min(rb,sizeof(rb),s_sunrise_min); snprintf(buf,len,"%s",rb); }
+      return true;
     case SLOT_SUNSET:
-      { char sb2[12]; prv_fmt_time_min(sb2,sizeof(sb2),s_sunset_min); snprintf(buf,len,"%s",sb2); } return true;
+      { char sb2[12]; prv_fmt_time_min(sb2,sizeof(sb2),s_sunset_min); snprintf(buf,len,"%s",sb2); }
+      return true;
     case SLOT_DAYLIGHT:
       if (s_sunrise_min>=0&&s_sunset_min>=0) {
         int mins=s_sunset_min-s_sunrise_min; if(mins<0)mins=0;
         snprintf(buf,len,"%dh%02dm",mins/60,mins%60);
-      } else snprintf(buf,len,"--h--m"); return true;
+      } else snprintf(buf,len,"--h--m");
+      return true;
     case SLOT_BATTERY:
       if (s_charging) { snprintf(buf,len,"%d%% +",s_battery_pct); }
-      else { snprintf(buf,len,"%d%%",s_battery_pct); } return true;
+      else            { snprintf(buf,len,"%d%%",s_battery_pct); }
+      return true;
     case SLOT_BLUETOOTH:
-      snprintf(buf,len,"%s",s_bt_connected?"":"no bt"); return true;
+      snprintf(buf,len,"%s",s_bt_connected?"":"no bt");
+      return true;
     default: return false;
   }
 }
@@ -682,28 +664,29 @@ typedef void (*IconFn)(GContext*,int,int,GColor,bool);
 static IconFn prv_slot_icon(SlotType slot, bool *is_battery, bool *is_weather, int *extra) {
   *is_battery=false; *is_weather=false; *extra=0;
   switch(slot) {
-    case SLOT_STEPS: case SLOT_DISTANCE: return icon_steps;
-    case SLOT_EXP_STEPS: case SLOT_PACE: return icon_steps;
+    case SLOT_STEPS: case SLOT_DISTANCE: case SLOT_EXP_STEPS: case SLOT_PACE: return icon_steps;
     case SLOT_CALORIES: return icon_calories;
     case SLOT_HEART: return icon_heart;
     case SLOT_SUNRISE: case SLOT_SUNSET: case SLOT_DAYLIGHT: return icon_sun;
     case SLOT_BATTERY: *is_battery=true; *extra=s_battery_pct; return NULL;
     case SLOT_BLUETOOTH: return icon_bt;
-    case SLOT_TEMP: *is_weather=true; *extra=s_weather_code; return NULL;
-    case SLOT_WEATHER: *is_weather=true; *extra=s_weather_code; return NULL;
+    case SLOT_TEMP: case SLOT_WEATHER: *is_weather=true; *extra=s_weather_code; return NULL;
     default: return NULL;
   }
 }
 
-typedef struct { char text[INFO_LINE_BUF]; bool has_icon; IconFn icon_fn;
-                 bool is_battery; bool is_weather; int icon_extra; } InfoLine;
+typedef struct {
+  char text[INFO_LINE_BUF];
+  bool has_icon; IconFn icon_fn;
+  bool is_battery; bool is_weather; int icon_extra;
+} InfoLine;
 
-static int build_lines(InfoLine *lines, int max, int *slots, int n_slots,
-                       struct tm *t, bool wide) {
+static int build_lines(InfoLine *lines, int max, int *slots, int n_slots, struct tm *t, bool wide) {
   int count = 0;
   for (int i = 0; i < n_slots && count < max; i++) {
     SlotType slot = (SlotType)slots[i];
     if (slot == SLOT_EMPTY) continue;
+    if (slot == SLOT_BLUETOOTH && s_bt_connected) continue;
     InfoLine *line = &lines[count];
     char buf[INFO_LINE_BUF];
     if (!prv_slot_text(buf, sizeof(buf), slot, t, wide)) continue;
@@ -712,14 +695,12 @@ static int build_lines(InfoLine *lines, int max, int *slots, int n_slots,
     line->icon_fn    = prv_slot_icon(slot, &ib, &iw, &ie);
     line->is_battery = ib; line->is_weather = iw; line->icon_extra = ie;
     line->has_icon   = (line->icon_fn != NULL || ib || iw);
-    if (slot == SLOT_BLUETOOTH && s_bt_connected) continue;
     count++;
   }
   return count;
 }
 
-static void draw_info_line(GContext *ctx, InfoLine *line, int y, int width,
-                            int cx, GTextAlignment align) {
+static void draw_info_line(GContext *ctx, InfoLine *line, int y, int width, int cx, GTextAlignment align) {
   GFont font = fonts_get_system_font(INFO_FONT_KEY);
   if (line->has_icon) {
     draw_icon_text(ctx, line->icon_fn, line->icon_extra,
@@ -727,15 +708,12 @@ static void draw_info_line(GContext *ctx, InfoLine *line, int y, int width,
                    line->text, font, y, width, cx, align);
   } else {
     graphics_context_set_text_color(ctx, s_fg);
-    GRect r = GRect(0, y - INFO_TOP_PAD, width, INFO_LINE_H);
-    graphics_draw_text(ctx, line->text, font, r,
+    graphics_draw_text(ctx, line->text, font, GRect(0, y - INFO_TOP_PAD, width, INFO_LINE_H),
       GTextOverflowModeTrailingEllipsis, align, NULL);
   }
 }
 
-static int prv_info_block_h(int n, int step) {
-  return n <= 0 ? 0 : INFO_GLYPH_H + (n-1) * step;
-}
+static int prv_info_block_h(int n, int step) { return n <= 0 ? 0 : INFO_GLYPH_H + (n-1) * step; }
 static int prv_compute_target_h(int ub_h, int layout) {
   if (layout != LAYOUT_INFO) return ub_h - MARGIN_OUTER - BOTTOM_MARGIN(ub_h);
   int a, b; prv_info_count(&a, &b);
@@ -754,6 +732,9 @@ static void prv_update_targets(void) {
   s_target_h = prv_compute_target_h(ub.size.h, s_layout);
 }
 
+// ============================================================
+// DRAW LAYER
+// ============================================================
 static void draw_layer(Layer *layer, GContext *ctx) {
   Layer *root  = window_get_root_layer(s_window);
   GRect ub     = layer_get_unobstructed_bounds(root);
@@ -803,8 +784,7 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int line_cx     = SCREEN_W / 2;
 
     for (int i = 0; i < an; i++)
-      draw_info_line(ctx, &above_lines[i],
-        above_start + i * INFO_LINE_STEP_WIDE, line_w, line_cx, GTextAlignmentCenter);
+      draw_info_line(ctx, &above_lines[i], above_start + i * INFO_LINE_STEP_WIDE, line_w, line_cx, GTextAlignmentCenter);
     for (int i = 0; i < bn; i++) {
       int gy = below_end - prv_info_block_h(bn, INFO_LINE_STEP_WIDE) + i * INFO_LINE_STEP_WIDE;
       draw_info_line(ctx, &below_lines[i], gy, line_w, line_cx, GTextAlignmentCenter);
@@ -841,14 +821,16 @@ static void draw_layer(Layer *layer, GContext *ctx) {
         int step = cn > 1 ? (glyph_bot - glyph_top - INFO_GLYPH_H) / (cn - 1) : 0;
         int line_cx = info_x + info_w / 2;
         for (int i = 0; i < cn; i++)
-          draw_info_line(ctx, &col_lines[i], glyph_top + i * step,
-            info_w, line_cx, info_align);
+          draw_info_line(ctx, &col_lines[i], glyph_top + i * step, info_w, line_cx, info_align);
       }
     }
     draw_stacked_vec(ctx, h_tens, h_ones, m_tens, m_ones, dh, tens_x, ones_x, h_cy, m_cy);
   }
 }
 
+// ============================================================
+// ANIMATION
+// ============================================================
 static void timer_cb(void *data);
 static void schedule(uint32_t ms) {
   if (s_timer) app_timer_cancel(s_timer);
@@ -908,7 +890,7 @@ static void timer_cb(void *data) {
     case PHASE_SQUISH: {
       bool d=prv_ease_shrink_step(); layer_mark_dirty(s_canvas_layer);
       if(d) { if(s_digit_pending){s_hour=s_pending_hour;s_minute=s_pending_minute;s_digit_pending=false;} prv_start_expand(); }
-      else schedule(ANIM_STEP_MS); break; }
+      else { schedule(ANIM_STEP_MS); } break; }
     case PHASE_EXPAND: {
       bool d=prv_ease_expand_step(); layer_mark_dirty(s_canvas_layer);
       if(d){s_phase=PHASE_DONE;layer_mark_dirty(s_canvas_layer);} break; }
@@ -922,6 +904,9 @@ static void timer_cb(void *data) {
   }
 }
 
+// ============================================================
+// EVENT HANDLERS
+// ============================================================
 static void unobstructed_change(AnimationProgress progress, void *ctx) {
   prv_update_targets();
   if (s_phase == PHASE_DONE) { s_h = s_target_h; layer_mark_dirty(s_canvas_layer); }
@@ -946,14 +931,12 @@ static void touch_handler(const TouchEvent *event, void *context) {
 #endif
 }
 #endif
-
 static void prv_noop_click(ClickRecognizerRef ref, void *ctx) { (void)ref; (void)ctx; }
 static void prv_click_config_provider(void *context) {
   window_single_click_subscribe(BUTTON_ID_UP,     prv_noop_click);
   window_single_click_subscribe(BUTTON_ID_SELECT, prv_noop_click);
   window_single_click_subscribe(BUTTON_ID_DOWN,   prv_noop_click);
 }
-
 static void tick_handler(struct tm *t, TimeUnits units) {
   bool animated = (s_layout == LAYOUT_FULL || s_layout == LAYOUT_INFO);
   if (s_phase == PHASE_DONE && animated) {
@@ -967,43 +950,36 @@ static void tick_handler(struct tm *t, TimeUnits units) {
 #endif
 }
 static void battery_handler(BatteryChargeState state) {
-  s_battery_pct=state.charge_percent; s_charging=state.is_charging;
-  layer_mark_dirty(s_canvas_layer);
+  s_battery_pct=state.charge_percent; s_charging=state.is_charging; layer_mark_dirty(s_canvas_layer);
 }
 static void bt_handler(bool connected) {
   s_bt_connected=connected; layer_mark_dirty(s_canvas_layer);
 }
-
 static void inbox_received(DictionaryIterator *iter, void *context) {
   Tuple *t;
-  t = dict_find(iter, MESSAGE_KEY_WeatherTempF);
-  if (t) s_weather_temp_f = (int)t->value->int32;
-  t = dict_find(iter, MESSAGE_KEY_WeatherTempC);
-  if (t) s_weather_temp_c = (int)t->value->int32;
-  t = dict_find(iter, MESSAGE_KEY_WeatherCode);
-  if (t) s_weather_code = (int)t->value->int32;
+  t = dict_find(iter, MESSAGE_KEY_WeatherTempF); if(t) s_weather_temp_f=(int)t->value->int32;
+  t = dict_find(iter, MESSAGE_KEY_WeatherTempC); if(t) s_weather_temp_c=(int)t->value->int32;
+  t = dict_find(iter, MESSAGE_KEY_WeatherCode);  if(t) s_weather_code=(int)t->value->int32;
   t = dict_find(iter, MESSAGE_KEY_SunriseTime);
-  if (t) { time_t ts=(time_t)(uint32_t)t->value->uint32; struct tm*lt=localtime(&ts); if(lt)s_sunrise_min=lt->tm_hour*60+lt->tm_min; }
+  if(t){time_t ts=(time_t)(uint32_t)t->value->uint32;struct tm*lt=localtime(&ts);if(lt)s_sunrise_min=lt->tm_hour*60+lt->tm_min;}
   t = dict_find(iter, MESSAGE_KEY_SunsetTime);
-  if (t) { time_t ts=(time_t)(uint32_t)t->value->uint32; struct tm*lt=localtime(&ts); if(lt)s_sunset_min=lt->tm_hour*60+lt->tm_min; }
+  if(t){time_t ts=(time_t)(uint32_t)t->value->uint32;struct tm*lt=localtime(&ts);if(lt)s_sunset_min=lt->tm_hour*60+lt->tm_min;}
   for (int i = 0; i < NUM_SLOTS + 1; i++) {
     t = dict_find(iter, MESSAGE_KEY_CfgSlot1 + i);
     if (t) s_cfg_order[i] = (int)t->value->int32;
   }
-  t = dict_find(iter, MESSAGE_KEY_CfgTempUnit);    if(t) s_cfg_temp_f  = (t->value->int32==0);
-  t = dict_find(iter, MESSAGE_KEY_CfgDistUnit);    if(t) s_cfg_dist_mi = (t->value->int32==0);
-  t = dict_find(iter, MESSAGE_KEY_CfgClockFormat); if(t) s_cfg_24h     = (t->value->int32==1);
+  t = dict_find(iter, MESSAGE_KEY_CfgTempUnit);    if(t) s_cfg_temp_f  =(t->value->int32==0);
+  t = dict_find(iter, MESSAGE_KEY_CfgDistUnit);    if(t) s_cfg_dist_mi =(t->value->int32==0);
+  t = dict_find(iter, MESSAGE_KEY_CfgClockFormat); if(t) s_cfg_24h     =(t->value->int32==1);
   prv_save_config(); prv_update_targets(); layer_mark_dirty(s_canvas_layer);
 }
-
 static void window_load(Window *window) {
   Layer *root = window_get_root_layer(window);
   s_canvas_layer = layer_create(layer_get_bounds(root));
   layer_set_update_proc(s_canvas_layer, draw_layer);
   layer_add_child(root, s_canvas_layer);
   GRect ub = layer_get_unobstructed_bounds(root);
-  s_target_h = prv_compute_target_h(ub.size.h, s_layout);
-  s_h = s_target_h;
+  s_target_h = prv_compute_target_h(ub.size.h, s_layout); s_h = s_target_h;
   UnobstructedAreaHandlers ua = { .change = unobstructed_change };
   unobstructed_area_service_subscribe(ua, NULL);
   accel_tap_service_subscribe(accel_tap_handler);
@@ -1022,7 +998,6 @@ static void window_unload(Window *window) {
   if (s_timer) { app_timer_cancel(s_timer); s_timer = NULL; }
   layer_destroy(s_canvas_layer);
 }
-
 static void init(void) {
   s_fg = GColorWhite; s_bg = GColorBlack;
   prv_load_config();
