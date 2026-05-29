@@ -1,0 +1,38 @@
+// draw_info_line: draws a single info line within the column defined by
+// (col_x, col_w). Text is aligned within that column.
+// col_x = screen-space x of column left edge
+// col_w = column width in pixels
+// align = GTextAlignmentLeft/Right/Center within the column
+static void draw_info_line(GContext *ctx, InfoLine *line, int y,
+                            int col_x, int col_w, GTextAlignment align) {
+  GFont font = fonts_get_system_font(INFO_FONT_KEY);
+  int iy = y - INFO_TOP_PAD + (INFO_LINE_H - ICON_W) / 2;
+
+  if (line->has_icon) {
+    bool large = ICON_LARGE;
+    GSize sz = graphics_text_layout_get_content_size(
+      line->text, font, GRect(0,0,200,20), GTextOverflowModeFill, GTextAlignmentLeft);
+    int unit_w = ICON_W + ICON_TEXT_GAP + sz.w;
+    // icon_off = offset of icon within column
+    int icon_off = (align == GTextAlignmentLeft)  ? 0
+                 : (align == GTextAlignmentRight) ? (col_w - unit_w)
+                 : (col_w - unit_w) / 2;
+    int icon_sx = col_x + icon_off;
+    int text_sx = icon_sx + ICON_W + ICON_TEXT_GAP;
+    int text_w  = col_x + col_w - text_sx;
+    if      (line->is_battery) icon_battery(ctx, icon_sx, iy, s_fg, line->icon_extra, large);
+    else if (line->is_weather) icon_weather(ctx, icon_sx, iy, s_fg, line->icon_extra, large);
+    else                       line->icon_fn(ctx, icon_sx, iy, s_fg, large);
+    graphics_context_set_text_color(ctx, s_fg);
+    if (text_w > 0) {
+      graphics_draw_text(ctx, line->text, font,
+        GRect(text_sx, y - INFO_TOP_PAD, text_w, INFO_LINE_H),
+        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    }
+  } else {
+    graphics_context_set_text_color(ctx, s_fg);
+    graphics_draw_text(ctx, line->text, font,
+      GRect(col_x, y - INFO_TOP_PAD, col_w, INFO_LINE_H),
+      GTextOverflowModeTrailingEllipsis, align, NULL);
+  }
+}
