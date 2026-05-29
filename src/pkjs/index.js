@@ -1,5 +1,5 @@
 // ============================================================
-// TallBoy — src/pkjs/index.js  v3.47e
+// TallBoy — src/pkjs/index.js  v3.47d
 // PebbleKit JS: weather, solar, config page (up/down reorder)
 //
 // SLOT TYPE IDs (must match main.c SlotType enum):
@@ -18,9 +18,12 @@
 //
 // NOTE: Drag-to-reorder does NOT work in Pebble's embedded webview
 // (drag events are swallowed). Using up/down buttons instead.
+//
+// NOTE: moveRow() must call setSelectValue() to force visual update —
+// just setting .value is unreliable in Pebble's embedded webview.
 // ============================================================
 
-var STORAGE_KEY = 'tallboy_settings_v347e';
+var STORAGE_KEY = 'tallboy_settings_v347d';
 var TIME_MARKER = 17;
 
 var SLOT_NAMES = {
@@ -41,7 +44,7 @@ var SLOT_NAMES = {
   14: 'Daylight',
   15: 'Battery',
   16: 'Bluetooth',
-  17: '🕐 Time'
+  17: '\u{1F550} Time'
 };
 
 var DEFAULT_ORDER = [3, 5, 12, TIME_MARKER, 6, 9, 15];
@@ -118,6 +121,10 @@ function fetchWeather() {
 // CONFIG PAGE
 // Up/down arrow buttons for reordering (drag doesn't work in
 // Pebble's embedded webview — drag events are swallowed).
+//
+// moveRow() uses setSelectValue() which explicitly iterates
+// <option> children and sets .selected — this is more reliable
+// than just setting .value in Pebble's webview.
 // ============================================================
 function buildConfigPage(s) {
   var order = s.order.slice();
@@ -126,7 +133,7 @@ function buildConfigPage(s) {
     var out = '';
     for (var id in SLOT_NAMES) {
       var sel = (parseInt(id) === current) ? ' selected' : '';
-      out += '<option value="' + id + '"' + sel + '>' + SLOT_NAMES[id] + '</option>';
+      out += '<option value="' + id + '"' + sel + '>' + SLOT_NAMES[id] + '<\/option>';
     }
     return out;
   }
@@ -135,11 +142,11 @@ function buildConfigPage(s) {
   for (var i = 0; i < 7; i++) {
     rows += '<div class="row" id="row' + i + '">';
     rows += '<div class="arrows">';
-    rows += '<button class="arr" onclick="moveRow(' + i + ',-1)">▲</button>';
-    rows += '<button class="arr" onclick="moveRow(' + i + ',1)">▼</button>';
-    rows += '</div>';
-    rows += '<select id="sel' + i + '">' + slotOptions(order[i]) + '</select>';
-    rows += '</div>';
+    rows += '<button class="arr" onclick="moveRow(' + i + ',-1)">&#9650;<\/button>';
+    rows += '<button class="arr" onclick="moveRow(' + i + ',1)">&#9660;<\/button>';
+    rows += '<\/div>';
+    rows += '<select id="sel' + i + '">' + slotOptions(order[i]) + '<\/select>';
+    rows += '<\/div>';
   }
 
   var html = '<!DOCTYPE html><html><head>'
@@ -163,39 +170,45 @@ function buildConfigPage(s) {
     + '.pair{display:flex;gap:10px}.pair>div{flex:1}'
     + '#save{width:100%;padding:14px;background:#4a9;border:none;color:#fff;font-size:16px;font-weight:bold;border-radius:8px;cursor:pointer;margin-top:8px}'
     + '#save:active{background:#3a8}'
-    + '</style></head><body>'
-    + '<h2>TallBoy</h2><p class="sub">▲▼ to reorder slots and 🕐 Time</p>'
-    + '<div class="section"><h3>Slot Order</h3>'
-    + '<div id="list">' + rows + '</div></div>'
-    + '<div class="section"><h3>Units</h3>'
+    + '<\/style><\/head><body>'
+    + '<h2>TallBoy<\/h2><p class="sub">&#9650;&#9660; to reorder  \u2022  &#x1F550; = time position<\/p>'
+    + '<div class="section"><h3>Slot Order<\/h3>'
+    + '<div id="list">' + rows + '<\/div><\/div>'
+    + '<div class="section"><h3>Units<\/h3>'
     + '<div class="pair">'
-    + '<div><label style="color:#aaa;font-size:12px;display:block;margin-bottom:4px">Temp</label>'
+    + '<div><label style="color:#aaa;font-size:12px;display:block;margin-bottom:4px">Temp<\/label>'
     + '<div class="toggle">'
-    + '<input type="radio" name="tu" id="tu0" value="0"' + (s.CfgTempUnit === 0 ? ' checked' : '') + '><label for="tu0">°F</label>'
-    + '<input type="radio" name="tu" id="tu1" value="1"' + (s.CfgTempUnit === 1 ? ' checked' : '') + '><label for="tu1">°C</label>'
-    + '</div></div>'
-    + '<div><label style="color:#aaa;font-size:12px;display:block;margin-bottom:4px">Distance</label>'
+    + '<input type="radio" name="tu" id="tu0" value="0"' + (s.CfgTempUnit === 0 ? ' checked' : '') + '><label for="tu0">\u00b0F<\/label>'
+    + '<input type="radio" name="tu" id="tu1" value="1"' + (s.CfgTempUnit === 1 ? ' checked' : '') + '><label for="tu1">\u00b0C<\/label>'
+    + '<\/div><\/div>'
+    + '<div><label style="color:#aaa;font-size:12px;display:block;margin-bottom:4px">Distance<\/label>'
     + '<div class="toggle">'
-    + '<input type="radio" name="du" id="du0" value="0"' + (s.CfgDistUnit === 0 ? ' checked' : '') + '><label for="du0">mi</label>'
-    + '<input type="radio" name="du" id="du1" value="1"' + (s.CfgDistUnit === 1 ? ' checked' : '') + '><label for="du1">km</label>'
-    + '</div></div></div></div>'
-    + '<div class="section"><h3>Clock</h3>'
+    + '<input type="radio" name="du" id="du0" value="0"' + (s.CfgDistUnit === 0 ? ' checked' : '') + '><label for="du0">mi<\/label>'
+    + '<input type="radio" name="du" id="du1" value="1"' + (s.CfgDistUnit === 1 ? ' checked' : '') + '><label for="du1">km<\/label>'
+    + '<\/div><\/div><\/div><\/div>'
+    + '<div class="section"><h3>Clock<\/h3>'
     + '<div class="toggle">'
-    + '<input type="radio" name="cf" id="cf0" value="0"' + (s.CfgClockFormat === 0 ? ' checked' : '') + '><label for="cf0">12h</label>'
-    + '<input type="radio" name="cf" id="cf1" value="1"' + (s.CfgClockFormat === 1 ? ' checked' : '') + '><label for="cf1">24h</label>'
-    + '</div></div>'
-    + '<button id="save" onclick="doSave()">Save</button>'
+    + '<input type="radio" name="cf" id="cf0" value="0"' + (s.CfgClockFormat === 0 ? ' checked' : '') + '><label for="cf0">12h<\/label>'
+    + '<input type="radio" name="cf" id="cf1" value="1"' + (s.CfgClockFormat === 1 ? ' checked' : '') + '><label for="cf1">24h<\/label>'
+    + '<\/div><\/div>'
+    + '<button id="save" onclick="doSave()">Save<\/button>'
     + '<script>'
+    // setSelectValue: explicitly iterate options and set .selected
+    // More reliable than .value= in Pebble's embedded webview
+    + 'function setSelectValue(sel, val) {'
+    + '  val = String(val);'
+    + '  for (var i = 0; i < sel.options.length; i++) {'
+    + '    sel.options[i].selected = (sel.options[i].value === val);'
+    + '  }'
+    + '}'
     + 'function moveRow(idx, dir) {'
-    + '  var list = document.getElementById("list");'
-    + '  var rows = list.children;'
     + '  var newIdx = idx + dir;'
-    + '  if (newIdx < 0 || newIdx >= rows.length) return;'
-    + '  var sel1 = document.getElementById("sel" + idx);'
-    + '  var sel2 = document.getElementById("sel" + newIdx);'
-    + '  var tmp = sel1.value;'
-    + '  sel1.value = sel2.value;'
-    + '  sel2.value = tmp;'
+    + '  if (newIdx < 0 || newIdx >= 7) return;'
+    + '  var s1 = document.getElementById("sel" + idx);'
+    + '  var s2 = document.getElementById("sel" + newIdx);'
+    + '  var tmp = s1.value;'
+    + '  setSelectValue(s1, s2.value);'
+    + '  setSelectValue(s2, tmp);'
     + '}'
     + 'function doSave() {'
     + '  var order = [];'
@@ -213,7 +226,7 @@ function buildConfigPage(s) {
     + '  };'
     + '  location.href = "pebblejs://close#" + encodeURIComponent(JSON.stringify(s));'
     + '}'
-    + '<\/script></body></html>';
+    + '<\/script><\/body><\/html>';
 
   return html;
 }
