@@ -1,13 +1,15 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v3.47d
+// TallBoy — main.c  v3.47e
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.47d: "not responding" crash fix.
-//   InfoLine arrays (3 × 8 × ~56 bytes = ~1.3KB) were stack-
-//   allocated inside draw_layer(), overflowing Pebble's ~2KB
-//   watchface stack. Moved to static globals in BSS instead.
+// v3.47e changes:
+//   STACKED ALIGN FIX: draw_info_line now takes col_x so text
+//     renders in the correct screen column, not always at x=0.
+//     LAYOUT_STACK_R: info column left-aligned on left side.
+//     LAYOUT_STACK_L: info column right-aligned on right side.
+//   TOUCH: try unconditional subscribe (no is_enabled guard).
 // ============================================================
 
 typedef enum {
@@ -118,9 +120,6 @@ typedef enum {
   PHASE_ANTICIPATE, PHASE_SQUISH, PHASE_EXPAND, PHASE_SHAKE_CYCLE
 } Phase;
 
-// ============================================================
-// INFOLINE TYPE (declared before state so static arrays compile)
-// ============================================================
 typedef void (*IconFn)(GContext*,int,int,GColor,bool);
 typedef struct {
   char text[INFO_LINE_BUF];
@@ -158,8 +157,7 @@ static int        s_weather_temp_f = -999, s_weather_temp_c = -999;
 static int        s_weather_code = 0;
 static int        s_layout = LAYOUT_FULL;
 
-// InfoLine arrays in BSS (NOT on the stack) — each ~56 bytes × 8 = 448 bytes;
-// three arrays = ~1.3 KB. Watchface stack is only ~2 KB, so stack allocation crashes.
+// InfoLine arrays MUST be static globals — local = ~1.3KB stack = crash
 static InfoLine s_above_lines[INFO_LINES_MAX];
 static InfoLine s_below_lines[INFO_LINES_MAX];
 static InfoLine s_col_lines[INFO_LINES_MAX];
@@ -537,25 +535,42 @@ static void draw_stacked_vec(GContext *ctx, int h_tens, int h_ones, int m_tens, 
 
 // ============================================================
 // INFO LINE RENDERING
+// col_x = screen-space left edge of info column
+// col_w = width of info column in pixels
+// align = text alignment WITHIN the column
 // ============================================================
-static void draw_icon_text(GContext *ctx, IconFn icon_fn,
-                            int icon_extra, bool is_battery, bool is_weather, int code_or_pct,
-                            const char *text, GFont font,
-                            int y, int width, int cx, GTextAlignment align) {
-  bool large = ICON_LARGE;
-  GSize sz = graphics_text_layout_get_content_size(text, font, GRect(0,0,200,20), GTextOverflowModeFill, GTextAlignmentLeft);
-  int unit_w = ICON_W + ICON_TEXT_GAP + sz.w;
-  int icon_x = (align == GTextAlignmentLeft)  ? 0
-             : (align == GTextAlignmentRight) ? (width - unit_w)
-             : cx - unit_w / 2;
-  int text_x = icon_x + ICON_W + ICON_TEXT_GAP;
+static void draw_info_line(GContext *ctx, InfoLine *line, int y,
+                            int col_x, int col_w, GTextAlignment align) {
+  GFont font = fonts_get_system_font(INFO_FONT_KEY);
   int iy = y - INFO_TOP_PAD + (INFO_LINE_H - ICON_W) / 2;
-  if      (is_battery) icon_battery(ctx, icon_x, iy, s_fg, code_or_pct, large);
-  else if (is_weather) icon_weather(ctx, icon_x, iy, s_fg, code_or_pct, large);
-  else                 icon_fn(ctx, icon_x, iy, s_fg, large);
-  graphics_context_set_text_color(ctx, s_fg);
-  graphics_draw_text(ctx, text, font, GRect(text_x, y - INFO_TOP_PAD, width - text_x, INFO_LINE_H),
-    GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+
+  if (line->has_icon) {
+    bool large = ICON_LARGE;
+    GSize sz = graphics_text_layout_get_content_size(
+      line->text, font, GRect(0,0,200,20), GTextOverflowModeFill, GTextAlignmentLeft);
+    int unit_w = ICON_W + ICON_TEXT_GAP + sz.w;
+    // offset of [icon+text] unit within the column
+    int icon_off = (align == GTextAlignmentLeft)  ? 0
+                 : (align == GTextAlignmentRight) ? (col_w - unit_w)
+                 : (col_w - unit_w) / 2;
+    int icon_sx = col_x + icon_off;
+    int text_sx = icon_sx + ICON_W + ICON_TEXT_GAP;
+    int text_w  = col_x + col_w - text_sx;
+    if      (line->is_battery) icon_battery(ctx, icon_sx, iy, s_fg, line->icon_extra, large);
+    else if (line->is_weather) icon_weather(ctx, icon_sx, iy, s_fg, line->icon_extra, large);
+    else                       line->icon_fn(ctx, icon_sx, iy, s_fg, large);
+    graphics_context_set_text_color(ctx, s_fg);
+    if (text_w > 0) {
+      graphics_draw_text(ctx, line->text, font,
+        GRect(text_sx, y - INFO_TOP_PAD, text_w, INFO_LINE_H),
+        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    }
+  } else {
+    graphics_context_set_text_color(ctx, s_fg);
+    graphics_draw_text(ctx, line->text, font,
+      GRect(col_x, y - INFO_TOP_PAD, col_w, INFO_LINE_H),
+      GTextOverflowModeTrailingEllipsis, align, NULL);
+  }
 }
 
 #if defined(PBL_HEALTH)
@@ -717,19 +732,6 @@ static int build_lines(InfoLine *lines, int max, int *slots, int n_slots, struct
   return count;
 }
 
-static void draw_info_line(GContext *ctx, InfoLine *line, int y, int width, int cx, GTextAlignment align) {
-  GFont font = fonts_get_system_font(INFO_FONT_KEY);
-  if (line->has_icon) {
-    draw_icon_text(ctx, line->icon_fn, line->icon_extra,
-                   line->is_battery, line->is_weather, line->icon_extra,
-                   line->text, font, y, width, cx, align);
-  } else {
-    graphics_context_set_text_color(ctx, s_fg);
-    graphics_draw_text(ctx, line->text, font, GRect(0, y - INFO_TOP_PAD, width, INFO_LINE_H),
-      GTextOverflowModeTrailingEllipsis, align, NULL);
-  }
-}
-
 static int prv_info_block_h(int n, int step) { return n <= 0 ? 0 : INFO_GLYPH_H + (n-1) * step; }
 static int prv_compute_target_h(int ub_h, int layout) {
   if (layout != LAYOUT_INFO) return ub_h - MARGIN_OUTER - BOTTOM_MARGIN(ub_h);
@@ -787,9 +789,9 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy);
 
   } else if (s_layout == LAYOUT_INFO) {
+    // Wide mode: info centered above and below time
     int above_s[NUM_SLOTS], below_s[NUM_SLOTS], na=0, nb=0;
     prv_split_slots(above_s, &na, below_s, &nb);
-    // s_above_lines / s_below_lines are static globals — no stack allocation
     int an = build_lines(s_above_lines, INFO_LINES_MAX, above_s, na, tm_now, true);
     int bn = build_lines(s_below_lines, INFO_LINES_MAX, below_s, nb, tm_now, true);
 
@@ -797,48 +799,56 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int above_end   = above_start + prv_info_block_h(an, INFO_LINE_STEP_WIDE);
     int below_end   = ub_bot - HALF_UNIT;
     int time_cy     = (above_end + HALF_UNIT + (below_end - prv_info_block_h(bn, INFO_LINE_STEP_WIDE)) - HALF_UNIT) / 2;
-    int line_w      = SCREEN_W - 2 * SIDE_MARGIN;
-    int line_cx     = SCREEN_W / 2;
+    // Wide mode column spans full width with side margins, centered text
+    int col_x = SIDE_MARGIN;
+    int col_w = SCREEN_W - 2 * SIDE_MARGIN;
 
     for (int i = 0; i < an; i++)
-      draw_info_line(ctx, &s_above_lines[i], above_start + i * INFO_LINE_STEP_WIDE, line_w, line_cx, GTextAlignmentCenter);
+      draw_info_line(ctx, &s_above_lines[i],
+        above_start + i * INFO_LINE_STEP_WIDE, col_x, col_w, GTextAlignmentCenter);
     for (int i = 0; i < bn; i++) {
       int gy = below_end - prv_info_block_h(bn, INFO_LINE_STEP_WIDE) + i * INFO_LINE_STEP_WIDE;
-      draw_info_line(ctx, &s_below_lines[i], gy, line_w, line_cx, GTextAlignmentCenter);
+      draw_info_line(ctx, &s_below_lines[i], gy, col_x, col_w, GTextAlignmentCenter);
     }
     draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy);
 
   } else {
+    // Stacked layouts: two digit pairs + info column
     int dh    = prv_compute_stacked_h(ub_h);
     int h_cy  = ub_top + MARGIN_OUTER + dh / 2;
     int m_cy  = ub_bot - bot_margin - dh / 2;
-    int tens_x, ones_x, info_x, info_w;
+    int tens_x, ones_x, col_x, col_w;
     GTextAlignment info_align;
 
     if (s_layout == LAYOUT_STACK_R) {
-      ones_x = SCREEN_W - SIDE_MARGIN - SLOT_W; tens_x = ones_x - SLOT_W;
-      info_x = SIDE_MARGIN; info_w = tens_x - SIDE_MARGIN * 2;
+      // Digits on right side, info column on left, left-aligned text
+      ones_x = SCREEN_W - SIDE_MARGIN - SLOT_W;
+      tens_x = ones_x - SLOT_W;
+      col_x  = SIDE_MARGIN;
+      col_w  = tens_x - SIDE_MARGIN - UNIT;  // 1 UNIT gap before digits
       info_align = GTextAlignmentLeft;
     } else {
-      tens_x = SIDE_MARGIN; ones_x = SIDE_MARGIN + SLOT_W;
-      info_x = ones_x + SLOT_W + SIDE_MARGIN; info_w = SCREEN_W - info_x - SIDE_MARGIN;
+      // Digits on left side, info column on right, right-aligned text
+      tens_x = SIDE_MARGIN;
+      ones_x = SIDE_MARGIN + SLOT_W;
+      col_x  = ones_x + SLOT_W + UNIT;       // 1 UNIT gap after digits
+      col_w  = SCREEN_W - col_x - SIDE_MARGIN;
       info_align = GTextAlignmentRight;
     }
 
-    if (tm_now && info_w > 20) {
+    if (tm_now && col_w > 20) {
       int all_s[NUM_SLOTS], n_all = 0;
       for (int i = 0; i < NUM_SLOTS + 1; i++)
         if (s_cfg_order[i] != TIME_MARKER && s_cfg_order[i] != SLOT_EMPTY)
           all_s[n_all++] = s_cfg_order[i];
-      // s_col_lines is a static global — no stack allocation
       int cn = build_lines(s_col_lines, INFO_LINES_MAX, all_s, n_all, tm_now, false);
       if (cn > 0) {
         int glyph_top = ub_top + MARGIN_OUTER;
         int glyph_bot = ub_bot - MARGIN_OUTER + INFO_GLYPH_H;
         int step = cn > 1 ? (glyph_bot - glyph_top - INFO_GLYPH_H) / (cn - 1) : 0;
-        int line_cx = info_x + info_w / 2;
         for (int i = 0; i < cn; i++)
-          draw_info_line(ctx, &s_col_lines[i], glyph_top + i * step, info_w, line_cx, info_align);
+          draw_info_line(ctx, &s_col_lines[i],
+            glyph_top + i * step, col_x, col_w, info_align);
       }
     }
     draw_stacked_vec(ctx, h_tens, h_ones, m_tens, m_ones, dh, tens_x, ones_x, h_cy, m_cy);
@@ -1001,7 +1011,8 @@ static void window_load(Window *window) {
     unobstructed_area_service_subscribe(ua, NULL); }
   accel_tap_service_subscribe(accel_tap_handler);
 #if defined(PBL_TOUCH)
-  if (touch_service_is_enabled()) { touch_service_subscribe(touch_handler, NULL); }
+  // Subscribe unconditionally — is_enabled guard may return false even when touch is on
+  touch_service_subscribe(touch_handler, NULL);
 #endif
   s_phase = PHASE_DONE; s_overshot = false; s_ease_idx = 0;
   layer_mark_dirty(s_canvas_layer);
