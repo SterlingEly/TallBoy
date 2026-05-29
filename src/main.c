@@ -1,15 +1,20 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v3.47e
+// TallBoy — main.c  v3.48
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.47e changes:
-//   STACKED ALIGN FIX: draw_info_line now takes col_x so text
-//     renders in the correct screen column, not always at x=0.
-//     LAYOUT_STACK_R: info column left-aligned on left side.
-//     LAYOUT_STACK_L: info column right-aligned on right side.
-//   TOUCH: try unconditional subscribe (no is_enabled guard).
+// v3.48 changes:
+//   STACKED INFO: fixed icon overflow on right-side info column
+//     (icon_off clamped to 0 minimum); fixed line spacing to
+//     use fixed step from 2*UNIT top/bottom margin regardless
+//     of line count; corrected alignment: STACK_R (info left) =
+//     GTextAlignmentLeft, STACK_L (info right) = GTextAlignmentRight.
+//   DIGIT SHADOW: draw digits twice — offset shadow pass first
+//     (black for white fg, white for black fg), then normal.
+//     Shadow offset: HALF_UNIT right + HALF_UNIT down.
+//   TOUCH: pass layer bounds GRect to touch_service_subscribe
+//     as the touch target area (may be required by the API).
 // ============================================================
 
 typedef enum {
@@ -93,6 +98,18 @@ typedef enum {
 #define INFO_LINE_BUF   48
 #define INFO_LINES_MAX  8
 #define NUM_SLOTS       6
+
+// Stacked info line layout constants
+// 8 lines fit between 2*UNIT margins top and bottom.
+// Fixed step computed for 8 lines; fewer lines use the same step from the top.
+#define STACK_INFO_MARGIN  (UNIT * 2)
+#define STACK_INFO_LINES   8
+// step = (available_h - INFO_GLYPH_H) / (STACK_INFO_LINES - 1)
+// available_h = SCREEN_H - 2*MARGIN_OUTER - 2*STACK_INFO_MARGIN  (approx, computed at draw time)
+
+// Shadow offset for digit drop shadow
+#define SHADOW_DX   HALF_UNIT
+#define SHADOW_DY   HALF_UNIT
 
 static const int EASE[10] = { 4, 6, 8, 10, 12, 12, 10, 8, 6, 4 };
 #define EASE_LEN  10
@@ -477,60 +494,68 @@ static void icon_weather(GContext *ctx, int ox, int oy, GColor col, int code, bo
 
 // ============================================================
 // DIGIT DRAWING
+// All draw_digit_vec / draw_*_vec functions accept a 'dx','dy'
+// offset so the shadow pass can call them with (SHADOW_DX,SHADOW_DY)
+// and the normal pass with (0,0).
 // ============================================================
 static void fill_arc(GContext *ctx, int cx, int cy, int ro, int ri, int a0, int a1) {
   GRect b = GRect(cx - ro, cy - ro, ro * 2, ro * 2);
   graphics_fill_radial(ctx, b, GOvalScaleModeFitCircle, (uint16_t)(ro - ri),
                        DEG_TO_TRIGANGLE(a0), DEG_TO_TRIGANGLE(a1));
 }
-static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int h) {
-  graphics_context_set_fill_color(ctx, s_fg);
+static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int h, int dx, int dy) {
   const int ro = UNIT * 2, ri = UNIT, sw = UNIT;
-  int gx = slot_x + HALF_SLOT_PAD, gx_r = gx + GLYPH_W - sw, cap_cx = gx + ro;
-  int top_y = cy - h / 2, bot_y = cy + h / 2;
+  int gx = slot_x + HALF_SLOT_PAD + dx, gx_r = gx + GLYPH_W - sw, cap_cx = gx + ro;
+  int top_y = cy - h / 2 + dy, bot_y = cy + h / 2 + dy;
   int bar = (h - 7 * UNIT) / 2; if (bar < 0) bar = 0;
-  int t_bc = cy - (ro - HALF_UNIT), t_tc = t_bc - bar;
-  int b_tc = cy + (ro - HALF_UNIT), b_bc = b_tc + bar;
+  int t_bc = cy - (ro - HALF_UNIT) + dy, t_tc = t_bc - bar;
+  int b_tc = cy + (ro - HALF_UNIT) + dy, b_bc = b_tc + bar;
   int tail = (h > H_MIN) ? (h - H_MIN) / 4 : 0;
-  #define top_cy  (cy - (h - ro*2) / 2)
-  #define bot_cy  (cy + (h - ro*2) / 2)
+  int _top_cy = cy - (h - ro*2) / 2 + dy;
+  int _bot_cy = cy + (h - ro*2) / 2 + dy;
   #define VBAR(x,y0,y1) if((y1)>(y0)) graphics_fill_rect(ctx,GRect((x),(y0),sw,(y1)-(y0)),0,GCornerNone)
   #define HBAR(y) graphics_fill_rect(ctx,GRect(gx,(y),GLYPH_W,sw),0,GCornerNone)
   #define NUB(x,y) graphics_fill_rect(ctx,GRect((x),(y),sw,sw),0,GCornerNone)
   switch (digit) {
-    case 0: fill_arc(ctx,cap_cx,top_cy,ro,ri,270,450); fill_arc(ctx,cap_cx,bot_cy,ro,ri,90,270); VBAR(gx,top_cy,bot_cy); VBAR(gx_r,top_cy,bot_cy); break;
-    case 1: { HBAR(bot_y-sw); int sx=gx+GLYPH_W/2-sw/2,cr=sx+sw,dh=cr-gx; VBAR(sx,top_y,bot_y-sw); if(dh>0){GPoint p[5]={{cr-1,top_y},{cr-1,top_y+sw-HALF_UNIT},{gx-1,top_y+sw+dh-HALF_UNIT},{gx-1,top_y+dh-sw},{sx-1,top_y}}; GPathInfo pi={5,p}; GPath*pa=gpath_create(&pi); if(pa){gpath_draw_filled(ctx,pa);gpath_destroy(pa);}} break; }
-    case 2: { fill_arc(ctx,cap_cx,top_cy,ro,ri,270,450); VBAR(gx,top_cy,top_cy+tail); VBAR(gx_r,top_cy,top_cy+tail); int dy=(bot_y-sw)-(top_cy+tail); if(dy>0){GPoint p[4]={{gx_r-1,top_cy+tail},{gx_r+sw,top_cy+tail},{gx-1+sw+1,bot_y-sw},{gx-1,bot_y-sw}}; GPathInfo pi={4,p}; GPath*pa=gpath_create(&pi); if(pa){gpath_draw_filled(ctx,pa);gpath_destroy(pa);}} HBAR(bot_y-sw); break; }
+    case 0: fill_arc(ctx,cap_cx,_top_cy,ro,ri,270,450); fill_arc(ctx,cap_cx,_bot_cy,ro,ri,90,270); VBAR(gx,_top_cy,_bot_cy); VBAR(gx_r,_top_cy,_bot_cy); break;
+    case 1: { HBAR(bot_y-sw); int sx=gx+GLYPH_W/2-sw/2,cr=sx+sw,dh=cr-gx-dx; VBAR(sx,top_y,bot_y-sw); if(dh>0){GPoint p[5]={{cr-1,top_y},{cr-1,top_y+sw-HALF_UNIT},{gx-1,top_y+sw+dh-HALF_UNIT},{gx-1,top_y+dh-sw},{sx-1,top_y}}; GPathInfo pi={5,p}; GPath*pa=gpath_create(&pi); if(pa){gpath_draw_filled(ctx,pa);gpath_destroy(pa);}} break; }
+    case 2: { fill_arc(ctx,cap_cx,_top_cy,ro,ri,270,450); VBAR(gx,_top_cy,_top_cy+tail); VBAR(gx_r,_top_cy,_top_cy+tail); int ddy=(bot_y-sw)-(_top_cy+tail); if(ddy>0){GPoint p[4]={{gx_r-1,_top_cy+tail},{gx_r+sw,_top_cy+tail},{gx-1+sw+1,bot_y-sw},{gx-1,bot_y-sw}}; GPathInfo pi={4,p}; GPath*pa=gpath_create(&pi); if(pa){gpath_draw_filled(ctx,pa);gpath_destroy(pa);}} HBAR(bot_y-sw); break; }
     case 3: fill_arc(ctx,cap_cx,t_tc,ro,ri,270,450); VBAR(gx,t_tc,t_tc+tail); VBAR(gx_r,t_tc,t_bc); fill_arc(ctx,cap_cx,t_bc,ro,ri,90,180); NUB(gx+sw,t_bc+sw); fill_arc(ctx,cap_cx,b_tc,ro,ri,360,450); VBAR(gx,b_bc-tail,b_bc); VBAR(gx_r,b_tc,b_bc); fill_arc(ctx,cap_cx,b_bc,ro,ri,90,270); break;
-    case 4: VBAR(gx,top_y,cy-HALF_UNIT+sw); VBAR(gx_r,top_y,bot_y); graphics_fill_rect(ctx,GRect(gx,cy-HALF_UNIT,GLYPH_W,sw),0,GCornerNone); break;
+    case 4: VBAR(gx,top_y,cy-HALF_UNIT+sw+dy); VBAR(gx_r,top_y,bot_y); graphics_fill_rect(ctx,GRect(gx,cy-HALF_UNIT+dy,GLYPH_W,sw),0,GCornerNone); break;
     case 5: HBAR(top_y); VBAR(gx,top_y+sw,b_tc); fill_arc(ctx,cap_cx,b_tc,ro,ri,270,450); fill_arc(ctx,cap_cx,b_bc,ro,ri,90,270); VBAR(gx_r,b_tc,b_bc); if(tail>0)VBAR(gx,b_bc-tail,b_bc); break;
-    case 6: fill_arc(ctx,cap_cx,top_cy,ro,ri,270,450); VBAR(gx_r,top_cy,top_cy+tail); VBAR(gx,top_cy,b_bc); fill_arc(ctx,cap_cx,b_tc,ro,ri,270,450); fill_arc(ctx,cap_cx,b_bc,ro,ri,90,270); VBAR(gx_r,b_tc,b_bc); break;
+    case 6: fill_arc(ctx,cap_cx,_top_cy,ro,ri,270,450); VBAR(gx_r,_top_cy,_top_cy+tail); VBAR(gx,_top_cy,b_bc); fill_arc(ctx,cap_cx,b_tc,ro,ri,270,450); fill_arc(ctx,cap_cx,b_bc,ro,ri,90,270); VBAR(gx_r,b_tc,b_bc); break;
     case 7: { HBAR(top_y); GPoint p[4]={{gx_r-1,top_y+sw},{gx_r+sw,top_y+sw},{gx+sw,bot_y-1},{gx-1,bot_y-1}}; GPathInfo pi={4,p}; GPath*pa=gpath_create(&pi); if(pa){gpath_draw_filled(ctx,pa);gpath_destroy(pa);} break; }
     case 8: fill_arc(ctx,cap_cx,t_tc,ro,ri,270,450); fill_arc(ctx,cap_cx,t_bc,ro,ri,90,270); VBAR(gx,t_tc,t_bc); VBAR(gx_r,t_tc,t_bc); fill_arc(ctx,cap_cx,b_tc,ro,ri,270,450); fill_arc(ctx,cap_cx,b_bc,ro,ri,90,270); VBAR(gx,b_tc,b_bc); VBAR(gx_r,b_tc,b_bc); break;
-    case 9: fill_arc(ctx,cap_cx,t_tc,ro,ri,270,450); fill_arc(ctx,cap_cx,t_bc,ro,ri,90,270); VBAR(gx,t_tc,t_bc); VBAR(gx,bot_cy-tail,bot_cy); VBAR(gx_r,t_tc,bot_cy); fill_arc(ctx,cap_cx,bot_cy,ro,ri,90,270); break;
+    case 9: fill_arc(ctx,cap_cx,t_tc,ro,ri,270,450); fill_arc(ctx,cap_cx,t_bc,ro,ri,90,270); VBAR(gx,t_tc,t_bc); VBAR(gx,_bot_cy-tail,_bot_cy); VBAR(gx_r,t_tc,_bot_cy); fill_arc(ctx,cap_cx,_bot_cy,ro,ri,90,270); break;
     default: break;
   }
-  #undef top_cy
-  #undef bot_cy
   #undef VBAR
   #undef HBAR
   #undef NUB
 }
-static void draw_colon_vec(GContext *ctx, int slot_x, int cy, int h) {
-  graphics_context_set_fill_color(ctx, s_fg);
-  int r = UNIT / 2, dx = slot_x + SLOT_W / 2;
-  graphics_fill_radial(ctx, GRect(dx-r, cy-h/4-r+2, r*2, r*2), GOvalScaleModeFitCircle, (uint16_t)r, 0, DEG_TO_TRIGANGLE(360));
-  graphics_fill_radial(ctx, GRect(dx-r, cy+h/4-r-2, r*2, r*2), GOvalScaleModeFitCircle, (uint16_t)r, 0, DEG_TO_TRIGANGLE(360));
+static void draw_colon_vec(GContext *ctx, int slot_x, int cy, int h, int dx, int dy) {
+  int r = UNIT / 2, ddx = slot_x + SLOT_W / 2 + dx;
+  graphics_fill_radial(ctx, GRect(ddx-r, cy-h/4-r+2+dy, r*2, r*2), GOvalScaleModeFitCircle, (uint16_t)r, 0, DEG_TO_TRIGANGLE(360));
+  graphics_fill_radial(ctx, GRect(ddx-r, cy+h/4-r-2+dy, r*2, r*2), GOvalScaleModeFitCircle, (uint16_t)r, 0, DEG_TO_TRIGANGLE(360));
 }
-static void draw_digits_vec(GContext *ctx, int h_tens, int h_ones, int m_tens, int m_ones, int h, int cy) {
-  draw_digit_vec(ctx, h_tens, SLOT_H_TENS, cy, h); draw_digit_vec(ctx, h_ones, SLOT_H_ONES, cy, h);
-  draw_colon_vec(ctx, COLON_SLOT_X, cy, h);
-  draw_digit_vec(ctx, m_tens, SLOT_M_TENS, cy, h); draw_digit_vec(ctx, m_ones, SLOT_M_ONES, cy, h);
+
+// Draw full wide-mode digits (with colon) at offset dx,dy
+static void draw_digits_pass(GContext *ctx, int h_tens, int h_ones, int m_tens, int m_ones,
+                              int h, int cy, int dx, int dy) {
+  draw_digit_vec(ctx, h_tens, SLOT_H_TENS, cy, h, dx, dy);
+  draw_digit_vec(ctx, h_ones, SLOT_H_ONES, cy, h, dx, dy);
+  draw_colon_vec(ctx, COLON_SLOT_X, cy, h, dx, dy);
+  draw_digit_vec(ctx, m_tens, SLOT_M_TENS, cy, h, dx, dy);
+  draw_digit_vec(ctx, m_ones, SLOT_M_ONES, cy, h, dx, dy);
 }
-static void draw_stacked_vec(GContext *ctx, int h_tens, int h_ones, int m_tens, int m_ones,
-                              int dh, int tens_x, int ones_x, int h_cy, int m_cy) {
-  draw_digit_vec(ctx, h_tens, tens_x, h_cy, dh); draw_digit_vec(ctx, h_ones, ones_x, h_cy, dh);
-  draw_digit_vec(ctx, m_tens, tens_x, m_cy, dh); draw_digit_vec(ctx, m_ones, ones_x, m_cy, dh);
+
+// Draw stacked-mode digits (no colon) at offset dx,dy
+static void draw_stacked_pass(GContext *ctx, int h_tens, int h_ones, int m_tens, int m_ones,
+                               int dh, int tens_x, int ones_x, int h_cy, int m_cy, int dx, int dy) {
+  draw_digit_vec(ctx, h_tens, tens_x, h_cy, dh, dx, dy);
+  draw_digit_vec(ctx, h_ones, ones_x, h_cy, dh, dx, dy);
+  draw_digit_vec(ctx, m_tens, tens_x, m_cy, dh, dx, dy);
+  draw_digit_vec(ctx, m_ones, ones_x, m_cy, dh, dx, dy);
 }
 
 // ============================================================
@@ -549,13 +574,16 @@ static void draw_info_line(GContext *ctx, InfoLine *line, int y,
     GSize sz = graphics_text_layout_get_content_size(
       line->text, font, GRect(0,0,200,20), GTextOverflowModeFill, GTextAlignmentLeft);
     int unit_w = ICON_W + ICON_TEXT_GAP + sz.w;
+    if (unit_w > col_w) unit_w = col_w;  // clamp so it stays within column
     // offset of [icon+text] unit within the column
     int icon_off = (align == GTextAlignmentLeft)  ? 0
                  : (align == GTextAlignmentRight) ? (col_w - unit_w)
                  : (col_w - unit_w) / 2;
+    if (icon_off < 0) icon_off = 0;     // clamp: never draw left of column
     int icon_sx = col_x + icon_off;
     int text_sx = icon_sx + ICON_W + ICON_TEXT_GAP;
     int text_w  = col_x + col_w - text_sx;
+    if (text_w < 0) text_w = 0;
     if      (line->is_battery) icon_battery(ctx, icon_sx, iy, s_fg, line->icon_extra, large);
     else if (line->is_weather) icon_weather(ctx, icon_sx, iy, s_fg, line->icon_extra, large);
     else                       line->icon_fn(ctx, icon_sx, iy, s_fg, large);
@@ -767,6 +795,9 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   GColor bg = s_bg; s_fg = GColorWhite;
 #endif
 
+  // Shadow color: opposite of foreground
+  GColor shadow_col = gcolor_equal(s_fg, GColorWhite) ? GColorBlack : GColorWhite;
+
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 #if defined(PBL_PLATFORM_EMERY)
@@ -786,10 +817,13 @@ static void draw_layer(Layer *layer, GContext *ctx) {
 
   if (s_layout == LAYOUT_FULL) {
     int cy = ub_top + MARGIN_OUTER + s_target_h / 2;
-    draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy);
+    // Shadow pass, then normal pass
+    graphics_context_set_fill_color(ctx, shadow_col);
+    draw_digits_pass(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy, SHADOW_DX, SHADOW_DY);
+    graphics_context_set_fill_color(ctx, s_fg);
+    draw_digits_pass(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy, 0, 0);
 
   } else if (s_layout == LAYOUT_INFO) {
-    // Wide mode: info centered above and below time
     int above_s[NUM_SLOTS], below_s[NUM_SLOTS], na=0, nb=0;
     prv_split_slots(above_s, &na, below_s, &nb);
     int an = build_lines(s_above_lines, INFO_LINES_MAX, above_s, na, tm_now, true);
@@ -799,7 +833,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int above_end   = above_start + prv_info_block_h(an, INFO_LINE_STEP_WIDE);
     int below_end   = ub_bot - HALF_UNIT;
     int time_cy     = (above_end + HALF_UNIT + (below_end - prv_info_block_h(bn, INFO_LINE_STEP_WIDE)) - HALF_UNIT) / 2;
-    // Wide mode column spans full width with side margins, centered text
     int col_x = SIDE_MARGIN;
     int col_w = SCREEN_W - 2 * SIDE_MARGIN;
 
@@ -810,10 +843,14 @@ static void draw_layer(Layer *layer, GContext *ctx) {
       int gy = below_end - prv_info_block_h(bn, INFO_LINE_STEP_WIDE) + i * INFO_LINE_STEP_WIDE;
       draw_info_line(ctx, &s_below_lines[i], gy, col_x, col_w, GTextAlignmentCenter);
     }
-    draw_digits_vec(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy);
+    // Shadow pass, then normal pass
+    graphics_context_set_fill_color(ctx, shadow_col);
+    draw_digits_pass(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy, SHADOW_DX, SHADOW_DY);
+    graphics_context_set_fill_color(ctx, s_fg);
+    draw_digits_pass(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy, 0, 0);
 
   } else {
-    // Stacked layouts: two digit pairs + info column
+    // Stacked layouts
     int dh    = prv_compute_stacked_h(ub_h);
     int h_cy  = ub_top + MARGIN_OUTER + dh / 2;
     int m_cy  = ub_bot - bot_margin - dh / 2;
@@ -821,17 +858,17 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     GTextAlignment info_align;
 
     if (s_layout == LAYOUT_STACK_R) {
-      // Digits on right side, info column on left, left-aligned text
+      // Digits right, info column left — text LEFT-aligned (away from center)
       ones_x = SCREEN_W - SIDE_MARGIN - SLOT_W;
       tens_x = ones_x - SLOT_W;
       col_x  = SIDE_MARGIN;
-      col_w  = tens_x - SIDE_MARGIN - UNIT;  // 1 UNIT gap before digits
+      col_w  = tens_x - SIDE_MARGIN - UNIT;
       info_align = GTextAlignmentLeft;
     } else {
-      // Digits on left side, info column on right, right-aligned text
+      // Digits left, info column right — text RIGHT-aligned (away from center)
       tens_x = SIDE_MARGIN;
       ones_x = SIDE_MARGIN + SLOT_W;
-      col_x  = ones_x + SLOT_W + UNIT;       // 1 UNIT gap after digits
+      col_x  = ones_x + SLOT_W + UNIT;
       col_w  = SCREEN_W - col_x - SIDE_MARGIN;
       info_align = GTextAlignmentRight;
     }
@@ -843,15 +880,23 @@ static void draw_layer(Layer *layer, GContext *ctx) {
           all_s[n_all++] = s_cfg_order[i];
       int cn = build_lines(s_col_lines, INFO_LINES_MAX, all_s, n_all, tm_now, false);
       if (cn > 0) {
-        int glyph_top = ub_top + MARGIN_OUTER;
-        int glyph_bot = ub_bot - MARGIN_OUTER + INFO_GLYPH_H;
-        int step = cn > 1 ? (glyph_bot - glyph_top - INFO_GLYPH_H) / (cn - 1) : 0;
+        // Fixed step: compute as if 8 lines filled the usable height
+        // top/bottom margin = STACK_INFO_MARGIN from the draw area edges
+        int draw_top = ub_top + MARGIN_OUTER + STACK_INFO_MARGIN;
+        int draw_bot = ub_bot - MARGIN_OUTER - STACK_INFO_MARGIN;
+        int avail_h  = draw_bot - draw_top - INFO_GLYPH_H;
+        int step = (avail_h > 0) ? avail_h / (STACK_INFO_LINES - 1) : INFO_LINE_STEP;
+        // Render lines top-down from draw_top, using fixed step
         for (int i = 0; i < cn; i++)
           draw_info_line(ctx, &s_col_lines[i],
-            glyph_top + i * step, col_x, col_w, info_align);
+            draw_top + i * step, col_x, col_w, info_align);
       }
     }
-    draw_stacked_vec(ctx, h_tens, h_ones, m_tens, m_ones, dh, tens_x, ones_x, h_cy, m_cy);
+    // Shadow pass, then normal pass
+    graphics_context_set_fill_color(ctx, shadow_col);
+    draw_stacked_pass(ctx, h_tens, h_ones, m_tens, m_ones, dh, tens_x, ones_x, h_cy, m_cy, SHADOW_DX, SHADOW_DY);
+    graphics_context_set_fill_color(ctx, s_fg);
+    draw_stacked_pass(ctx, h_tens, h_ones, m_tens, m_ones, dh, tens_x, ones_x, h_cy, m_cy, 0, 0);
   }
 }
 
@@ -1011,7 +1056,7 @@ static void window_load(Window *window) {
     unobstructed_area_service_subscribe(ua, NULL); }
   accel_tap_service_subscribe(accel_tap_handler);
 #if defined(PBL_TOUCH)
-  // Subscribe unconditionally — is_enabled guard may return false even when touch is on
+  // Try subscribing unconditionally — is_enabled guard may be too strict
   touch_service_subscribe(touch_handler, NULL);
 #endif
   s_phase = PHASE_DONE; s_overshot = false; s_ease_idx = 0;
