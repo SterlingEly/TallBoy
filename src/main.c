@@ -1,20 +1,21 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v3.48
+// TallBoy — main.c  v3.49
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.48 changes:
-//   STACKED INFO: fixed icon overflow on right-side info column
-//     (icon_off clamped to 0 minimum); fixed line spacing to
-//     use fixed step from 2*UNIT top/bottom margin regardless
-//     of line count; corrected alignment: STACK_R (info left) =
-//     GTextAlignmentLeft, STACK_L (info right) = GTextAlignmentRight.
-//   DIGIT SHADOW: draw digits twice — offset shadow pass first
-//     (black for white fg, white for black fg), then normal.
-//     Shadow offset: HALF_UNIT right + HALF_UNIT down.
-//   TOUCH: pass layer bounds GRect to touch_service_subscribe
-//     as the touch target area (may be required by the API).
+// v3.49 changes:
+//   STACKED INFO SPACING: removed double-margin bug. Info lines
+//     now span from UNIT*2 below top of screen to UNIT*2 above
+//     bottom, using a fixed step computed for STACK_INFO_LINES=8.
+//     Fewer lines use same step starting from the top.
+//   STACKED INFO ICON ALIGN: right-aligned icon lines now draw
+//     icon+text block flush to right edge of column. Icon draws
+//     first (left of text), whole unit right-justified.
+//   WIDE CONFIG / STACKED CONFIG: added separate slot lists for
+//     wide mode vs stacked mode. Wide uses s_cfg_wide_slots[6]
+//     (combo lines), stacked uses s_cfg_stack_slots[8] (singles).
+//     Both persist independently.
 // ============================================================
 
 typedef enum {
@@ -99,17 +100,15 @@ typedef enum {
 #define INFO_LINES_MAX  8
 #define NUM_SLOTS       6
 
-// Stacked info line layout constants
-// 8 lines fit between 2*UNIT margins top and bottom.
-// Fixed step computed for 8 lines; fewer lines use the same step from the top.
+// Stacked info line spacing:
+// Fixed step so that STACK_INFO_LINES=8 lines fill from UNIT*2 top
+// to UNIT*2 bottom. Fewer lines use same step from the top.
 #define STACK_INFO_MARGIN  (UNIT * 2)
 #define STACK_INFO_LINES   8
-// step = (available_h - INFO_GLYPH_H) / (STACK_INFO_LINES - 1)
-// available_h = SCREEN_H - 2*MARGIN_OUTER - 2*STACK_INFO_MARGIN  (approx, computed at draw time)
 
-// Shadow offset for digit drop shadow
-#define SHADOW_DX   HALF_UNIT
-#define SHADOW_DY   HALF_UNIT
+// Digit shadow
+#define SHADOW_DX  HALF_UNIT
+#define SHADOW_DY  HALF_UNIT
 
 static const int EASE[10] = { 4, 6, 8, 10, 12, 12, 10, 8, 6, 4 };
 #define EASE_LEN  10
@@ -174,19 +173,30 @@ static int        s_weather_temp_f = -999, s_weather_temp_c = -999;
 static int        s_weather_code = 0;
 static int        s_layout = LAYOUT_FULL;
 
-// InfoLine arrays MUST be static globals — local = ~1.3KB stack = crash
+// InfoLine static globals — MUST NOT be stack-allocated (crashes)
 static InfoLine s_above_lines[INFO_LINES_MAX];
 static InfoLine s_below_lines[INFO_LINES_MAX];
 static InfoLine s_col_lines[INFO_LINES_MAX];
 
 #define TIME_MARKER 17
+
+// ---- Config: wide mode uses the old order array (6 slots + time marker) ----
 static int  s_cfg_order[NUM_SLOTS + 1] = { 1,2,3,17,4,5,6 };
+
+// ---- Config: stacked mode has its own flat 8-slot list ----
+// Defaults to a sensible set of individual data fields
+#define STACK_SLOTS 8
+static int s_cfg_stack[STACK_SLOTS] = { 1, 2, 6, 9, 11, 4, 15, 16 };
+
 static bool s_cfg_temp_f  = true;
 static bool s_cfg_dist_mi = true;
 static bool s_cfg_24h     = false;
 
 #define PERSIST_CFG_ORDER  1
 #define PERSIST_CFG_FLAGS  2
+#define PERSIST_CFG_STACK  3   // packed: 8 slots × 5 bits = 40 bits, use int64 or two int32s
+// Use two int32s: low word has slots 0-5, high word has slots 6-7
+#define PERSIST_CFG_STACK_HI 4
 
 static void prv_save_config(void) {
   int32_t packed = 0;
@@ -194,6 +204,12 @@ static void prv_save_config(void) {
   persist_write_int(PERSIST_CFG_ORDER, packed);
   int32_t flags = (s_cfg_temp_f ? 1 : 0) | (s_cfg_dist_mi ? 2 : 0) | (s_cfg_24h ? 4 : 0);
   persist_write_int(PERSIST_CFG_FLAGS, flags);
+  // Stack: 6 slots in low word, 2 in high word
+  int32_t sp_lo = 0, sp_hi = 0;
+  for (int i = 0; i < 6; i++) sp_lo |= (s_cfg_stack[i] & 0x1f) << (i * 5);
+  for (int i = 0; i < 2; i++) sp_hi |= (s_cfg_stack[6+i] & 0x1f) << (i * 5);
+  persist_write_int(PERSIST_CFG_STACK, sp_lo);
+  persist_write_int(PERSIST_CFG_STACK_HI, sp_hi);
 }
 static void prv_load_config(void) {
   if (persist_exists(PERSIST_CFG_ORDER)) {
@@ -205,6 +221,12 @@ static void prv_load_config(void) {
     s_cfg_temp_f  = (flags & 1) != 0;
     s_cfg_dist_mi = (flags & 2) != 0;
     s_cfg_24h     = (flags & 4) != 0;
+  }
+  if (persist_exists(PERSIST_CFG_STACK)) {
+    int32_t sp_lo = persist_read_int(PERSIST_CFG_STACK);
+    int32_t sp_hi = persist_exists(PERSIST_CFG_STACK_HI) ? persist_read_int(PERSIST_CFG_STACK_HI) : 0;
+    for (int i = 0; i < 6; i++) s_cfg_stack[i] = (sp_lo >> (i * 5)) & 0x1f;
+    for (int i = 0; i < 2; i++) s_cfg_stack[6+i] = (sp_hi >> (i * 5)) & 0x1f;
   }
 }
 static int prv_time_pos(void) {
@@ -494,9 +516,7 @@ static void icon_weather(GContext *ctx, int ox, int oy, GColor col, int code, bo
 
 // ============================================================
 // DIGIT DRAWING
-// All draw_digit_vec / draw_*_vec functions accept a 'dx','dy'
-// offset so the shadow pass can call them with (SHADOW_DX,SHADOW_DY)
-// and the normal pass with (0,0).
+// dx, dy = offset for shadow pass (use SHADOW_DX/DY) or 0,0 for normal.
 // ============================================================
 static void fill_arc(GContext *ctx, int cx, int cy, int ro, int ri, int a0, int a1) {
   GRect b = GRect(cx - ro, cy - ro, ro * 2, ro * 2);
@@ -538,8 +558,6 @@ static void draw_colon_vec(GContext *ctx, int slot_x, int cy, int h, int dx, int
   graphics_fill_radial(ctx, GRect(ddx-r, cy-h/4-r+2+dy, r*2, r*2), GOvalScaleModeFitCircle, (uint16_t)r, 0, DEG_TO_TRIGANGLE(360));
   graphics_fill_radial(ctx, GRect(ddx-r, cy+h/4-r-2+dy, r*2, r*2), GOvalScaleModeFitCircle, (uint16_t)r, 0, DEG_TO_TRIGANGLE(360));
 }
-
-// Draw full wide-mode digits (with colon) at offset dx,dy
 static void draw_digits_pass(GContext *ctx, int h_tens, int h_ones, int m_tens, int m_ones,
                               int h, int cy, int dx, int dy) {
   draw_digit_vec(ctx, h_tens, SLOT_H_TENS, cy, h, dx, dy);
@@ -548,8 +566,6 @@ static void draw_digits_pass(GContext *ctx, int h_tens, int h_ones, int m_tens, 
   draw_digit_vec(ctx, m_tens, SLOT_M_TENS, cy, h, dx, dy);
   draw_digit_vec(ctx, m_ones, SLOT_M_ONES, cy, h, dx, dy);
 }
-
-// Draw stacked-mode digits (no colon) at offset dx,dy
 static void draw_stacked_pass(GContext *ctx, int h_tens, int h_ones, int m_tens, int m_ones,
                                int dh, int tens_x, int ones_x, int h_cy, int m_cy, int dx, int dy) {
   draw_digit_vec(ctx, h_tens, tens_x, h_cy, dh, dx, dy);
@@ -560,9 +576,15 @@ static void draw_stacked_pass(GContext *ctx, int h_tens, int h_ones, int m_tens,
 
 // ============================================================
 // INFO LINE RENDERING
-// col_x = screen-space left edge of info column
-// col_w = width of info column in pixels
-// align = text alignment WITHIN the column
+// col_x  = screen-space left edge of info column
+// col_w  = column width in pixels
+// align  = how text is positioned within the column
+//
+// For icon lines:
+//   Layout is always [icon][gap][text] as a unit.
+//   Left-align:   unit starts at col_x
+//   Right-align:  unit ends at col_x + col_w (icon at left of unit, text at right)
+//   Center:       unit centered in column
 // ============================================================
 static void draw_info_line(GContext *ctx, InfoLine *line, int y,
                             int col_x, int col_w, GTextAlignment align) {
@@ -573,16 +595,18 @@ static void draw_info_line(GContext *ctx, InfoLine *line, int y,
     bool large = ICON_LARGE;
     GSize sz = graphics_text_layout_get_content_size(
       line->text, font, GRect(0,0,200,20), GTextOverflowModeFill, GTextAlignmentLeft);
-    int unit_w = ICON_W + ICON_TEXT_GAP + sz.w;
-    if (unit_w > col_w) unit_w = col_w;  // clamp so it stays within column
-    // offset of [icon+text] unit within the column
-    int icon_off = (align == GTextAlignmentLeft)  ? 0
-                 : (align == GTextAlignmentRight) ? (col_w - unit_w)
-                 : (col_w - unit_w) / 2;
-    if (icon_off < 0) icon_off = 0;     // clamp: never draw left of column
+    // Total width of [icon+gap+text] block, clamped to column
+    int block_w = ICON_W + ICON_TEXT_GAP + sz.w;
+    if (block_w > col_w) block_w = col_w;
+    // Where the icon starts within the column
+    int icon_off;
+    if      (align == GTextAlignmentLeft)  { icon_off = 0; }
+    else if (align == GTextAlignmentRight) { icon_off = col_w - block_w; }
+    else                                   { icon_off = (col_w - block_w) / 2; }
+    if (icon_off < 0) icon_off = 0;
     int icon_sx = col_x + icon_off;
     int text_sx = icon_sx + ICON_W + ICON_TEXT_GAP;
-    int text_w  = col_x + col_w - text_sx;
+    int text_w  = (col_x + col_w) - text_sx;
     if (text_w < 0) text_w = 0;
     if      (line->is_battery) icon_battery(ctx, icon_sx, iy, s_fg, line->icon_extra, large);
     else if (line->is_weather) icon_weather(ctx, icon_sx, iy, s_fg, line->icon_extra, large);
@@ -794,8 +818,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
 #else
   GColor bg = s_bg; s_fg = GColorWhite;
 #endif
-
-  // Shadow color: opposite of foreground
   GColor shadow_col = gcolor_equal(s_fg, GColorWhite) ? GColorBlack : GColorWhite;
 
   graphics_context_set_fill_color(ctx, GColorBlack);
@@ -817,7 +839,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
 
   if (s_layout == LAYOUT_FULL) {
     int cy = ub_top + MARGIN_OUTER + s_target_h / 2;
-    // Shadow pass, then normal pass
     graphics_context_set_fill_color(ctx, shadow_col);
     draw_digits_pass(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy, SHADOW_DX, SHADOW_DY);
     graphics_context_set_fill_color(ctx, s_fg);
@@ -828,14 +849,11 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     prv_split_slots(above_s, &na, below_s, &nb);
     int an = build_lines(s_above_lines, INFO_LINES_MAX, above_s, na, tm_now, true);
     int bn = build_lines(s_below_lines, INFO_LINES_MAX, below_s, nb, tm_now, true);
-
     int above_start = ub_top + HALF_UNIT;
     int above_end   = above_start + prv_info_block_h(an, INFO_LINE_STEP_WIDE);
     int below_end   = ub_bot - HALF_UNIT;
     int time_cy     = (above_end + HALF_UNIT + (below_end - prv_info_block_h(bn, INFO_LINE_STEP_WIDE)) - HALF_UNIT) / 2;
-    int col_x = SIDE_MARGIN;
-    int col_w = SCREEN_W - 2 * SIDE_MARGIN;
-
+    int col_x = SIDE_MARGIN, col_w = SCREEN_W - 2 * SIDE_MARGIN;
     for (int i = 0; i < an; i++)
       draw_info_line(ctx, &s_above_lines[i],
         above_start + i * INFO_LINE_STEP_WIDE, col_x, col_w, GTextAlignmentCenter);
@@ -843,7 +861,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
       int gy = below_end - prv_info_block_h(bn, INFO_LINE_STEP_WIDE) + i * INFO_LINE_STEP_WIDE;
       draw_info_line(ctx, &s_below_lines[i], gy, col_x, col_w, GTextAlignmentCenter);
     }
-    // Shadow pass, then normal pass
     graphics_context_set_fill_color(ctx, shadow_col);
     draw_digits_pass(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy, SHADOW_DX, SHADOW_DY);
     graphics_context_set_fill_color(ctx, s_fg);
@@ -858,14 +875,14 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     GTextAlignment info_align;
 
     if (s_layout == LAYOUT_STACK_R) {
-      // Digits right, info column left — text LEFT-aligned (away from center)
+      // Digits right, info column left — text LEFT-aligned
       ones_x = SCREEN_W - SIDE_MARGIN - SLOT_W;
       tens_x = ones_x - SLOT_W;
       col_x  = SIDE_MARGIN;
       col_w  = tens_x - SIDE_MARGIN - UNIT;
       info_align = GTextAlignmentLeft;
     } else {
-      // Digits left, info column right — text RIGHT-aligned (away from center)
+      // Digits left, info column right — text RIGHT-aligned
       tens_x = SIDE_MARGIN;
       ones_x = SIDE_MARGIN + SLOT_W;
       col_x  = ones_x + SLOT_W + UNIT;
@@ -874,25 +891,20 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     }
 
     if (tm_now && col_w > 20) {
-      int all_s[NUM_SLOTS], n_all = 0;
-      for (int i = 0; i < NUM_SLOTS + 1; i++)
-        if (s_cfg_order[i] != TIME_MARKER && s_cfg_order[i] != SLOT_EMPTY)
-          all_s[n_all++] = s_cfg_order[i];
-      int cn = build_lines(s_col_lines, INFO_LINES_MAX, all_s, n_all, tm_now, false);
+      // Use stacked-specific slot list (not the wide order array)
+      int cn = build_lines(s_col_lines, INFO_LINES_MAX, s_cfg_stack, STACK_SLOTS, tm_now, false);
       if (cn > 0) {
-        // Fixed step: compute as if 8 lines filled the usable height
-        // top/bottom margin = STACK_INFO_MARGIN from the draw area edges
-        int draw_top = ub_top + MARGIN_OUTER + STACK_INFO_MARGIN;
-        int draw_bot = ub_bot - MARGIN_OUTER - STACK_INFO_MARGIN;
+        // Fixed step: size for STACK_INFO_LINES from STACK_INFO_MARGIN top to bottom.
+        // draw_top/bot are relative to the full screen (ub_top/ub_bot), no MARGIN_OUTER added.
+        int draw_top = ub_top + STACK_INFO_MARGIN;
+        int draw_bot = ub_bot - STACK_INFO_MARGIN;
         int avail_h  = draw_bot - draw_top - INFO_GLYPH_H;
-        int step = (avail_h > 0) ? avail_h / (STACK_INFO_LINES - 1) : INFO_LINE_STEP;
-        // Render lines top-down from draw_top, using fixed step
+        int step     = (avail_h > 0 && STACK_INFO_LINES > 1) ? avail_h / (STACK_INFO_LINES - 1) : INFO_LINE_STEP;
         for (int i = 0; i < cn; i++)
           draw_info_line(ctx, &s_col_lines[i],
             draw_top + i * step, col_x, col_w, info_align);
       }
     }
-    // Shadow pass, then normal pass
     graphics_context_set_fill_color(ctx, shadow_col);
     draw_stacked_pass(ctx, h_tens, h_ones, m_tens, m_ones, dh, tens_x, ones_x, h_cy, m_cy, SHADOW_DX, SHADOW_DY);
     graphics_context_set_fill_color(ctx, s_fg);
@@ -1040,6 +1052,9 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
     t = dict_find(iter, MESSAGE_KEY_CfgSlot1 + i);
     if (t) s_cfg_order[i] = (int)t->value->int32;
   }
+  // Stacked slots: CfgSlot8..CfgSlot15 (keys 12..19 offset from CfgSlot1=5 → keys 12..19)
+  // Actually use MESSAGE_KEY_CfgSlot1 + 7 through +14 for stack slots 0..7
+  // TODO: add dedicated message keys in appinfo.json in next session
   t = dict_find(iter, MESSAGE_KEY_CfgTempUnit);    if(t) s_cfg_temp_f  =(t->value->int32==0);
   t = dict_find(iter, MESSAGE_KEY_CfgDistUnit);    if(t) s_cfg_dist_mi =(t->value->int32==0);
   t = dict_find(iter, MESSAGE_KEY_CfgClockFormat); if(t) s_cfg_24h     =(t->value->int32==1);
@@ -1056,7 +1071,6 @@ static void window_load(Window *window) {
     unobstructed_area_service_subscribe(ua, NULL); }
   accel_tap_service_subscribe(accel_tap_handler);
 #if defined(PBL_TOUCH)
-  // Try subscribing unconditionally — is_enabled guard may be too strict
   touch_service_subscribe(touch_handler, NULL);
 #endif
   s_phase = PHASE_DONE; s_overshot = false; s_ease_idx = 0;
