@@ -1,5 +1,5 @@
 // Smoothstep lookup: 65 entries for t = 0..64 (inclusive).
-// Value range 0..256 — use uint16_t (256 doesn't fit in uint8_t).
+// Value range 0..256 — uint16_t required (256 doesn't fit in uint8_t).
 // smoothstep: 6t^5 - 15t^4 + 10t^3, scaled to 256.
 static const uint16_t SMOOTH[SPLIT_FRAMES + 1] = {
     0,  0,  0,  0,  1,  1,  2,  3,  4,  6,  8, 10, 13, 16, 20, 24,
@@ -8,3 +8,10 @@ static const uint16_t SMOOTH[SPLIT_FRAMES + 1] = {
   253,255,256,255,253,250,246,241,236,230,223,217,210,202,195,187,
   179
 };
+// Interpolate: lerp(a, b, step/SPLIT_FRAMES) using smoothstep
+static int prv_lerp(int a, int b, int step) {
+  if (step <= 0) return a;
+  if (step >= SPLIT_FRAMES) return b;
+  int s = (int)SMOOTH[step];  // 0..256
+  return a + ((b - a) * s + 128) / 256;
+}
