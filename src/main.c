@@ -1,21 +1,23 @@
 #include <pebble.h>
 
 // ============================================================
-// TallBoy — main.c  v3.49
+// TallBoy — main.c  v3.50
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.49 changes:
-//   STACKED INFO SPACING: removed double-margin bug. Info lines
-//     now span from UNIT*2 below top of screen to UNIT*2 above
-//     bottom, using a fixed step computed for STACK_INFO_LINES=8.
-//     Fewer lines use same step starting from the top.
-//   STACKED INFO ICON ALIGN: right-aligned icon lines now draw
-//     icon+text block flush to right edge of column. Icon draws
-//     first (left of text), whole unit right-justified.
-//   WIDE CONFIG / STACKED CONFIG: added separate slot lists for
-//     wide mode vs stacked mode. Wide uses s_cfg_wide_slots[6]
-//     (combo lines), stacked uses s_cfg_stack_slots[8] (singles).
-//     Both persist independently.
+// v3.50 changes:
+//   ALIGNMENT FLIP: STACK_L (digits left, info right) → LEFT-aligned
+//     text (hugging toward digits). STACK_R (digits right, info left)
+//     → RIGHT-aligned text (hugging toward digits).
+//   SPLIT/MERGE ANIMATION: smooth transition between LAYOUT_FULL
+//     and LAYOUT_STACK_L / LAYOUT_STACK_R.
+//     Phase 1 (PHASE_SPLIT_V, ~60 frames): hours float up, minutes
+//       float down to their stacked vertical positions. Colon dots
+//       converge toward center and fade out. Digits shrink to
+//       stacked height.
+//     Phase 2 (PHASE_SPLIT_H, ~60 frames): digits slide horizontally
+//       to their final column position. Info lines slide in from
+//       off-screen edge. Colon slides off same edge as info.
+//     Reverse triggered by shaking from stacked layout.
 // ============================================================
 
 typedef enum {
@@ -100,15 +102,33 @@ typedef enum {
 #define INFO_LINES_MAX  8
 #define NUM_SLOTS       6
 
-// Stacked info line spacing:
-// Fixed step so that STACK_INFO_LINES=8 lines fill from UNIT*2 top
-// to UNIT*2 bottom. Fewer lines use same step from the top.
 #define STACK_INFO_MARGIN  (UNIT * 2)
 #define STACK_INFO_LINES   8
 
-// Digit shadow
 #define SHADOW_DX  HALF_UNIT
 #define SHADOW_DY  HALF_UNIT
+
+// Split animation
+// 64 frames at 16ms ≈ 1.0 sec per phase. Two phases = ~2 sec total.
+#define SPLIT_FRAMES  64
+#define SPLIT_MS      16
+
+// Smoothstep lookup: 65 entries for t = 0..64 (inclusive), value 0..256
+// smoothstep(t) = t³(6t²-15t+10), scaled to 0-256
+static const uint8_t SMOOTH[SPLIT_FRAMES + 1] = {
+    0,  0,  0,  0,  1,  1,  2,  3,  4,  6,  8, 10, 13, 16, 20, 24,
+   28, 33, 38, 44, 50, 57, 63, 71, 78, 86, 94,102,111,119,128,137,
+  145,154,162,170,179,187,195,202,210,217,223,230,236,241,246,250,
+  253,255,256,256,255,253,250,246,241,236,230,223,217,210,202,195,
+  187,256
+};
+// Interpolate: lerp(a, b, t/SPLIT_FRAMES)
+static int prv_lerp(int a, int b, int step) {
+  if (step <= 0) return a;
+  if (step >= SPLIT_FRAMES) return b;
+  int s = SMOOTH[step];  // 0..256
+  return a + ((b - a) * s + 128) / 256;
+}
 
 static const int EASE[10] = { 4, 6, 8, 10, 12, 12, 10, 8, 6, 4 };
 #define EASE_LEN  10
@@ -133,7 +153,12 @@ static const VibePattern TOUCH_VIBE = { .durations = TOUCH_VIBE_MS, .num_segment
 typedef enum { CD_SHRINK, CD_HOLD_MIN, CD_EXPAND, CD_HOLD_MAX } CdSubPhase;
 typedef enum {
   PHASE_COUNTDOWN, PHASE_BLINK, PHASE_DONE,
-  PHASE_ANTICIPATE, PHASE_SQUISH, PHASE_EXPAND, PHASE_SHAKE_CYCLE
+  PHASE_ANTICIPATE, PHASE_SQUISH, PHASE_EXPAND, PHASE_SHAKE_CYCLE,
+  // Split/merge animation phases
+  PHASE_SPLIT_V,   // vertical: hours up, minutes down, digits shrink
+  PHASE_SPLIT_H,   // horizontal: digits slide to column, info slides in
+  PHASE_MERGE_H,   // reverse: info slides out, digits slide to center
+  PHASE_MERGE_V    // reverse: digits converge, height expands
 } Phase;
 
 typedef void (*IconFn)(GContext*,int,int,GColor,bool);
@@ -179,24 +204,29 @@ static InfoLine s_below_lines[INFO_LINES_MAX];
 static InfoLine s_col_lines[INFO_LINES_MAX];
 
 #define TIME_MARKER 17
-
-// ---- Config: wide mode uses the old order array (6 slots + time marker) ----
 static int  s_cfg_order[NUM_SLOTS + 1] = { 1,2,3,17,4,5,6 };
-
-// ---- Config: stacked mode has its own flat 8-slot list ----
-// Defaults to a sensible set of individual data fields
 #define STACK_SLOTS 8
-static int s_cfg_stack[STACK_SLOTS] = { 1, 2, 6, 9, 11, 4, 15, 16 };
-
+static int  s_cfg_stack[STACK_SLOTS] = { 1, 2, 6, 9, 11, 4, 15, 16 };
 static bool s_cfg_temp_f  = true;
 static bool s_cfg_dist_mi = true;
 static bool s_cfg_24h     = false;
 
-#define PERSIST_CFG_ORDER  1
-#define PERSIST_CFG_FLAGS  2
-#define PERSIST_CFG_STACK  3   // packed: 8 slots × 5 bits = 40 bits, use int64 or two int32s
-// Use two int32s: low word has slots 0-5, high word has slots 6-7
+#define PERSIST_CFG_ORDER    1
+#define PERSIST_CFG_FLAGS    2
+#define PERSIST_CFG_STACK    3
 #define PERSIST_CFG_STACK_HI 4
+
+// Split animation state — values computed at phase start, interpolated each frame
+// For SPLIT_V: start/end cy for each digit pair
+static int s_split_hr_cy_start, s_split_hr_cy_end;
+static int s_split_mn_cy_start, s_split_mn_cy_end;
+static int s_split_h_start,     s_split_h_end;    // digit height
+// For SPLIT_H: start/end x offset for digit block
+static int s_split_dx_start, s_split_dx_end;
+// Info column slide: column x starts off-screen, slides to target
+static int s_split_info_start, s_split_info_end;  // info col_x start/end
+// Target stacked layout (LAYOUT_STACK_L or LAYOUT_STACK_R) preserved across phases
+static int s_split_target_layout;
 
 static void prv_save_config(void) {
   int32_t packed = 0;
@@ -204,7 +234,6 @@ static void prv_save_config(void) {
   persist_write_int(PERSIST_CFG_ORDER, packed);
   int32_t flags = (s_cfg_temp_f ? 1 : 0) | (s_cfg_dist_mi ? 2 : 0) | (s_cfg_24h ? 4 : 0);
   persist_write_int(PERSIST_CFG_FLAGS, flags);
-  // Stack: 6 slots in low word, 2 in high word
   int32_t sp_lo = 0, sp_hi = 0;
   for (int i = 0; i < 6; i++) sp_lo |= (s_cfg_stack[i] & 0x1f) << (i * 5);
   for (int i = 0; i < 2; i++) sp_hi |= (s_cfg_stack[6+i] & 0x1f) << (i * 5);
@@ -516,7 +545,6 @@ static void icon_weather(GContext *ctx, int ox, int oy, GColor col, int code, bo
 
 // ============================================================
 // DIGIT DRAWING
-// dx, dy = offset for shadow pass (use SHADOW_DX/DY) or 0,0 for normal.
 // ============================================================
 static void fill_arc(GContext *ctx, int cx, int cy, int ro, int ri, int a0, int a1) {
   GRect b = GRect(cx - ro, cy - ro, ro * 2, ro * 2);
@@ -558,6 +586,20 @@ static void draw_colon_vec(GContext *ctx, int slot_x, int cy, int h, int dx, int
   graphics_fill_radial(ctx, GRect(ddx-r, cy-h/4-r+2+dy, r*2, r*2), GOvalScaleModeFitCircle, (uint16_t)r, 0, DEG_TO_TRIGANGLE(360));
   graphics_fill_radial(ctx, GRect(ddx-r, cy+h/4-r-2+dy, r*2, r*2), GOvalScaleModeFitCircle, (uint16_t)r, 0, DEG_TO_TRIGANGLE(360));
 }
+
+// Draw all 4 digits with independent cy for hours vs minutes, plus common dx offset.
+// Used for split/merge animation and steady stacked rendering.
+static void draw_split_pass(GContext *ctx,
+                             int h_tens, int h_ones, int m_tens, int m_ones,
+                             int h, int tens_x, int ones_x,
+                             int hr_cy, int mn_cy, int dx, int dy) {
+  draw_digit_vec(ctx, h_tens, tens_x, hr_cy, h, dx, dy);
+  draw_digit_vec(ctx, h_ones, ones_x, hr_cy, h, dx, dy);
+  draw_digit_vec(ctx, m_tens, tens_x, mn_cy, h, dx, dy);
+  draw_digit_vec(ctx, m_ones, ones_x, mn_cy, h, dx, dy);
+}
+
+// Wide-mode (with colon)
 static void draw_digits_pass(GContext *ctx, int h_tens, int h_ones, int m_tens, int m_ones,
                               int h, int cy, int dx, int dy) {
   draw_digit_vec(ctx, h_tens, SLOT_H_TENS, cy, h, dx, dy);
@@ -566,25 +608,9 @@ static void draw_digits_pass(GContext *ctx, int h_tens, int h_ones, int m_tens, 
   draw_digit_vec(ctx, m_tens, SLOT_M_TENS, cy, h, dx, dy);
   draw_digit_vec(ctx, m_ones, SLOT_M_ONES, cy, h, dx, dy);
 }
-static void draw_stacked_pass(GContext *ctx, int h_tens, int h_ones, int m_tens, int m_ones,
-                               int dh, int tens_x, int ones_x, int h_cy, int m_cy, int dx, int dy) {
-  draw_digit_vec(ctx, h_tens, tens_x, h_cy, dh, dx, dy);
-  draw_digit_vec(ctx, h_ones, ones_x, h_cy, dh, dx, dy);
-  draw_digit_vec(ctx, m_tens, tens_x, m_cy, dh, dx, dy);
-  draw_digit_vec(ctx, m_ones, ones_x, m_cy, dh, dx, dy);
-}
 
 // ============================================================
 // INFO LINE RENDERING
-// col_x  = screen-space left edge of info column
-// col_w  = column width in pixels
-// align  = how text is positioned within the column
-//
-// For icon lines:
-//   Layout is always [icon][gap][text] as a unit.
-//   Left-align:   unit starts at col_x
-//   Right-align:  unit ends at col_x + col_w (icon at left of unit, text at right)
-//   Center:       unit centered in column
 // ============================================================
 static void draw_info_line(GContext *ctx, InfoLine *line, int y,
                             int col_x, int col_w, GTextAlignment align) {
@@ -595,10 +621,8 @@ static void draw_info_line(GContext *ctx, InfoLine *line, int y,
     bool large = ICON_LARGE;
     GSize sz = graphics_text_layout_get_content_size(
       line->text, font, GRect(0,0,200,20), GTextOverflowModeFill, GTextAlignmentLeft);
-    // Total width of [icon+gap+text] block, clamped to column
     int block_w = ICON_W + ICON_TEXT_GAP + sz.w;
     if (block_w > col_w) block_w = col_w;
-    // Where the icon starts within the column
     int icon_off;
     if      (align == GTextAlignmentLeft)  { icon_off = 0; }
     else if (align == GTextAlignmentRight) { icon_off = col_w - block_w; }
@@ -803,6 +827,43 @@ static void prv_update_targets(void) {
   s_target_h = prv_compute_target_h(ub.size.h, s_layout);
 }
 
+// Compute stacked geometry for a given target layout and ub_h
+// Returns tens_x, ones_x, col_x, col_w, and the alignment.
+static void prv_stacked_geom(int layout, int *tens_x, int *ones_x,
+                               int *col_x, int *col_w, GTextAlignment *align) {
+  if (layout == LAYOUT_STACK_R) {
+    // Digits right, info column left
+    // ALIGNMENT: RIGHT-aligned text (hugging toward digits on the right)
+    *ones_x = SCREEN_W - SIDE_MARGIN - SLOT_W;
+    *tens_x = *ones_x - SLOT_W;
+    *col_x  = SIDE_MARGIN;
+    *col_w  = *tens_x - SIDE_MARGIN - UNIT;
+    *align  = GTextAlignmentRight;
+  } else {
+    // Digits left (LAYOUT_STACK_L), info column right
+    // ALIGNMENT: LEFT-aligned text (hugging toward digits on the left)
+    *tens_x = SIDE_MARGIN;
+    *ones_x = SIDE_MARGIN + SLOT_W;
+    *col_x  = *ones_x + SLOT_W + UNIT;
+    *col_w  = SCREEN_W - *col_x - SIDE_MARGIN;
+    *align  = GTextAlignmentLeft;
+  }
+}
+
+// Draw stacked info lines with the given col_x (may be animated offset)
+static void prv_draw_stacked_info(GContext *ctx, struct tm *tm_now,
+                                   int col_x, int col_w, GTextAlignment align, int ub_top, int ub_bot) {
+  if (!tm_now || col_w <= 20) return;
+  int cn = build_lines(s_col_lines, INFO_LINES_MAX, s_cfg_stack, STACK_SLOTS, tm_now, false);
+  if (cn <= 0) return;
+  int draw_top = ub_top + STACK_INFO_MARGIN;
+  int draw_bot = ub_bot - STACK_INFO_MARGIN;
+  int avail_h  = draw_bot - draw_top - INFO_GLYPH_H;
+  int step     = (avail_h > 0 && STACK_INFO_LINES > 1) ? avail_h / (STACK_INFO_LINES - 1) : INFO_LINE_STEP;
+  for (int i = 0; i < cn; i++)
+    draw_info_line(ctx, &s_col_lines[i], draw_top + i * step, col_x, col_w, align);
+}
+
 // ============================================================
 // DRAW LAYER
 // ============================================================
@@ -835,8 +896,58 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   int h_tens=hr_12/10, h_ones=hr_12%10, m_tens=s_minute/10, m_ones=s_minute%10;
   int bot_margin = BOTTOM_MARGIN(ub_h);
   time_t now_t = time(NULL);
-  struct tm *tm_now = (s_phase == PHASE_DONE) ? localtime(&now_t) : NULL;
+  struct tm *tm_now = (s_phase == PHASE_DONE ||
+                       s_phase == PHASE_SPLIT_V || s_phase == PHASE_SPLIT_H ||
+                       s_phase == PHASE_MERGE_H || s_phase == PHASE_MERGE_V)
+                      ? localtime(&now_t) : NULL;
 
+  // ---- SPLIT / MERGE animation phases ----
+  if (s_phase == PHASE_SPLIT_V || s_phase == PHASE_SPLIT_H ||
+      s_phase == PHASE_MERGE_H || s_phase == PHASE_MERGE_V) {
+
+    int step = s_anim_step;
+    int tl = s_split_target_layout;
+    int tens_x, ones_x, col_x_final, col_w; GTextAlignment info_align;
+    prv_stacked_geom(tl, &tens_x, &ones_x, &col_x_final, &col_w, &info_align);
+
+    // Interpolate digit positions
+    int hr_cy = prv_lerp(s_split_hr_cy_start, s_split_hr_cy_end, step);
+    int mn_cy = prv_lerp(s_split_mn_cy_start, s_split_mn_cy_end, step);
+    int dh    = prv_lerp(s_split_h_start, s_split_h_end, step);
+
+    // Horizontal offset for digits (phase 2 only; 0 in phase 1)
+    int dx = prv_lerp(s_split_dx_start, s_split_dx_end, step);
+
+    // Info column x (slides in during phase 2; off-screen in phase 1)
+    int col_x = prv_lerp(s_split_info_start, s_split_info_end, step);
+
+    // During phase V only, also draw the colon converging toward center
+    // (colon y converges to screen center, then fades out in phase H)
+    if (s_phase == PHASE_SPLIT_V || s_phase == PHASE_MERGE_V) {
+      int full_cy = ub_top + MARGIN_OUTER + s_target_h / 2;
+      // colon at shared center, fading to invisible — just draw at shrinking h
+      graphics_context_set_fill_color(ctx, shadow_col);
+      draw_colon_vec(ctx, COLON_SLOT_X, full_cy, dh, SHADOW_DX, SHADOW_DY);
+      graphics_context_set_fill_color(ctx, s_fg);
+      draw_colon_vec(ctx, COLON_SLOT_X, full_cy, dh, 0, 0);
+    }
+
+    // Draw info if in phase H (or merge_H: info fading out)
+    if (s_phase == PHASE_SPLIT_H || s_phase == PHASE_MERGE_H) {
+      prv_draw_stacked_info(ctx, tm_now, col_x, col_w, info_align, ub_top, ub_bot);
+    }
+
+    // Draw digits
+    graphics_context_set_fill_color(ctx, shadow_col);
+    draw_split_pass(ctx, h_tens, h_ones, m_tens, m_ones,
+                    dh, tens_x, ones_x, hr_cy, mn_cy, dx + SHADOW_DX, SHADOW_DY);
+    graphics_context_set_fill_color(ctx, s_fg);
+    draw_split_pass(ctx, h_tens, h_ones, m_tens, m_ones,
+                    dh, tens_x, ones_x, hr_cy, mn_cy, dx, 0);
+    return;
+  }
+
+  // ---- Normal rendering ----
   if (s_layout == LAYOUT_FULL) {
     int cy = ub_top + MARGIN_OUTER + s_target_h / 2;
     graphics_context_set_fill_color(ctx, shadow_col);
@@ -867,48 +978,21 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     draw_digits_pass(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy, 0, 0);
 
   } else {
-    // Stacked layouts
+    // Stacked: LAYOUT_STACK_L or LAYOUT_STACK_R
     int dh    = prv_compute_stacked_h(ub_h);
     int h_cy  = ub_top + MARGIN_OUTER + dh / 2;
     int m_cy  = ub_bot - bot_margin - dh / 2;
-    int tens_x, ones_x, col_x, col_w;
-    GTextAlignment info_align;
+    int tens_x, ones_x, col_x, col_w; GTextAlignment info_align;
+    prv_stacked_geom(s_layout, &tens_x, &ones_x, &col_x, &col_w, &info_align);
 
-    if (s_layout == LAYOUT_STACK_R) {
-      // Digits right, info column left — text LEFT-aligned
-      ones_x = SCREEN_W - SIDE_MARGIN - SLOT_W;
-      tens_x = ones_x - SLOT_W;
-      col_x  = SIDE_MARGIN;
-      col_w  = tens_x - SIDE_MARGIN - UNIT;
-      info_align = GTextAlignmentLeft;
-    } else {
-      // Digits left, info column right — text RIGHT-aligned
-      tens_x = SIDE_MARGIN;
-      ones_x = SIDE_MARGIN + SLOT_W;
-      col_x  = ones_x + SLOT_W + UNIT;
-      col_w  = SCREEN_W - col_x - SIDE_MARGIN;
-      info_align = GTextAlignmentRight;
-    }
+    prv_draw_stacked_info(ctx, tm_now, col_x, col_w, info_align, ub_top, ub_bot);
 
-    if (tm_now && col_w > 20) {
-      // Use stacked-specific slot list (not the wide order array)
-      int cn = build_lines(s_col_lines, INFO_LINES_MAX, s_cfg_stack, STACK_SLOTS, tm_now, false);
-      if (cn > 0) {
-        // Fixed step: size for STACK_INFO_LINES from STACK_INFO_MARGIN top to bottom.
-        // draw_top/bot are relative to the full screen (ub_top/ub_bot), no MARGIN_OUTER added.
-        int draw_top = ub_top + STACK_INFO_MARGIN;
-        int draw_bot = ub_bot - STACK_INFO_MARGIN;
-        int avail_h  = draw_bot - draw_top - INFO_GLYPH_H;
-        int step     = (avail_h > 0 && STACK_INFO_LINES > 1) ? avail_h / (STACK_INFO_LINES - 1) : INFO_LINE_STEP;
-        for (int i = 0; i < cn; i++)
-          draw_info_line(ctx, &s_col_lines[i],
-            draw_top + i * step, col_x, col_w, info_align);
-      }
-    }
     graphics_context_set_fill_color(ctx, shadow_col);
-    draw_stacked_pass(ctx, h_tens, h_ones, m_tens, m_ones, dh, tens_x, ones_x, h_cy, m_cy, SHADOW_DX, SHADOW_DY);
+    draw_split_pass(ctx, h_tens, h_ones, m_tens, m_ones,
+                    dh, tens_x, ones_x, h_cy, m_cy, SHADOW_DX, SHADOW_DY);
     graphics_context_set_fill_color(ctx, s_fg);
-    draw_stacked_pass(ctx, h_tens, h_ones, m_tens, m_ones, dh, tens_x, ones_x, h_cy, m_cy, 0, 0);
+    draw_split_pass(ctx, h_tens, h_ones, m_tens, m_ones,
+                    dh, tens_x, ones_x, h_cy, m_cy, 0, 0);
   }
 }
 
@@ -941,6 +1025,145 @@ static void prv_start_blink(void) {
   s_h = s_target_h; s_going_down = true; s_anim_rep = 0; s_overshot = false;
   s_phase = PHASE_BLINK; layer_mark_dirty(s_canvas_layer); schedule(ANIM_STEP_MS);
 }
+
+// Start the split animation from LAYOUT_FULL to a stacked layout
+static void prv_start_split(int target_layout) {
+  Layer *root = window_get_root_layer(s_window);
+  GRect ub = layer_get_unobstructed_bounds(root);
+  int ub_top = ub.origin.y, ub_h = ub.size.h, ub_bot = ub_top + ub_h;
+  int bot_margin = BOTTOM_MARGIN(ub_h);
+
+  // Full-screen shared center
+  int full_cy = ub_top + MARGIN_OUTER + s_target_h / 2;
+
+  // Final stacked positions
+  int dh_final = prv_compute_stacked_h(ub_h);
+  int h_cy_final = ub_top + MARGIN_OUTER + dh_final / 2;
+  int m_cy_final = ub_bot - bot_margin - dh_final / 2;
+
+  // Phase V: cy starts at full_cy for both pairs, ends at their stacked positions
+  s_split_hr_cy_start = full_cy;  s_split_hr_cy_end = h_cy_final;
+  s_split_mn_cy_start = full_cy;  s_split_mn_cy_end = m_cy_final;
+  s_split_h_start     = s_h;      s_split_h_end     = dh_final;
+
+  // Phase V: no horizontal movement; phase H will add dx
+  s_split_dx_start = 0;  s_split_dx_end = 0;
+
+  // Phase V: info stays off-screen (col_x off-screen)
+  int tens_x, ones_x, col_x_final, col_w; GTextAlignment align;
+  prv_stacked_geom(target_layout, &tens_x, &ones_x, &col_x_final, &col_w, &align);
+  // Info slides in from the appropriate edge
+  int info_off_screen = (target_layout == LAYOUT_STACK_L) ? SCREEN_W : -col_w;
+  s_split_info_start = info_off_screen;
+  s_split_info_end   = info_off_screen;  // still off-screen during phase V
+
+  s_split_target_layout = target_layout;
+  s_anim_step = 0;
+  s_phase = PHASE_SPLIT_V;
+  schedule(SPLIT_MS);
+}
+
+// Transition from SPLIT_V to SPLIT_H
+static void prv_start_split_h(void) {
+  Layer *root = window_get_root_layer(s_window);
+  GRect ub = layer_get_unobstructed_bounds(root);
+  int ub_h = ub.size.h, ub_top = ub.origin.y, ub_bot = ub_top + ub_h;
+  int bot_margin = BOTTOM_MARGIN(ub_h);
+
+  int tl = s_split_target_layout;
+  int tens_x, ones_x, col_x_final, col_w; GTextAlignment align;
+  prv_stacked_geom(tl, &tens_x, &ones_x, &col_x_final, &col_w, &align);
+
+  int dh_final = prv_compute_stacked_h(ub_h);
+  int h_cy_final = ub_top + MARGIN_OUTER + dh_final / 2;
+  int m_cy_final = ub_bot - bot_margin - dh_final / 2;
+
+  // Hold vertical positions at their final stacked values
+  s_split_hr_cy_start = h_cy_final;  s_split_hr_cy_end = h_cy_final;
+  s_split_mn_cy_start = m_cy_final;  s_split_mn_cy_end = m_cy_final;
+  s_split_h_start     = dh_final;    s_split_h_end     = dh_final;
+
+  // The wide-mode digit positions have SLOT_H_TENS / SLOT_H_ONES etc.
+  // In stacked mode, both pairs use tens_x / ones_x.
+  // Horizontal shift: dx starts such that tens_x + dx = SLOT_H_TENS (wide position)
+  // and ends at dx=0 (stacked final position).
+  // Wide tens position is SLOT_H_TENS, stacked tens position is tens_x.
+  // So dx_start = SLOT_H_TENS - tens_x
+  s_split_dx_start = SLOT_H_TENS - tens_x;
+  s_split_dx_end   = 0;
+
+  // Info column slides in from off-screen
+  int info_off_screen = (tl == LAYOUT_STACK_L) ? SCREEN_W : (SIDE_MARGIN - col_w - UNIT);
+  s_split_info_start = info_off_screen;
+  s_split_info_end   = col_x_final;
+
+  s_anim_step = 0;
+  s_phase = PHASE_SPLIT_H;
+  schedule(SPLIT_MS);
+}
+
+// Start the merge animation from stacked back to LAYOUT_FULL
+static void prv_start_merge(void) {
+  // Swap start/end from the split animation — just reverse phase H then V
+  Layer *root = window_get_root_layer(s_window);
+  GRect ub = layer_get_unobstructed_bounds(root);
+  int ub_h = ub.size.h, ub_top = ub.origin.y, ub_bot = ub_top + ub_h;
+  int bot_margin = BOTTOM_MARGIN(ub_h);
+
+  int tl = s_layout;  // current stacked layout
+  int tens_x, ones_x, col_x_final, col_w; GTextAlignment align;
+  prv_stacked_geom(tl, &tens_x, &ones_x, &col_x_final, &col_w, &align);
+
+  int dh_final = prv_compute_stacked_h(ub_h);
+  int h_cy_final = ub_top + MARGIN_OUTER + dh_final / 2;
+  int m_cy_final = ub_bot - bot_margin - dh_final / 2;
+
+  // Phase MERGE_H: digits slide back to wide position (dx: 0 → SLOT_H_TENS - tens_x)
+  s_split_hr_cy_start = h_cy_final;  s_split_hr_cy_end = h_cy_final;
+  s_split_mn_cy_start = m_cy_final;  s_split_mn_cy_end = m_cy_final;
+  s_split_h_start     = dh_final;    s_split_h_end     = dh_final;
+  s_split_dx_start    = 0;
+  s_split_dx_end      = SLOT_H_TENS - tens_x;
+
+  int info_off_screen = (tl == LAYOUT_STACK_L) ? SCREEN_W : (SIDE_MARGIN - col_w - UNIT);
+  s_split_info_start  = col_x_final;
+  s_split_info_end    = info_off_screen;
+
+  s_split_target_layout = tl;
+  s_anim_step = 0;
+  s_phase = PHASE_MERGE_H;
+  schedule(SPLIT_MS);
+}
+
+// Transition MERGE_H → MERGE_V
+static void prv_start_merge_v(void) {
+  Layer *root = window_get_root_layer(s_window);
+  GRect ub = layer_get_unobstructed_bounds(root);
+  int ub_h = ub.size.h, ub_top = ub.origin.y, ub_bot = ub_top + ub_h;
+  int bot_margin = BOTTOM_MARGIN(ub_h);
+  int full_cy = ub_top + MARGIN_OUTER + s_target_h / 2;
+
+  int dh_final = prv_compute_stacked_h(ub_h);
+  int h_cy_final = ub_top + MARGIN_OUTER + dh_final / 2;
+  int m_cy_final = ub_bot - bot_margin - dh_final / 2;
+
+  s_split_hr_cy_start = h_cy_final;  s_split_hr_cy_end = full_cy;
+  s_split_mn_cy_start = m_cy_final;  s_split_mn_cy_end = full_cy;
+  s_split_h_start     = dh_final;    s_split_h_end     = s_target_h;
+  s_split_dx_start    = 0;           s_split_dx_end    = 0;
+  // Info already off-screen; keep it there
+  int tl = s_split_target_layout;
+  int tens_x_dummy, ones_x_dummy, col_x_final, col_w; GTextAlignment align;
+  prv_stacked_geom(tl, &tens_x_dummy, &ones_x_dummy, &col_x_final, &col_w, &align);
+  int info_off = (tl == LAYOUT_STACK_L) ? SCREEN_W : (SIDE_MARGIN - col_w - UNIT);
+  s_split_info_start = info_off;
+  s_split_info_end   = info_off;
+
+  s_anim_step = 0;
+  s_phase = PHASE_MERGE_V;
+  schedule(SPLIT_MS);
+}
+
 static void timer_cb(void *data) {
   s_timer = NULL;
   switch (s_phase) {
@@ -984,6 +1207,44 @@ static void timer_cb(void *data) {
         int h=s_target_h+OFF[s_anim_step]; s_h=h<H_ABSOLUTE_MIN?H_ABSOLUTE_MIN:h;
         layer_mark_dirty(s_canvas_layer); schedule(ANIM_STEP_MS);
       } else { s_h=s_target_h; s_phase=PHASE_DONE; layer_mark_dirty(s_canvas_layer); } break; }
+    case PHASE_SPLIT_V:
+      s_anim_step++;
+      layer_mark_dirty(s_canvas_layer);
+      if (s_anim_step < SPLIT_FRAMES) { schedule(SPLIT_MS); }
+      else { prv_start_split_h(); }
+      break;
+    case PHASE_SPLIT_H:
+      s_anim_step++;
+      layer_mark_dirty(s_canvas_layer);
+      if (s_anim_step < SPLIT_FRAMES) { schedule(SPLIT_MS); }
+      else {
+        // Done — snap to final stacked layout
+        s_layout = s_split_target_layout;
+        prv_update_targets();
+        s_phase = PHASE_DONE;
+        layer_mark_dirty(s_canvas_layer);
+      }
+      break;
+    case PHASE_MERGE_H:
+      s_anim_step++;
+      layer_mark_dirty(s_canvas_layer);
+      if (s_anim_step < SPLIT_FRAMES) { schedule(SPLIT_MS); }
+      else {
+        s_layout = LAYOUT_FULL;
+        prv_update_targets();
+        prv_start_merge_v();
+      }
+      break;
+    case PHASE_MERGE_V:
+      s_anim_step++;
+      layer_mark_dirty(s_canvas_layer);
+      if (s_anim_step < SPLIT_FRAMES) { schedule(SPLIT_MS); }
+      else {
+        s_h = s_target_h;
+        s_phase = PHASE_DONE;
+        layer_mark_dirty(s_canvas_layer);
+      }
+      break;
     case PHASE_DONE: break;
   }
 }
@@ -997,12 +1258,29 @@ static void unobstructed_change(AnimationProgress progress, void *ctx) {
 }
 static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   if (s_phase != PHASE_DONE) return;
-  s_layout = prv_next_layout(s_layout);
-  prv_update_targets();
-  if (s_layout == LAYOUT_FULL) {
-    s_phase = PHASE_SHAKE_CYCLE; s_anim_step = 0;
-    s_h = s_target_h; schedule(ANIM_STEP_MS);
-  } else { s_h_min = H_MIN; prv_start_anticipate(); }
+
+  int next = prv_next_layout(s_layout);
+
+  if (s_layout == LAYOUT_FULL && (next == LAYOUT_STACK_L || next == LAYOUT_STACK_R)) {
+    // Going from full → stacked: use split animation
+    prv_start_split(next);
+  } else if ((s_layout == LAYOUT_STACK_L || s_layout == LAYOUT_STACK_R) && next == LAYOUT_FULL) {
+    // Going from stacked → full: use merge animation
+    prv_start_merge();
+  } else {
+    // Non-split transition (full→info, info→stacked, stacked_L→stacked_R, etc.)
+    s_layout = next;
+    prv_update_targets();
+    if (s_layout == LAYOUT_FULL) {
+      s_phase = PHASE_SHAKE_CYCLE; s_anim_step = 0;
+      s_h = s_target_h; schedule(ANIM_STEP_MS);
+    } else if (s_layout == LAYOUT_STACK_L || s_layout == LAYOUT_STACK_R) {
+      // Instant snap for stacked_L ↔ stacked_R
+      layer_mark_dirty(s_canvas_layer);
+    } else {
+      s_h_min = H_MIN; prv_start_anticipate();
+    }
+  }
   layer_mark_dirty(s_canvas_layer);
 }
 #if defined(PBL_TOUCH)
@@ -1052,9 +1330,6 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
     t = dict_find(iter, MESSAGE_KEY_CfgSlot1 + i);
     if (t) s_cfg_order[i] = (int)t->value->int32;
   }
-  // Stacked slots: CfgSlot8..CfgSlot15 (keys 12..19 offset from CfgSlot1=5 → keys 12..19)
-  // Actually use MESSAGE_KEY_CfgSlot1 + 7 through +14 for stack slots 0..7
-  // TODO: add dedicated message keys in appinfo.json in next session
   t = dict_find(iter, MESSAGE_KEY_CfgTempUnit);    if(t) s_cfg_temp_f  =(t->value->int32==0);
   t = dict_find(iter, MESSAGE_KEY_CfgDistUnit);    if(t) s_cfg_dist_mi =(t->value->int32==0);
   t = dict_find(iter, MESSAGE_KEY_CfgClockFormat); if(t) s_cfg_24h     =(t->value->int32==1);
