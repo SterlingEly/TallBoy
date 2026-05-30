@@ -1,18 +1,11 @@
 // ============================================================
-// TallBoy — main.c  v3.51b
+// TallBoy — main.c  v3.51c
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.51b: Proper shake UX + debug cycle.
-//
-// NORMAL MODE (s_cfg_info_mode set via config page):
-//   INFO_MODE_WIDE     → shake toggles FULL ↔ LAYOUT_INFO
-//   INFO_MODE_STACK_L  → shake toggles FULL ↔ LAYOUT_STACK_L (animated)
-//   INFO_MODE_STACK_R  → shake toggles FULL ↔ LAYOUT_STACK_R (animated)
-//   INFO_MODE_ALWAYS   → layout is permanent, shake does nothing
-//
-// DEBUG MODE (INFO_MODE_DEBUG, default for testing):
-//   Cycles through all three, always returning to FULL between each:
-//   FULL → INFO → FULL → STACK_R → FULL → STACK_L → FULL → ...
+// v3.51c: Remove overshoot bounce from layout transitions.
+//   prv_ease_expand_step()       — with overshoot (tick animation only)
+//   prv_ease_expand_step_clean() — no overshoot (layout transitions)
+//   LAYOUT_INFO ↔ LAYOUT_FULL transitions now use clean expand.
 // ============================================================
 
 #include <pebble.h>
@@ -43,13 +36,12 @@ typedef enum {
 #define LAYOUT_STACK_L 3
 #define SHAKE_LEN      7
 
-// Info display mode (set by config page)
 typedef enum {
-  INFO_MODE_DEBUG   = 0,  // cycles all: FULL→INFO→FULL→STACK_R→FULL→STACK_L→FULL
-  INFO_MODE_WIDE    = 1,  // shake toggles FULL ↔ LAYOUT_INFO
-  INFO_MODE_STACK_L = 2,  // shake toggles FULL ↔ LAYOUT_STACK_L
-  INFO_MODE_STACK_R = 3,  // shake toggles FULL ↔ LAYOUT_STACK_R
-  INFO_MODE_ALWAYS  = 4,  // layout permanent, no shake toggle
+  INFO_MODE_DEBUG   = 0,
+  INFO_MODE_WIDE    = 1,
+  INFO_MODE_STACK_L = 2,
+  INFO_MODE_STACK_R = 3,
+  INFO_MODE_ALWAYS  = 4,
 } InfoMode;
 
 #if defined(PBL_PLATFORM_EMERY)
@@ -158,6 +150,9 @@ typedef enum {
   PHASE_SPLIT_V, PHASE_SPLIT_H, PHASE_MERGE_H, PHASE_MERGE_V
 } Phase;
 
+// Flag set by accel_tap_handler: suppress overshoot bounce for layout transitions
+static bool s_expand_no_overshoot = false;
+
 typedef void (*IconFn)(GContext*,int,int,GColor,bool);
 typedef struct {
   char text[INFO_LINE_BUF];
@@ -203,11 +198,9 @@ static int  s_cfg_stack[STACK_SLOTS] = { 1, 2, 6, 9, 11, 4, 15, 16 };
 static bool s_cfg_temp_f   = true;
 static bool s_cfg_dist_mi  = true;
 static bool s_cfg_24h      = false;
-static InfoMode s_cfg_info_mode = INFO_MODE_DEBUG;  // default: debug cycle
+static InfoMode s_cfg_info_mode = INFO_MODE_DEBUG;
 
-// Debug mode: which layout to show next when shaking from FULL
-// Cycles: INFO_MODE_WIDE(1) → INFO_MODE_STACK_R(3) → INFO_MODE_STACK_L(2) → ...
-static int s_debug_next = 0;  // index into debug cycle array
+static int s_debug_next = 0;
 static const int DEBUG_CYCLE[] = { LAYOUT_INFO, LAYOUT_STACK_R, LAYOUT_STACK_L };
 #define DEBUG_CYCLE_LEN 3
 
@@ -281,10 +274,6 @@ static void prv_info_count(int *above, int *below) {
   for (int i = 0; i < nb; i++) if (bb[i] != SLOT_EMPTY) b++;
   *above = a; *below = b;
 }
-
-// Returns the layout to go TO when shaking from FULL.
-// In normal mode: the configured layout.
-// In debug mode: cycles INFO → STACK_R → STACK_L → INFO → ...
 static int prv_info_layout_for_shake(void) {
   switch (s_cfg_info_mode) {
     case INFO_MODE_WIDE:    return LAYOUT_INFO;
@@ -825,8 +814,6 @@ static void prv_update_targets(void) {
   s_target_h = prv_compute_target_h(ub.size.h, s_layout);
 }
 
-// STACK_R: digits right, info left.  Text RIGHT-aligned (toward digits).
-// STACK_L: digits left, info right.  Text LEFT-aligned  (toward digits).
 static void prv_stacked_geom(int layout, int *tens_x, int *ones_x,
                                int *col_x, int *col_w, GTextAlignment *align) {
   if (layout == LAYOUT_STACK_R) {
@@ -980,6 +967,8 @@ static void schedule(uint32_t ms) {
   if (s_timer) app_timer_cancel(s_timer);
   s_timer = app_timer_register(ms, timer_cb, NULL);
 }
+
+// Expand with overshoot bounce — used for minute-tick animation only
 static bool prv_ease_expand_step(void) {
   if (s_overshot) { s_h = s_target_h; s_overshot = false; return true; }
   int step = (s_ease_idx < EASE_LEN) ? EASE[s_ease_idx] : EASE[EASE_LEN-1]; s_ease_idx++;
@@ -989,6 +978,15 @@ static bool prv_ease_expand_step(void) {
   if (s_h >= s_target_h) { s_h = s_target_h; return true; }
   schedule(ANIM_STEP_MS); return false;
 }
+
+// Expand without overshoot — used for layout transitions (INFO ↔ FULL)
+static bool prv_ease_expand_step_clean(void) {
+  int step = (s_ease_idx < EASE_LEN) ? EASE[s_ease_idx] : EASE[EASE_LEN-1]; s_ease_idx++;
+  s_h += step;
+  if (s_h >= s_target_h) { s_h = s_target_h; return true; }
+  schedule(ANIM_STEP_MS); return false;
+}
+
 static bool prv_ease_shrink_step(void) {
   int step = (s_ease_idx < EASE_LEN) ? EASE[EASE_LEN-1-s_ease_idx] : EASE[0]; s_ease_idx++;
   s_h -= step;
@@ -1097,17 +1095,23 @@ static void timer_cb(void *data) {
         if (s_h<=H_MIN) { s_h=H_MIN; s_going_down=false; s_overshot=false; }
         schedule(ANIM_STEP_MS);
       } else {
+        // Blink expand: use overshoot version for the punchy feel
         bool d=prv_ease_expand_step(); layer_mark_dirty(s_canvas_layer);
         if(d) { if(++s_anim_rep<BLINK_REPS){s_going_down=true;s_overshot=false;s_ease_idx=0;schedule(ANIM_STEP_MS);}
           else{s_phase=PHASE_DONE;layer_mark_dirty(s_canvas_layer);} }
       } break;
     case PHASE_SQUISH: {
       bool d=prv_ease_shrink_step(); layer_mark_dirty(s_canvas_layer);
-      if(d) { if(s_digit_pending){s_hour=s_pending_hour;s_minute=s_pending_minute;s_digit_pending=false;} s_phase=PHASE_EXPAND; s_ease_idx=0; s_overshot=false; schedule(ANIM_STEP_MS); }
-      else { schedule(ANIM_STEP_MS); } break; }
+      if(d) {
+        if(s_digit_pending){s_hour=s_pending_hour;s_minute=s_pending_minute;s_digit_pending=false;}
+        s_phase=PHASE_EXPAND; s_ease_idx=0; s_overshot=false; schedule(ANIM_STEP_MS);
+      } else { schedule(ANIM_STEP_MS); } break; }
     case PHASE_EXPAND: {
-      bool d=prv_ease_expand_step(); layer_mark_dirty(s_canvas_layer);
-      if(d){s_phase=PHASE_DONE;layer_mark_dirty(s_canvas_layer);} break; }
+      // Use clean (no bounce) expand for layout transitions; bouncy for tick
+      bool d = s_expand_no_overshoot ? prv_ease_expand_step_clean() : prv_ease_expand_step();
+      layer_mark_dirty(s_canvas_layer);
+      if(d){ s_expand_no_overshoot=false; s_phase=PHASE_DONE; layer_mark_dirty(s_canvas_layer); }
+      break; }
     case PHASE_SHAKE_CYCLE: {
       static const int OFF[SHAKE_LEN]={0,-UNIT,-(UNIT*2),-(UNIT*3),-(UNIT*2),-UNIT,0};
       if(++s_anim_step<SHAKE_LEN) {
@@ -1140,31 +1144,29 @@ static void unobstructed_change(AnimationProgress progress, void *ctx) {
 
 static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   if (s_phase != PHASE_DONE) return;
-
-  // Always-on mode: shake does nothing
   if (s_cfg_info_mode == INFO_MODE_ALWAYS) return;
 
   if (s_layout == LAYOUT_FULL) {
-    // Going TO info mode — determine which layout
     int target = prv_info_layout_for_shake();
     if (target == LAYOUT_STACK_L || target == LAYOUT_STACK_R) {
       prv_start_split_v(target);
     } else {
-      // LAYOUT_INFO: use squish/expand with target_h change
+      // LAYOUT_INFO: squish/expand, no bounce
       s_layout = target;
       prv_update_targets();
       s_h_min = H_MIN;
+      s_expand_no_overshoot = true;
       prv_start_anticipate();
     }
   } else {
-    // Going back to FULL from any info layout
     if (s_layout == LAYOUT_STACK_L || s_layout == LAYOUT_STACK_R) {
       prv_start_merge_h();
     } else {
-      // From LAYOUT_INFO: squish/expand back to full height
+      // From LAYOUT_INFO back to FULL: squish/expand, no bounce
       s_layout = LAYOUT_FULL;
       prv_update_targets();
       s_h_min = H_MIN;
+      s_expand_no_overshoot = true;
       prv_start_anticipate();
     }
   }
@@ -1192,6 +1194,7 @@ static void tick_handler(struct tm *t, TimeUnits units) {
   if (s_phase == PHASE_DONE && animated) {
     s_pending_hour=t->tm_hour; s_pending_minute=t->tm_min; s_digit_pending=true;
     s_h_min=H_MIN; prv_start_anticipate();
+    // tick uses default (bouncy) expand — s_expand_no_overshoot stays false
   } else if (s_phase == PHASE_SQUISH) {
     s_pending_hour=t->tm_hour; s_pending_minute=t->tm_min; s_digit_pending=true;
   } else { s_hour=t->tm_hour; s_minute=t->tm_min; layer_mark_dirty(s_canvas_layer); }
@@ -1251,9 +1254,8 @@ static void window_unload(Window *window) {
 static void init(void) {
   s_fg = GColorWhite; s_bg = GColorBlack;
   prv_load_config();
-  // If always-on mode, set starting layout to the appropriate info layout
   if (s_cfg_info_mode == INFO_MODE_ALWAYS) {
-    s_layout = LAYOUT_INFO;  // default; config page will set the specific layout
+    s_layout = LAYOUT_INFO;
   }
   s_window = window_create();
   window_set_background_color(s_window, GColorBlack);
