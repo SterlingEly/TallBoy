@@ -1,0 +1,13 @@
+static int prv_next_layout(int current) {
+  // Shake cycle: FULL → STACK_L → STACK_R → FULL
+  // FULL→STACK_L and STACK_R→FULL use the split/merge animation.
+  // STACK_L→STACK_R is an instant swap.
+  // LAYOUT_INFO is not part of the shake cycle (will be set via config page).
+  switch (current) {
+    case LAYOUT_FULL:    return LAYOUT_STACK_L;
+    case LAYOUT_STACK_L: return LAYOUT_STACK_R;
+    case LAYOUT_STACK_R: return LAYOUT_FULL;
+    case LAYOUT_INFO:    return LAYOUT_FULL;  // escape hatch if somehow in INFO
+    default:             return LAYOUT_FULL;
+  }
+}
