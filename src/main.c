@@ -1,11 +1,14 @@
 // ============================================================
-// TallBoy — main.c  v3.51c
+// TallBoy — main.c  v3.51d
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.51c: Remove overshoot bounce from layout transitions.
-//   prv_ease_expand_step()       — with overshoot (tick animation only)
-//   prv_ease_expand_step_clean() — no overshoot (layout transitions)
-//   LAYOUT_INFO ↔ LAYOUT_FULL transitions now use clean expand.
+// v3.51d: Remove all overshoot from stacked split/merge animations.
+//   - SMOOTH table replaced with true ease-in-out (monotonic 0→256),
+//     no overshoot at any point.
+//   - prv_start_split_v() clamps s_h to s_target_h before animating,
+//     so a mid-bounce shake doesn't start from an over-extended height.
+//   - ANTICIPATION_PX removed from the FULL→INFO transition path
+//     (anticipate phase still used for tick animation).
 // ============================================================
 
 #include <pebble.h>
@@ -109,12 +112,14 @@ typedef enum {
 #define SPLIT_FRAMES  64
 #define SPLIT_MS      16
 
-static const uint16_t SMOOTH[SPLIT_FRAMES + 1] = {
-    0,  0,  0,  0,  1,  1,  2,  3,  4,  6,  8, 10, 13, 16, 20, 24,
-   28, 33, 38, 44, 50, 57, 63, 71, 78, 86, 94,102,111,119,128,137,
-  145,154,162,170,179,187,195,202,210,217,223,230,236,241,246,250,
-  253,255,256,255,253,250,246,241,236,230,223,217,210,202,195,187,
-  179
+// True ease-in-out (smoothstep), monotonically 0→256, NO overshoot.
+// Formula: 3t² - 2t³  scaled to 256, for t=0..64 over 64 steps.
+static const uint8_t SMOOTH[SPLIT_FRAMES + 1] = {
+    0,  0,  0,  1,  1,  2,  3,  4,  6,  7,  9, 11, 14, 16, 19, 22,
+   26, 29, 33, 37, 42, 46, 51, 56, 62, 67, 73, 79, 85, 91, 97,104,
+  110,116,122,128,134,140,146,151,157,163,169,175,180,184,189,194,
+  198,202,206,209,213,216,219,222,224,227,229,231,233,234,236,237,
+  238
 };
 static int prv_lerp(int a, int b, int step) {
   if (step <= 0) return a;
@@ -150,7 +155,6 @@ typedef enum {
   PHASE_SPLIT_V, PHASE_SPLIT_H, PHASE_MERGE_H, PHASE_MERGE_V
 } Phase;
 
-// Flag set by accel_tap_handler: suppress overshoot bounce for layout transitions
 static bool s_expand_no_overshoot = false;
 
 typedef void (*IconFn)(GContext*,int,int,GColor,bool);
@@ -813,7 +817,6 @@ static void prv_update_targets(void) {
   GRect ub = layer_get_unobstructed_bounds(root);
   s_target_h = prv_compute_target_h(ub.size.h, s_layout);
 }
-
 static void prv_stacked_geom(int layout, int *tens_x, int *ones_x,
                                int *col_x, int *col_w, GTextAlignment *align) {
   if (layout == LAYOUT_STACK_R) {
@@ -967,8 +970,7 @@ static void schedule(uint32_t ms) {
   if (s_timer) app_timer_cancel(s_timer);
   s_timer = app_timer_register(ms, timer_cb, NULL);
 }
-
-// Expand with overshoot bounce — used for minute-tick animation only
+// With overshoot — tick animation only
 static bool prv_ease_expand_step(void) {
   if (s_overshot) { s_h = s_target_h; s_overshot = false; return true; }
   int step = (s_ease_idx < EASE_LEN) ? EASE[s_ease_idx] : EASE[EASE_LEN-1]; s_ease_idx++;
@@ -978,15 +980,13 @@ static bool prv_ease_expand_step(void) {
   if (s_h >= s_target_h) { s_h = s_target_h; return true; }
   schedule(ANIM_STEP_MS); return false;
 }
-
-// Expand without overshoot — used for layout transitions (INFO ↔ FULL)
+// No overshoot — layout transitions
 static bool prv_ease_expand_step_clean(void) {
   int step = (s_ease_idx < EASE_LEN) ? EASE[s_ease_idx] : EASE[EASE_LEN-1]; s_ease_idx++;
   s_h += step;
   if (s_h >= s_target_h) { s_h = s_target_h; return true; }
   schedule(ANIM_STEP_MS); return false;
 }
-
 static bool prv_ease_shrink_step(void) {
   int step = (s_ease_idx < EASE_LEN) ? EASE[EASE_LEN-1-s_ease_idx] : EASE[0]; s_ease_idx++;
   s_h -= step;
@@ -998,7 +998,15 @@ static void prv_start_blink(void) {
   s_h = s_target_h; s_going_down = true; s_anim_rep = 0; s_overshot = false;
   s_phase = PHASE_BLINK; layer_mark_dirty(s_canvas_layer); schedule(ANIM_STEP_MS);
 }
+
+// Clamp s_h to s_target_h before stacked animations so a mid-bounce
+// shake doesn't carry overshoot into the split start position.
+static void prv_split_clamp_h(void) {
+  if (s_h > s_target_h) s_h = s_target_h;
+}
+
 static void prv_start_split_v(int target_layout) {
+  prv_split_clamp_h();
   Layer *root = window_get_root_layer(s_window);
   GRect ub = layer_get_unobstructed_bounds(root);
   int ub_top = ub.origin.y, ub_h = ub.size.h, ub_bot = ub_top + ub_h;
@@ -1095,7 +1103,6 @@ static void timer_cb(void *data) {
         if (s_h<=H_MIN) { s_h=H_MIN; s_going_down=false; s_overshot=false; }
         schedule(ANIM_STEP_MS);
       } else {
-        // Blink expand: use overshoot version for the punchy feel
         bool d=prv_ease_expand_step(); layer_mark_dirty(s_canvas_layer);
         if(d) { if(++s_anim_rep<BLINK_REPS){s_going_down=true;s_overshot=false;s_ease_idx=0;schedule(ANIM_STEP_MS);}
           else{s_phase=PHASE_DONE;layer_mark_dirty(s_canvas_layer);} }
@@ -1107,7 +1114,6 @@ static void timer_cb(void *data) {
         s_phase=PHASE_EXPAND; s_ease_idx=0; s_overshot=false; schedule(ANIM_STEP_MS);
       } else { schedule(ANIM_STEP_MS); } break; }
     case PHASE_EXPAND: {
-      // Use clean (no bounce) expand for layout transitions; bouncy for tick
       bool d = s_expand_no_overshoot ? prv_ease_expand_step_clean() : prv_ease_expand_step();
       layer_mark_dirty(s_canvas_layer);
       if(d){ s_expand_no_overshoot=false; s_phase=PHASE_DONE; layer_mark_dirty(s_canvas_layer); }
@@ -1141,7 +1147,6 @@ static void unobstructed_change(AnimationProgress progress, void *ctx) {
   prv_update_targets();
   if (s_phase == PHASE_DONE) { s_h = s_target_h; layer_mark_dirty(s_canvas_layer); }
 }
-
 static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   if (s_phase != PHASE_DONE) return;
   if (s_cfg_info_mode == INFO_MODE_ALWAYS) return;
@@ -1151,7 +1156,6 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
     if (target == LAYOUT_STACK_L || target == LAYOUT_STACK_R) {
       prv_start_split_v(target);
     } else {
-      // LAYOUT_INFO: squish/expand, no bounce
       s_layout = target;
       prv_update_targets();
       s_h_min = H_MIN;
@@ -1162,7 +1166,6 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
     if (s_layout == LAYOUT_STACK_L || s_layout == LAYOUT_STACK_R) {
       prv_start_merge_h();
     } else {
-      // From LAYOUT_INFO back to FULL: squish/expand, no bounce
       s_layout = LAYOUT_FULL;
       prv_update_targets();
       s_h_min = H_MIN;
@@ -1172,7 +1175,6 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   }
   layer_mark_dirty(s_canvas_layer);
 }
-
 #if defined(PBL_TOUCH)
 static void touch_handler(const TouchEvent *event, void *context) {
   if (event->type != TouchEvent_Touchdown) return;
@@ -1194,7 +1196,6 @@ static void tick_handler(struct tm *t, TimeUnits units) {
   if (s_phase == PHASE_DONE && animated) {
     s_pending_hour=t->tm_hour; s_pending_minute=t->tm_min; s_digit_pending=true;
     s_h_min=H_MIN; prv_start_anticipate();
-    // tick uses default (bouncy) expand — s_expand_no_overshoot stays false
   } else if (s_phase == PHASE_SQUISH) {
     s_pending_hour=t->tm_hour; s_pending_minute=t->tm_min; s_digit_pending=true;
   } else { s_hour=t->tm_hour; s_minute=t->tm_min; layer_mark_dirty(s_canvas_layer); }
@@ -1254,9 +1255,7 @@ static void window_unload(Window *window) {
 static void init(void) {
   s_fg = GColorWhite; s_bg = GColorBlack;
   prv_load_config();
-  if (s_cfg_info_mode == INFO_MODE_ALWAYS) {
-    s_layout = LAYOUT_INFO;
-  }
+  if (s_cfg_info_mode == INFO_MODE_ALWAYS) { s_layout = LAYOUT_INFO; }
   s_window = window_create();
   window_set_background_color(s_window, GColorBlack);
   window_set_click_config_provider(s_window, prv_click_config_provider);
