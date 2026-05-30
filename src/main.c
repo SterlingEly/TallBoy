@@ -1,14 +1,18 @@
 // ============================================================
-// TallBoy — main.c  v3.51a
+// TallBoy — main.c  v3.51b
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.51a: Fix shake cycle — remove LAYOUT_INFO from cycle.
-//   New cycle: FULL → STACK_L (animated) → STACK_R (instant) → FULL (animated)
-//   INFO layout will be set via config page, not shake.
+// v3.51b: Proper shake UX + debug cycle.
 //
-// v3.51: Rewrote split/merge animation with correct per-pair x interpolation.
-//   SPLIT_V: digits stay at wide x positions, only cy/height animate.
-//   SPLIT_H: each pair slides independently to stacked x position.
+// NORMAL MODE (s_cfg_info_mode set via config page):
+//   INFO_MODE_WIDE     → shake toggles FULL ↔ LAYOUT_INFO
+//   INFO_MODE_STACK_L  → shake toggles FULL ↔ LAYOUT_STACK_L (animated)
+//   INFO_MODE_STACK_R  → shake toggles FULL ↔ LAYOUT_STACK_R (animated)
+//   INFO_MODE_ALWAYS   → layout is permanent, shake does nothing
+//
+// DEBUG MODE (INFO_MODE_DEBUG, default for testing):
+//   Cycles through all three, always returning to FULL between each:
+//   FULL → INFO → FULL → STACK_R → FULL → STACK_L → FULL → ...
 // ============================================================
 
 #include <pebble.h>
@@ -38,6 +42,15 @@ typedef enum {
 #define LAYOUT_STACK_R 2
 #define LAYOUT_STACK_L 3
 #define SHAKE_LEN      7
+
+// Info display mode (set by config page)
+typedef enum {
+  INFO_MODE_DEBUG   = 0,  // cycles all: FULL→INFO→FULL→STACK_R→FULL→STACK_L→FULL
+  INFO_MODE_WIDE    = 1,  // shake toggles FULL ↔ LAYOUT_INFO
+  INFO_MODE_STACK_L = 2,  // shake toggles FULL ↔ LAYOUT_STACK_L
+  INFO_MODE_STACK_R = 3,  // shake toggles FULL ↔ LAYOUT_STACK_R
+  INFO_MODE_ALWAYS  = 4,  // layout permanent, no shake toggle
+} InfoMode;
 
 #if defined(PBL_PLATFORM_EMERY)
   #define SCREEN_W           200
@@ -187,9 +200,16 @@ static InfoLine s_col_lines[INFO_LINES_MAX];
 static int  s_cfg_order[NUM_SLOTS + 1] = { 1,2,3,17,4,5,6 };
 #define STACK_SLOTS 8
 static int  s_cfg_stack[STACK_SLOTS] = { 1, 2, 6, 9, 11, 4, 15, 16 };
-static bool s_cfg_temp_f  = true;
-static bool s_cfg_dist_mi = true;
-static bool s_cfg_24h     = false;
+static bool s_cfg_temp_f   = true;
+static bool s_cfg_dist_mi  = true;
+static bool s_cfg_24h      = false;
+static InfoMode s_cfg_info_mode = INFO_MODE_DEBUG;  // default: debug cycle
+
+// Debug mode: which layout to show next when shaking from FULL
+// Cycles: INFO_MODE_WIDE(1) → INFO_MODE_STACK_R(3) → INFO_MODE_STACK_L(2) → ...
+static int s_debug_next = 0;  // index into debug cycle array
+static const int DEBUG_CYCLE[] = { LAYOUT_INFO, LAYOUT_STACK_R, LAYOUT_STACK_L };
+#define DEBUG_CYCLE_LEN 3
 
 #define PERSIST_CFG_ORDER    1
 #define PERSIST_CFG_FLAGS    2
@@ -211,7 +231,8 @@ static void prv_save_config(void) {
   int32_t packed = 0;
   for (int i = 0; i < NUM_SLOTS + 1; i++) packed |= (s_cfg_order[i] & 0x1f) << (i * 5);
   persist_write_int(PERSIST_CFG_ORDER, packed);
-  int32_t flags = (s_cfg_temp_f ? 1 : 0) | (s_cfg_dist_mi ? 2 : 0) | (s_cfg_24h ? 4 : 0);
+  int32_t flags = (s_cfg_temp_f ? 1 : 0) | (s_cfg_dist_mi ? 2 : 0) | (s_cfg_24h ? 4 : 0)
+                | ((int)s_cfg_info_mode << 3);
   persist_write_int(PERSIST_CFG_FLAGS, flags);
   int32_t sp_lo = 0, sp_hi = 0;
   for (int i = 0; i < 6; i++) sp_lo |= (s_cfg_stack[i] & 0x1f) << (i * 5);
@@ -229,6 +250,8 @@ static void prv_load_config(void) {
     s_cfg_temp_f  = (flags & 1) != 0;
     s_cfg_dist_mi = (flags & 2) != 0;
     s_cfg_24h     = (flags & 4) != 0;
+    int mode = (flags >> 3) & 0x7;
+    s_cfg_info_mode = (mode < 5) ? (InfoMode)mode : INFO_MODE_DEBUG;
   }
   if (persist_exists(PERSIST_CFG_STACK)) {
     int32_t sp_lo = persist_read_int(PERSIST_CFG_STACK);
@@ -259,15 +282,20 @@ static void prv_info_count(int *above, int *below) {
   *above = a; *below = b;
 }
 
-// Shake cycle: FULL → STACK_L (animated) → STACK_R (instant) → FULL (animated)
-// LAYOUT_INFO is not in the shake cycle; it's set via config page.
-static int prv_next_layout(int current) {
-  switch (current) {
-    case LAYOUT_FULL:    return LAYOUT_STACK_L;
-    case LAYOUT_STACK_L: return LAYOUT_STACK_R;
-    case LAYOUT_STACK_R: return LAYOUT_FULL;
-    case LAYOUT_INFO:    return LAYOUT_FULL;
-    default:             return LAYOUT_FULL;
+// Returns the layout to go TO when shaking from FULL.
+// In normal mode: the configured layout.
+// In debug mode: cycles INFO → STACK_R → STACK_L → INFO → ...
+static int prv_info_layout_for_shake(void) {
+  switch (s_cfg_info_mode) {
+    case INFO_MODE_WIDE:    return LAYOUT_INFO;
+    case INFO_MODE_STACK_L: return LAYOUT_STACK_L;
+    case INFO_MODE_STACK_R: return LAYOUT_STACK_R;
+    case INFO_MODE_DEBUG: {
+      int layout = DEBUG_CYCLE[s_debug_next];
+      s_debug_next = (s_debug_next + 1) % DEBUG_CYCLE_LEN;
+      return layout;
+    }
+    default: return LAYOUT_INFO;
   }
 }
 
@@ -1109,19 +1137,40 @@ static void unobstructed_change(AnimationProgress progress, void *ctx) {
   prv_update_targets();
   if (s_phase == PHASE_DONE) { s_h = s_target_h; layer_mark_dirty(s_canvas_layer); }
 }
+
 static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   if (s_phase != PHASE_DONE) return;
-  int next = prv_next_layout(s_layout);
-  if (s_layout == LAYOUT_FULL && next == LAYOUT_STACK_L) {
-    prv_start_split_v(LAYOUT_STACK_L);
-  } else if (s_layout == LAYOUT_STACK_R && next == LAYOUT_FULL) {
-    prv_start_merge_h();
+
+  // Always-on mode: shake does nothing
+  if (s_cfg_info_mode == INFO_MODE_ALWAYS) return;
+
+  if (s_layout == LAYOUT_FULL) {
+    // Going TO info mode — determine which layout
+    int target = prv_info_layout_for_shake();
+    if (target == LAYOUT_STACK_L || target == LAYOUT_STACK_R) {
+      prv_start_split_v(target);
+    } else {
+      // LAYOUT_INFO: use squish/expand with target_h change
+      s_layout = target;
+      prv_update_targets();
+      s_h_min = H_MIN;
+      prv_start_anticipate();
+    }
   } else {
-    // STACK_L → STACK_R: instant swap
-    s_layout = next; prv_update_targets();
-    layer_mark_dirty(s_canvas_layer);
+    // Going back to FULL from any info layout
+    if (s_layout == LAYOUT_STACK_L || s_layout == LAYOUT_STACK_R) {
+      prv_start_merge_h();
+    } else {
+      // From LAYOUT_INFO: squish/expand back to full height
+      s_layout = LAYOUT_FULL;
+      prv_update_targets();
+      s_h_min = H_MIN;
+      prv_start_anticipate();
+    }
   }
+  layer_mark_dirty(s_canvas_layer);
 }
+
 #if defined(PBL_TOUCH)
 static void touch_handler(const TouchEvent *event, void *context) {
   if (event->type != TouchEvent_Touchdown) return;
@@ -1202,6 +1251,10 @@ static void window_unload(Window *window) {
 static void init(void) {
   s_fg = GColorWhite; s_bg = GColorBlack;
   prv_load_config();
+  // If always-on mode, set starting layout to the appropriate info layout
+  if (s_cfg_info_mode == INFO_MODE_ALWAYS) {
+    s_layout = LAYOUT_INFO;  // default; config page will set the specific layout
+  }
   s_window = window_create();
   window_set_background_color(s_window, GColorBlack);
   window_set_click_config_provider(s_window, prv_click_config_provider);
