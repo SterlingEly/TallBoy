@@ -1,14 +1,24 @@
 // ============================================================
-// TallBoy — main.c  v3.51d
+// TallBoy — main.c  v3.52
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.51d: Remove all overshoot from stacked split/merge animations.
-//   - SMOOTH table replaced with true ease-in-out (monotonic 0→256),
-//     no overshoot at any point.
-//   - prv_start_split_v() clamps s_h to s_target_h before animating,
-//     so a mid-bounce shake doesn't start from an over-extended height.
-//   - ANTICIPATION_PX removed from the FULL→INFO transition path
-//     (anticipate phase still used for tick animation).
+// v3.52: Animation simplification + config redesign.
+//
+// ANIMATION:
+//   Stacked split/merge now uses pure LINEAR interpolation.
+//   No ease, no overshoot, no surprise at endpoints.
+//   Tick animation unchanged: anticipate + squish + overshoot-expand + blink.
+//   Wide info transitions: squish/expand, no overshoot (unchanged).
+//   Colon fixes:
+//     - SPLIT_V: dots converge to cy (fully merged) at end of phase
+//     - SPLIT_H: colon cy = screen center, exits same direction as info
+//
+// CONFIG REDESIGN:
+//   InfoMode  (shake behavior):  DEBUG / OFF / ALWAYS / SHAKE / SHAKE1MIN
+//   InfoLayout (which layout):   WIDE / STACK_L / STACK_R
+//   Wide slots:  s_cfg_wide[6]  — slots 0-2 = above time, 3-5 = below time
+//   Stack slots: s_cfg_stack[8] — shared between STACK_L and STACK_R
+//   Message keys fully reworked (see appinfo.json).
 // ============================================================
 
 #include <pebble.h>
@@ -39,13 +49,21 @@ typedef enum {
 #define LAYOUT_STACK_L 3
 #define SHAKE_LEN      7
 
+// How the info overlay behaves on shake
 typedef enum {
-  INFO_MODE_DEBUG   = 0,
-  INFO_MODE_WIDE    = 1,
-  INFO_MODE_STACK_L = 2,
-  INFO_MODE_STACK_R = 3,
-  INFO_MODE_ALWAYS  = 4,
+  INFO_MODE_DEBUG    = 0,  // cycle all layouts, always return to FULL between
+  INFO_MODE_OFF      = 1,  // never show info
+  INFO_MODE_ALWAYS   = 2,  // always on, no shake
+  INFO_MODE_SHAKE    = 3,  // shake to toggle FULL ↔ configured layout
+  INFO_MODE_SHAKE1   = 4,  // shake to show 1 minute, auto-returns to FULL
 } InfoMode;
+
+// Which layout to show when info is active
+typedef enum {
+  INFO_LAYOUT_WIDE    = 0,
+  INFO_LAYOUT_STACK_L = 1,
+  INFO_LAYOUT_STACK_R = 2,
+} InfoLayout;
 
 #if defined(PBL_PLATFORM_EMERY)
   #define SCREEN_W           200
@@ -105,29 +123,25 @@ typedef enum {
 
 #define STACK_INFO_MARGIN  (UNIT * 2)
 #define STACK_INFO_LINES   8
+#define WIDE_SLOTS         6
+#define STACK_SLOTS        8
 
 #define SHADOW_DX  HALF_UNIT
 #define SHADOW_DY  HALF_UNIT
 
-#define SPLIT_FRAMES  64
+// Split/merge animation: pure linear interpolation
+// 48 frames × 16ms ≈ 0.75 sec per phase
+#define SPLIT_FRAMES  48
 #define SPLIT_MS      16
 
-// True ease-in-out (smoothstep), monotonically 0→256, NO overshoot.
-// Formula: 3t² - 2t³  scaled to 256, for t=0..64 over 64 steps.
-static const uint8_t SMOOTH[SPLIT_FRAMES + 1] = {
-    0,  0,  0,  1,  1,  2,  3,  4,  6,  7,  9, 11, 14, 16, 19, 22,
-   26, 29, 33, 37, 42, 46, 51, 56, 62, 67, 73, 79, 85, 91, 97,104,
-  110,116,122,128,134,140,146,151,157,163,169,175,180,184,189,194,
-  198,202,206,209,213,216,219,222,224,227,229,231,233,234,236,237,
-  238
-};
+// Linear lerp for stacked animations — no curve, no overshoot
 static int prv_lerp(int a, int b, int step) {
   if (step <= 0) return a;
   if (step >= SPLIT_FRAMES) return b;
-  int s = (int)SMOOTH[step];
-  return a + ((b - a) * s + 128) / 256;
+  return a + ((b - a) * step) / SPLIT_FRAMES;
 }
 
+// Squish/expand animation for tick and wide info transitions
 static const int EASE[10] = { 4, 6, 8, 10, 12, 12, 10, 8, 6, 4 };
 #define EASE_LEN  10
 #define ANIM_STEP_MS      16
@@ -139,6 +153,9 @@ static const int EASE[10] = { 4, 6, 8, 10, 12, 12, 10, 8, 6, 4 };
 #define BLINK_REPS        2
 #define STEPS_AVG_MAX_MIN 120
 #define DOT               " \xc2\xb7 "
+
+// Auto-return timer for SHAKE1 mode (1 minute = 60000ms)
+#define SHAKE1_TIMEOUT_MS 60000
 
 #if defined(PBL_TOUCH)
 static const uint32_t TOUCH_VIBE_MS[] = {50};
@@ -167,6 +184,9 @@ typedef struct {
   int  icon_extra;
 } InfoLine;
 
+// ============================================================
+// STATE
+// ============================================================
 static Window    *s_window;
 static Layer     *s_canvas_layer;
 static int        s_hour = 0, s_minute = 0;
@@ -178,6 +198,7 @@ static bool       s_going_down = true, s_overshot = false;
 static int        s_countdown_digit = 9;
 static CdSubPhase s_cd_sub = CD_HOLD_MAX;
 static AppTimer  *s_timer = NULL;
+static AppTimer  *s_shake1_timer = NULL;  // auto-return for SHAKE1 mode
 static bool       s_digit_pending = false;
 static int        s_pending_hour = 0, s_pending_minute = 0;
 static int        s_battery_pct = 100;
@@ -195,42 +216,55 @@ static InfoLine s_above_lines[INFO_LINES_MAX];
 static InfoLine s_below_lines[INFO_LINES_MAX];
 static InfoLine s_col_lines[INFO_LINES_MAX];
 
-#define TIME_MARKER 17
-static int  s_cfg_order[NUM_SLOTS + 1] = { 1,2,3,17,4,5,6 };
-#define STACK_SLOTS 8
-static int  s_cfg_stack[STACK_SLOTS] = { 1, 2, 6, 9, 11, 4, 15, 16 };
-static bool s_cfg_temp_f   = true;
-static bool s_cfg_dist_mi  = true;
-static bool s_cfg_24h      = false;
-static InfoMode s_cfg_info_mode = INFO_MODE_DEBUG;
+// ---- Config ----
+// Wide mode: 6 slots, indices 0-2 above time, 3-5 below time
+static int  s_cfg_wide[WIDE_SLOTS]  = { 1, 3, 0, 4, 6, 15 };
+// Stacked mode: 8 slots, shared between L and R
+static int  s_cfg_stack[STACK_SLOTS] = { 1, 3, 6, 9, 11, 4, 15, 16 };
+static bool s_cfg_temp_f    = true;
+static bool s_cfg_dist_mi   = true;
+static bool s_cfg_24h       = false;
+static InfoMode   s_cfg_info_mode   = INFO_MODE_DEBUG;
+static InfoLayout s_cfg_info_layout = INFO_LAYOUT_STACK_L;
 
+// Debug cycle: advances through all layouts, always returns to FULL between
 static int s_debug_next = 0;
-static const int DEBUG_CYCLE[] = { LAYOUT_INFO, LAYOUT_STACK_R, LAYOUT_STACK_L };
+static const int DEBUG_CYCLE_LAYOUTS[] = { LAYOUT_INFO, LAYOUT_STACK_R, LAYOUT_STACK_L };
 #define DEBUG_CYCLE_LEN 3
 
-#define PERSIST_CFG_ORDER    1
-#define PERSIST_CFG_FLAGS    2
-#define PERSIST_CFG_STACK    3
-#define PERSIST_CFG_STACK_HI 4
+// Persist keys (v2 config — bumped to avoid loading old packed format)
+#define PERSIST_CFG_VERSION  0   // single byte: version number
+#define PERSIST_CFG_FLAGS    1   // flags: temp/dist/24h/info_mode/info_layout
+#define PERSIST_CFG_WIDE     2   // wide slots packed
+#define PERSIST_CFG_STACK    3   // stack slots lo
+#define PERSIST_CFG_STACK_HI 4   // stack slots hi
+#define CFG_VERSION          2   // increment to invalidate old configs
 
+// Split animation state
 static int s_sv_hr_cy_s, s_sv_hr_cy_e;
 static int s_sv_mn_cy_s, s_sv_mn_cy_e;
 static int s_sv_h_s,     s_sv_h_e;
+static int s_sv_cy;              // screen center cy, locked at split start
 static int s_sh_hr_tx_s, s_sh_hr_tx_e;
 static int s_sh_mn_tx_s, s_sh_mn_tx_e;
 static int s_sh_hr_cy,   s_sh_mn_cy;
 static int s_sh_h;
 static int s_sh_col_s,   s_sh_col_e;
-static int s_sh_colon_s, s_sh_colon_e;
+static int s_sh_colon_x_s, s_sh_colon_x_e;  // colon x slide
+static int s_sh_colon_cy;                    // colon cy (screen center)
 static int s_split_target_layout;
 
 static void prv_save_config(void) {
-  int32_t packed = 0;
-  for (int i = 0; i < NUM_SLOTS + 1; i++) packed |= (s_cfg_order[i] & 0x1f) << (i * 5);
-  persist_write_int(PERSIST_CFG_ORDER, packed);
-  int32_t flags = (s_cfg_temp_f ? 1 : 0) | (s_cfg_dist_mi ? 2 : 0) | (s_cfg_24h ? 4 : 0)
-                | ((int)s_cfg_info_mode << 3);
+  persist_write_int(PERSIST_CFG_VERSION, CFG_VERSION);
+  int32_t flags = (s_cfg_temp_f  ? 1 : 0)
+                | (s_cfg_dist_mi ? 2 : 0)
+                | (s_cfg_24h     ? 4 : 0)
+                | ((int)s_cfg_info_mode   << 3)   // bits 3-5
+                | ((int)s_cfg_info_layout << 6);  // bits 6-7
   persist_write_int(PERSIST_CFG_FLAGS, flags);
+  int32_t wp = 0;
+  for (int i = 0; i < WIDE_SLOTS; i++) wp |= (s_cfg_wide[i] & 0x1f) << (i * 5);
+  persist_write_int(PERSIST_CFG_WIDE, wp);
   int32_t sp_lo = 0, sp_hi = 0;
   for (int i = 0; i < 6; i++) sp_lo |= (s_cfg_stack[i] & 0x1f) << (i * 5);
   for (int i = 0; i < 2; i++) sp_hi |= (s_cfg_stack[6+i] & 0x1f) << (i * 5);
@@ -238,17 +272,24 @@ static void prv_save_config(void) {
   persist_write_int(PERSIST_CFG_STACK_HI, sp_hi);
 }
 static void prv_load_config(void) {
-  if (persist_exists(PERSIST_CFG_ORDER)) {
-    int32_t packed = persist_read_int(PERSIST_CFG_ORDER);
-    for (int i = 0; i < NUM_SLOTS + 1; i++) s_cfg_order[i] = (packed >> (i * 5)) & 0x1f;
+  // Version check — if missing or old, use defaults and bail
+  if (!persist_exists(PERSIST_CFG_VERSION) ||
+      persist_read_int(PERSIST_CFG_VERSION) != CFG_VERSION) {
+    return;
   }
   if (persist_exists(PERSIST_CFG_FLAGS)) {
     int32_t flags = persist_read_int(PERSIST_CFG_FLAGS);
-    s_cfg_temp_f  = (flags & 1) != 0;
-    s_cfg_dist_mi = (flags & 2) != 0;
-    s_cfg_24h     = (flags & 4) != 0;
-    int mode = (flags >> 3) & 0x7;
-    s_cfg_info_mode = (mode < 5) ? (InfoMode)mode : INFO_MODE_DEBUG;
+    s_cfg_temp_f       = (flags & 1) != 0;
+    s_cfg_dist_mi      = (flags & 2) != 0;
+    s_cfg_24h          = (flags & 4) != 0;
+    int mode   = (flags >> 3) & 0x7;
+    int layout = (flags >> 6) & 0x3;
+    s_cfg_info_mode   = (mode   < 5) ? (InfoMode)mode     : INFO_MODE_DEBUG;
+    s_cfg_info_layout = (layout < 3) ? (InfoLayout)layout : INFO_LAYOUT_STACK_L;
+  }
+  if (persist_exists(PERSIST_CFG_WIDE)) {
+    int32_t wp = persist_read_int(PERSIST_CFG_WIDE);
+    for (int i = 0; i < WIDE_SLOTS; i++) s_cfg_wide[i] = (wp >> (i * 5)) & 0x1f;
   }
   if (persist_exists(PERSIST_CFG_STACK)) {
     int32_t sp_lo = persist_read_int(PERSIST_CFG_STACK);
@@ -257,37 +298,23 @@ static void prv_load_config(void) {
     for (int i = 0; i < 2; i++) s_cfg_stack[6+i] = (sp_hi >> (i * 5)) & 0x1f;
   }
 }
-static int prv_time_pos(void) {
-  for (int i = 0; i < NUM_SLOTS + 1; i++)
-    if (s_cfg_order[i] == TIME_MARKER) return i;
-  return 3;
-}
-static void prv_split_slots(int *above_slots, int *n_above, int *below_slots, int *n_below) {
-  int tp = prv_time_pos(); *n_above = 0; *n_below = 0;
-  for (int i = 0; i < NUM_SLOTS + 1; i++) {
-    if (s_cfg_order[i] == TIME_MARKER) continue;
-    if (i < tp) above_slots[(*n_above)++] = s_cfg_order[i];
-    else        below_slots[(*n_below)++] = s_cfg_order[i];
-  }
-}
-static void prv_info_count(int *above, int *below) {
-  int ab[NUM_SLOTS], bb[NUM_SLOTS], na = 0, nb = 0;
-  prv_split_slots(ab, &na, bb, &nb);
-  int a = 0, b = 0;
-  for (int i = 0; i < na; i++) if (ab[i] != SLOT_EMPTY) a++;
-  for (int i = 0; i < nb; i++) if (bb[i] != SLOT_EMPTY) b++;
-  *above = a; *below = b;
-}
+
+// Return the layout to transition to on a shake from FULL
 static int prv_info_layout_for_shake(void) {
   switch (s_cfg_info_mode) {
-    case INFO_MODE_WIDE:    return LAYOUT_INFO;
-    case INFO_MODE_STACK_L: return LAYOUT_STACK_L;
-    case INFO_MODE_STACK_R: return LAYOUT_STACK_R;
     case INFO_MODE_DEBUG: {
-      int layout = DEBUG_CYCLE[s_debug_next];
+      int layout = DEBUG_CYCLE_LAYOUTS[s_debug_next];
       s_debug_next = (s_debug_next + 1) % DEBUG_CYCLE_LEN;
       return layout;
     }
+    case INFO_MODE_SHAKE:
+    case INFO_MODE_SHAKE1:
+      switch (s_cfg_info_layout) {
+        case INFO_LAYOUT_WIDE:    return LAYOUT_INFO;
+        case INFO_LAYOUT_STACK_L: return LAYOUT_STACK_L;
+        case INFO_LAYOUT_STACK_R: return LAYOUT_STACK_R;
+        default:                  return LAYOUT_INFO;
+      }
     default: return LAYOUT_INFO;
   }
 }
@@ -582,11 +609,19 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int h, 
   #undef HBAR
   #undef NUB
 }
-static void draw_colon_vec(GContext *ctx, int slot_x, int cy, int h, int dx, int dy) {
+
+// Draw colon with animated dot separation.
+// dot_sep: half-distance between dots (i.e. h/4 normally). 0 = merged at cy.
+static void draw_colon_animated(GContext *ctx, int slot_x, int cy, int dot_sep, int dx, int dy) {
   int r = UNIT / 2, ddx = slot_x + SLOT_W / 2 + dx;
-  graphics_fill_radial(ctx, GRect(ddx-r, cy-h/4-r+2+dy, r*2, r*2), GOvalScaleModeFitCircle, (uint16_t)r, 0, DEG_TO_TRIGANGLE(360));
-  graphics_fill_radial(ctx, GRect(ddx-r, cy+h/4-r-2+dy, r*2, r*2), GOvalScaleModeFitCircle, (uint16_t)r, 0, DEG_TO_TRIGANGLE(360));
+  graphics_fill_radial(ctx, GRect(ddx-r, cy-dot_sep-r+dy, r*2, r*2), GOvalScaleModeFitCircle, (uint16_t)r, 0, DEG_TO_TRIGANGLE(360));
+  graphics_fill_radial(ctx, GRect(ddx-r, cy+dot_sep-r+dy, r*2, r*2), GOvalScaleModeFitCircle, (uint16_t)r, 0, DEG_TO_TRIGANGLE(360));
 }
+// Normal colon (full separation, for static rendering and SPLIT_H)
+static void draw_colon_vec(GContext *ctx, int slot_x, int cy, int h, int dx, int dy) {
+  draw_colon_animated(ctx, slot_x, cy, h/4 - 2, dx, dy);
+}
+
 static void draw_pair(GContext *ctx, int tens, int ones, int tens_x, int ones_x,
                        int cy, int h, int dx, int dy) {
   draw_digit_vec(ctx, tens, tens_x, cy, h, dx, dy);
@@ -673,8 +708,8 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       else   { snprintf(buf,len,"Jan 1"); }
       return true;
     case SLOT_DAY_DATE:
-      if (t) { snprintf(buf,len,"%s, %s %d",s_day_short[t->tm_wday],s_month_names[t->tm_mon],t->tm_mday); }
-      else   { snprintf(buf,len,"Mon, Jan 1"); }
+      if (t) { snprintf(buf,len,"%s %s %d",s_day_short[t->tm_wday],s_month_names[t->tm_mon],t->tm_mday); }
+      else   { snprintf(buf,len,"Sat May 30"); }
       return true;
     case SLOT_TEMP:
       if (s_weather_temp_f > -900) {
@@ -799,12 +834,16 @@ static int build_lines(InfoLine *lines, int max, int *slots, int n_slots, struct
   }
   return count;
 }
+
 static int prv_info_block_h(int n, int step) { return n <= 0 ? 0 : INFO_GLYPH_H + (n-1) * step; }
 static int prv_compute_target_h(int ub_h, int layout) {
   if (layout != LAYOUT_INFO) return ub_h - MARGIN_OUTER - BOTTOM_MARGIN(ub_h);
-  int a, b; prv_info_count(&a, &b);
-  int reserved = HALF_UNIT + prv_info_block_h(a, INFO_LINE_STEP_WIDE) + HALF_UNIT
-               + HALF_UNIT + prv_info_block_h(b, INFO_LINE_STEP_WIDE) + HALF_UNIT;
+  // Wide: reserve space for 3 lines above and 3 below
+  int n_above = 0, n_below = 0;
+  for (int i = 0; i < 3; i++) if (s_cfg_wide[i]   != SLOT_EMPTY) n_above++;
+  for (int i = 3; i < 6; i++) if (s_cfg_wide[i]   != SLOT_EMPTY) n_below++;
+  int reserved = HALF_UNIT + prv_info_block_h(n_above, INFO_LINE_STEP_WIDE) + HALF_UNIT
+               + HALF_UNIT + prv_info_block_h(n_below, INFO_LINE_STEP_WIDE) + HALF_UNIT;
   int h = ub_h - reserved;
   return h < H_MIN ? H_MIN : h;
 }
@@ -817,6 +856,8 @@ static void prv_update_targets(void) {
   GRect ub = layer_get_unobstructed_bounds(root);
   s_target_h = prv_compute_target_h(ub.size.h, s_layout);
 }
+// STACK_R: digits right, info left.  Text RIGHT-aligned (toward digits).
+// STACK_L: digits left, info right.  Text LEFT-aligned  (toward digits).
 static void prv_stacked_geom(int layout, int *tens_x, int *ones_x,
                                int *col_x, int *col_w, GTextAlignment *align) {
   if (layout == LAYOUT_STACK_R) {
@@ -842,7 +883,7 @@ static void prv_draw_stacked_info(GContext *ctx, struct tm *tm_now,
   int draw_top = ub_top + STACK_INFO_MARGIN;
   int draw_bot = ub_bot - STACK_INFO_MARGIN;
   int avail_h  = draw_bot - draw_top - INFO_GLYPH_H;
-  int step     = (avail_h > 0 && STACK_INFO_LINES > 1) ? avail_h / (STACK_INFO_LINES - 1) : INFO_LINE_STEP;
+  int step     = (avail_h > 0 && cn > 1) ? avail_h / (cn - 1) : INFO_LINE_STEP;
   for (int i = 0; i < cn; i++)
     draw_info_line(ctx, &s_col_lines[i], draw_top + i * step, col_x, col_w, align);
 }
@@ -881,16 +922,21 @@ static void draw_layer(Layer *layer, GContext *ctx) {
                        s_phase == PHASE_MERGE_H || s_phase == PHASE_MERGE_V)
                       ? localtime(&now_t) : NULL;
 
+  // ---- SPLIT_V / MERGE_V: vertical animation, digits at wide x positions ----
+  // Colon dots converge toward cy as height shrinks.
   if (s_phase == PHASE_SPLIT_V || s_phase == PHASE_MERGE_V) {
-    int step = s_anim_step;
+    int step  = s_anim_step;
     int hr_cy = prv_lerp(s_sv_hr_cy_s, s_sv_hr_cy_e, step);
     int mn_cy = prv_lerp(s_sv_mn_cy_s, s_sv_mn_cy_e, step);
     int dh    = prv_lerp(s_sv_h_s, s_sv_h_e, step);
-    int cy    = ub_top + MARGIN_OUTER + s_target_h / 2;
+    // Colon dot separation: from h/4-2 down to 0 (dots merge at cy)
+    int dot_sep_start = s_sv_h_s / 4 - 2;
+    int dot_sep = prv_lerp(dot_sep_start, 0, step);
+    if (dot_sep < 0) dot_sep = 0;
     graphics_context_set_fill_color(ctx, shadow_col);
-    draw_colon_vec(ctx, COLON_SLOT_X, cy, dh, SHADOW_DX, SHADOW_DY);
+    draw_colon_animated(ctx, COLON_SLOT_X, s_sv_cy, dot_sep, SHADOW_DX, SHADOW_DY);
     graphics_context_set_fill_color(ctx, s_fg);
-    draw_colon_vec(ctx, COLON_SLOT_X, cy, dh, 0, 0);
+    draw_colon_animated(ctx, COLON_SLOT_X, s_sv_cy, dot_sep, 0, 0);
     graphics_context_set_fill_color(ctx, shadow_col);
     draw_pair(ctx, h_tens, h_ones, SLOT_H_TENS, SLOT_H_ONES, hr_cy, dh, SHADOW_DX, SHADOW_DY);
     draw_pair(ctx, m_tens, m_ones, SLOT_M_TENS, SLOT_M_ONES, mn_cy, dh, SHADOW_DX, SHADOW_DY);
@@ -899,20 +945,24 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     draw_pair(ctx, m_tens, m_ones, SLOT_M_TENS, SLOT_M_ONES, mn_cy, dh, 0, 0);
     return;
   }
+
+  // ---- SPLIT_H / MERGE_H: horizontal slide ----
+  // Colon at screen center, slides in same direction as info (opposite to STACK_L digits)
   if (s_phase == PHASE_SPLIT_H || s_phase == PHASE_MERGE_H) {
     int step = s_anim_step;
     int hr_tens_x = prv_lerp(s_sh_hr_tx_s, s_sh_hr_tx_e, step);
     int mn_tens_x = prv_lerp(s_sh_mn_tx_s, s_sh_mn_tx_e, step);
     int col_x     = prv_lerp(s_sh_col_s,   s_sh_col_e,   step);
-    int colon_x   = prv_lerp(s_sh_colon_s, s_sh_colon_e, step);
+    int colon_x   = prv_lerp(s_sh_colon_x_s, s_sh_colon_x_e, step);
     int tl = s_split_target_layout;
     int dummy_tx, dummy_ox, col_x_final, col_w; GTextAlignment info_align;
     prv_stacked_geom(tl, &dummy_tx, &dummy_ox, &col_x_final, &col_w, &info_align);
     prv_draw_stacked_info(ctx, tm_now, col_x, col_w, info_align, ub_top, ub_bot);
+    // Draw colon at screen center, sliding off toward info side
     graphics_context_set_fill_color(ctx, shadow_col);
-    draw_colon_vec(ctx, colon_x, s_sh_hr_cy, s_sh_h, SHADOW_DX, SHADOW_DY);
+    draw_colon_vec(ctx, colon_x, s_sh_colon_cy, s_sh_h, SHADOW_DX, SHADOW_DY);
     graphics_context_set_fill_color(ctx, s_fg);
-    draw_colon_vec(ctx, colon_x, s_sh_hr_cy, s_sh_h, 0, 0);
+    draw_colon_vec(ctx, colon_x, s_sh_colon_cy, s_sh_h, 0, 0);
     graphics_context_set_fill_color(ctx, shadow_col);
     draw_pair(ctx, h_tens, h_ones, hr_tens_x, hr_tens_x + SLOT_W, s_sh_hr_cy, s_sh_h, SHADOW_DX, SHADOW_DY);
     draw_pair(ctx, m_tens, m_ones, mn_tens_x, mn_tens_x + SLOT_W, s_sh_mn_cy, s_sh_h, SHADOW_DX, SHADOW_DY);
@@ -922,17 +972,21 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     return;
   }
 
+  // ---- Normal rendering ----
   if (s_layout == LAYOUT_FULL) {
     int cy = ub_top + MARGIN_OUTER + s_target_h / 2;
     graphics_context_set_fill_color(ctx, shadow_col);
     draw_digits_pass(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy, SHADOW_DX, SHADOW_DY);
     graphics_context_set_fill_color(ctx, s_fg);
     draw_digits_pass(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy, 0, 0);
+
   } else if (s_layout == LAYOUT_INFO) {
-    int above_s[NUM_SLOTS], below_s[NUM_SLOTS], na=0, nb=0;
-    prv_split_slots(above_s, &na, below_s, &nb);
-    int an = build_lines(s_above_lines, INFO_LINES_MAX, above_s, na, tm_now, true);
-    int bn = build_lines(s_below_lines, INFO_LINES_MAX, below_s, nb, tm_now, true);
+    // Wide mode: 3 slots above, 3 below
+    int above_s[3], below_s[3];
+    for (int i = 0; i < 3; i++) above_s[i] = s_cfg_wide[i];
+    for (int i = 0; i < 3; i++) below_s[i] = s_cfg_wide[3+i];
+    int an = build_lines(s_above_lines, 3, above_s, 3, tm_now, true);
+    int bn = build_lines(s_below_lines, 3, below_s, 3, tm_now, true);
     int above_start = ub_top + HALF_UNIT;
     int above_end   = above_start + prv_info_block_h(an, INFO_LINE_STEP_WIDE);
     int below_end   = ub_bot - HALF_UNIT;
@@ -948,6 +1002,7 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     draw_digits_pass(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy, SHADOW_DX, SHADOW_DY);
     graphics_context_set_fill_color(ctx, s_fg);
     draw_digits_pass(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy, 0, 0);
+
   } else {
     int dh = prv_compute_stacked_h(ub_h);
     int h_cy = ub_top + MARGIN_OUTER + dh / 2;
@@ -970,7 +1025,7 @@ static void schedule(uint32_t ms) {
   if (s_timer) app_timer_cancel(s_timer);
   s_timer = app_timer_register(ms, timer_cb, NULL);
 }
-// With overshoot — tick animation only
+// With overshoot bounce — tick and blink animations
 static bool prv_ease_expand_step(void) {
   if (s_overshot) { s_h = s_target_h; s_overshot = false; return true; }
   int step = (s_ease_idx < EASE_LEN) ? EASE[s_ease_idx] : EASE[EASE_LEN-1]; s_ease_idx++;
@@ -980,7 +1035,7 @@ static bool prv_ease_expand_step(void) {
   if (s_h >= s_target_h) { s_h = s_target_h; return true; }
   schedule(ANIM_STEP_MS); return false;
 }
-// No overshoot — layout transitions
+// No overshoot — wide info layout transitions
 static bool prv_ease_expand_step_clean(void) {
   int step = (s_ease_idx < EASE_LEN) ? EASE[s_ease_idx] : EASE[EASE_LEN-1]; s_ease_idx++;
   s_h += step;
@@ -999,19 +1054,15 @@ static void prv_start_blink(void) {
   s_phase = PHASE_BLINK; layer_mark_dirty(s_canvas_layer); schedule(ANIM_STEP_MS);
 }
 
-// Clamp s_h to s_target_h before stacked animations so a mid-bounce
-// shake doesn't carry overshoot into the split start position.
-static void prv_split_clamp_h(void) {
-  if (s_h > s_target_h) s_h = s_target_h;
-}
-
+// ---- Stacked split/merge ----
 static void prv_start_split_v(int target_layout) {
-  prv_split_clamp_h();
+  if (s_h > s_target_h) s_h = s_target_h;  // clamp any tick overshoot
   Layer *root = window_get_root_layer(s_window);
   GRect ub = layer_get_unobstructed_bounds(root);
   int ub_top = ub.origin.y, ub_h = ub.size.h, ub_bot = ub_top + ub_h;
   int bot_margin = BOTTOM_MARGIN(ub_h);
-  int full_cy    = ub_top + MARGIN_OUTER + s_target_h / 2;
+  s_sv_cy    = ub_top + MARGIN_OUTER + s_target_h / 2;  // screen center, locked
+  int full_cy = s_sv_cy;
   int dh_final   = prv_compute_stacked_h(ub_h);
   int h_cy_final = ub_top + MARGIN_OUTER + dh_final / 2;
   int m_cy_final = ub_bot - bot_margin - dh_final / 2;
@@ -1033,11 +1084,15 @@ static void prv_start_split_h(void) {
   int h_cy_final = ub_top + MARGIN_OUTER + dh_final / 2;
   int m_cy_final = ub_bot - bot_margin - dh_final / 2;
   s_sh_hr_cy = h_cy_final; s_sh_mn_cy = m_cy_final; s_sh_h = dh_final;
+  s_sh_colon_cy = s_sv_cy;  // screen center (locked from SPLIT_V)
   s_sh_hr_tx_s = SLOT_H_TENS;  s_sh_hr_tx_e = stk_tens_x;
   s_sh_mn_tx_s = SLOT_M_TENS;  s_sh_mn_tx_e = stk_tens_x;
-  int colon_exit  = (tl == LAYOUT_STACK_L) ? (SCREEN_W + SLOT_W) : (-SLOT_W * 2);
-  s_sh_colon_s = COLON_SLOT_X;  s_sh_colon_e = colon_exit;
-  int info_start  = (tl == LAYOUT_STACK_L) ? SCREEN_W : (SIDE_MARGIN - col_w - UNIT);
+  // Colon slides toward info side (same direction as info entering):
+  // STACK_L: info enters from right → colon exits right
+  // STACK_R: info enters from left  → colon exits left
+  int colon_exit = (tl == LAYOUT_STACK_L) ? (SCREEN_W + SLOT_W) : (-SLOT_W * 2);
+  s_sh_colon_x_s = COLON_SLOT_X;  s_sh_colon_x_e = colon_exit;
+  int info_start = (tl == LAYOUT_STACK_L) ? SCREEN_W : (SIDE_MARGIN - col_w - UNIT);
   s_sh_col_s = info_start;  s_sh_col_e = col_x_final;
   s_anim_step = 0; s_phase = PHASE_SPLIT_H; schedule(SPLIT_MS);
 }
@@ -1053,11 +1108,13 @@ static void prv_start_merge_h(void) {
   int h_cy_final = ub_top + MARGIN_OUTER + dh_final / 2;
   int m_cy_final = ub_bot - bot_margin - dh_final / 2;
   s_sh_hr_cy = h_cy_final; s_sh_mn_cy = m_cy_final; s_sh_h = dh_final;
+  s_sh_colon_cy = ub_top + MARGIN_OUTER + s_target_h / 2;  // screen center
   s_sh_hr_tx_s = stk_tens_x;  s_sh_hr_tx_e = SLOT_H_TENS;
   s_sh_mn_tx_s = stk_tens_x;  s_sh_mn_tx_e = SLOT_M_TENS;
+  // Colon enters from the same side it exited
   int colon_enter = (tl == LAYOUT_STACK_L) ? (SCREEN_W + SLOT_W) : (-SLOT_W * 2);
-  s_sh_colon_s = colon_enter;  s_sh_colon_e = COLON_SLOT_X;
-  int info_end    = (tl == LAYOUT_STACK_L) ? SCREEN_W : (SIDE_MARGIN - col_w - UNIT);
+  s_sh_colon_x_s = colon_enter;  s_sh_colon_x_e = COLON_SLOT_X;
+  int info_end = (tl == LAYOUT_STACK_L) ? SCREEN_W : (SIDE_MARGIN - col_w - UNIT);
   s_sh_col_s = col_x_final;  s_sh_col_e = info_end;
   s_split_target_layout = tl;
   s_anim_step = 0; s_phase = PHASE_MERGE_H; schedule(SPLIT_MS);
@@ -1067,14 +1124,45 @@ static void prv_start_merge_v(void) {
   GRect ub = layer_get_unobstructed_bounds(root);
   int ub_h = ub.size.h, ub_top = ub.origin.y, ub_bot = ub_top + ub_h;
   int bot_margin = BOTTOM_MARGIN(ub_h);
-  int full_cy    = ub_top + MARGIN_OUTER + s_target_h / 2;
+  s_sv_cy = ub_top + MARGIN_OUTER + s_target_h / 2;
   int dh_final   = prv_compute_stacked_h(ub_h);
   int h_cy_final = ub_top + MARGIN_OUTER + dh_final / 2;
   int m_cy_final = ub_bot - bot_margin - dh_final / 2;
-  s_sv_hr_cy_s = h_cy_final;  s_sv_hr_cy_e = full_cy;
-  s_sv_mn_cy_s = m_cy_final;  s_sv_mn_cy_e = full_cy;
+  s_sv_hr_cy_s = h_cy_final;  s_sv_hr_cy_e = s_sv_cy;
+  s_sv_mn_cy_s = m_cy_final;  s_sv_mn_cy_e = s_sv_cy;
   s_sv_h_s     = dh_final;    s_sv_h_e     = s_target_h;
   s_anim_step = 0; s_phase = PHASE_MERGE_V; schedule(SPLIT_MS);
+}
+
+// Return to full from info (called by SHAKE1 timer and by shake-back)
+static void prv_return_to_full(void);
+
+static void shake1_timer_cb(void *data) {
+  s_shake1_timer = NULL;
+  if (s_layout != LAYOUT_FULL && s_phase == PHASE_DONE) {
+    prv_return_to_full();
+  }
+}
+static void prv_schedule_shake1(void) {
+  if (s_shake1_timer) app_timer_cancel(s_shake1_timer);
+  s_shake1_timer = app_timer_register(SHAKE1_TIMEOUT_MS, shake1_timer_cb, NULL);
+}
+static void prv_cancel_shake1(void) {
+  if (s_shake1_timer) { app_timer_cancel(s_shake1_timer); s_shake1_timer = NULL; }
+}
+
+static void prv_return_to_full(void) {
+  prv_cancel_shake1();
+  if (s_layout == LAYOUT_STACK_L || s_layout == LAYOUT_STACK_R) {
+    prv_start_merge_h();
+  } else {
+    s_layout = LAYOUT_FULL;
+    prv_update_targets();
+    s_h_min = H_MIN;
+    s_expand_no_overshoot = true;
+    prv_start_anticipate();
+  }
+  layer_mark_dirty(s_canvas_layer);
 }
 
 static void timer_cb(void *data) {
@@ -1147,9 +1235,12 @@ static void unobstructed_change(AnimationProgress progress, void *ctx) {
   prv_update_targets();
   if (s_phase == PHASE_DONE) { s_h = s_target_h; layer_mark_dirty(s_canvas_layer); }
 }
+
 static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   if (s_phase != PHASE_DONE) return;
-  if (s_cfg_info_mode == INFO_MODE_ALWAYS) return;
+
+  // Modes that don't respond to shake
+  if (s_cfg_info_mode == INFO_MODE_OFF || s_cfg_info_mode == INFO_MODE_ALWAYS) return;
 
   if (s_layout == LAYOUT_FULL) {
     int target = prv_info_layout_for_shake();
@@ -1162,19 +1253,13 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
       s_expand_no_overshoot = true;
       prv_start_anticipate();
     }
+    if (s_cfg_info_mode == INFO_MODE_SHAKE1) prv_schedule_shake1();
   } else {
-    if (s_layout == LAYOUT_STACK_L || s_layout == LAYOUT_STACK_R) {
-      prv_start_merge_h();
-    } else {
-      s_layout = LAYOUT_FULL;
-      prv_update_targets();
-      s_h_min = H_MIN;
-      s_expand_no_overshoot = true;
-      prv_start_anticipate();
-    }
+    prv_return_to_full();
   }
   layer_mark_dirty(s_canvas_layer);
 }
+
 #if defined(PBL_TOUCH)
 static void touch_handler(const TouchEvent *event, void *context) {
   if (event->type != TouchEvent_Touchdown) return;
@@ -1218,13 +1303,25 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
   if(t){time_t ts=(time_t)(uint32_t)t->value->uint32;struct tm*lt=localtime(&ts);if(lt)s_sunrise_min=lt->tm_hour*60+lt->tm_min;}
   t = dict_find(iter, MESSAGE_KEY_SunsetTime);
   if(t){time_t ts=(time_t)(uint32_t)t->value->uint32;struct tm*lt=localtime(&ts);if(lt)s_sunset_min=lt->tm_hour*60+lt->tm_min;}
-  for (int i = 0; i < NUM_SLOTS + 1; i++) {
-    t = dict_find(iter, MESSAGE_KEY_CfgSlot1 + i);
-    if (t) s_cfg_order[i] = (int)t->value->int32;
+  // New config keys
+  t = dict_find(iter, MESSAGE_KEY_CfgInfoMode);
+  if(t) s_cfg_info_mode = (InfoMode)(t->value->int32 & 0x7);
+  t = dict_find(iter, MESSAGE_KEY_CfgInfoLayout);
+  if(t) s_cfg_info_layout = (InfoLayout)(t->value->int32 & 0x3);
+  t = dict_find(iter, MESSAGE_KEY_CfgTempUnit);
+  if(t) s_cfg_temp_f = (t->value->int32 == 0);
+  t = dict_find(iter, MESSAGE_KEY_CfgDistUnit);
+  if(t) s_cfg_dist_mi = (t->value->int32 == 0);
+  t = dict_find(iter, MESSAGE_KEY_CfgClockFormat);
+  if(t) s_cfg_24h = (t->value->int32 == 1);
+  for (int i = 0; i < WIDE_SLOTS; i++) {
+    t = dict_find(iter, MESSAGE_KEY_CfgWide1 + i);
+    if(t) s_cfg_wide[i] = (int)t->value->int32;
   }
-  t = dict_find(iter, MESSAGE_KEY_CfgTempUnit);    if(t) s_cfg_temp_f  =(t->value->int32==0);
-  t = dict_find(iter, MESSAGE_KEY_CfgDistUnit);    if(t) s_cfg_dist_mi =(t->value->int32==0);
-  t = dict_find(iter, MESSAGE_KEY_CfgClockFormat); if(t) s_cfg_24h     =(t->value->int32==1);
+  for (int i = 0; i < STACK_SLOTS; i++) {
+    t = dict_find(iter, MESSAGE_KEY_CfgStack1 + i);
+    if(t) s_cfg_stack[i] = (int)t->value->int32;
+  }
   prv_save_config(); prv_update_targets(); layer_mark_dirty(s_canvas_layer);
 }
 static void window_load(Window *window) {
@@ -1250,12 +1347,20 @@ static void window_unload(Window *window) {
   touch_service_unsubscribe();
 #endif
   if (s_timer) { app_timer_cancel(s_timer); s_timer = NULL; }
+  prv_cancel_shake1();
   layer_destroy(s_canvas_layer);
 }
 static void init(void) {
   s_fg = GColorWhite; s_bg = GColorBlack;
   prv_load_config();
-  if (s_cfg_info_mode == INFO_MODE_ALWAYS) { s_layout = LAYOUT_INFO; }
+  // Set starting layout for always-on mode
+  if (s_cfg_info_mode == INFO_MODE_ALWAYS) {
+    switch (s_cfg_info_layout) {
+      case INFO_LAYOUT_WIDE:    s_layout = LAYOUT_INFO; break;
+      case INFO_LAYOUT_STACK_L: s_layout = LAYOUT_STACK_L; break;
+      case INFO_LAYOUT_STACK_R: s_layout = LAYOUT_STACK_R; break;
+    }
+  }
   s_window = window_create();
   window_set_background_color(s_window, GColorBlack);
   window_set_click_config_provider(s_window, prv_click_config_provider);
@@ -1278,6 +1383,7 @@ static void deinit(void) {
   tick_timer_service_unsubscribe();
   battery_state_service_unsubscribe();
   bluetooth_connection_service_unsubscribe();
+  prv_cancel_shake1();
   window_destroy(s_window);
 }
 int main(void) { init(); app_event_loop(); deinit(); }
