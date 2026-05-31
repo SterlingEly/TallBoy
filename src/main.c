@@ -1,13 +1,18 @@
 // ============================================================
-// TallBoy — main.c  v3.52e
+// TallBoy — main.c  v3.53
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.52e: Fix colon dot off-screen rendering.
-//   draw_colon_dot now guards against drawing when the dot center
-//   is outside the screen bounds — negative GRect coords on Pebble
-//   cause rendering artifacts rather than clean clipping.
-//   Off-screen endpoints extended to SCREEN_H past the edge so dots
-//   fully exit before the phase transition.
+// v3.53 changes:
+//   - Fix wide info slide: formulas were inverted (lines came from
+//     center instead of outer edges). Final settled state also fixed.
+//   - Separate frame counts: SPLIT_V_FRAMES=24, SPLIT_H_FRAMES=14,
+//     SPLIT_MS=10 → phase 1 ≈ 0.24s, phase 2 ≈ 0.14s
+//   - SLOT_DAY_DATE: wide = "Monday, May 30"; stacked = "Mon, May 30"
+//   - SLOT_DAY: always full name "Monday" (both modes)
+//   - SLOT_WEATHER stacked: icon + temp only (desc only in wide)
+//   - Stacked icon text: compact (number only — icon is the label)
+//     Steps: "1,500"  Calories: "212"  Heart: "72 bpm" → "72"
+//     Distance: "1.7mi" → no change  Pace: "108%" compact
 // ============================================================
 
 #include <pebble.h>
@@ -115,21 +120,26 @@ typedef enum {
 #define SHADOW_DX  HALF_UNIT
 #define SHADOW_DY  HALF_UNIT
 
-#define SPLIT_FRAMES  48
-#define SPLIT_MS      16
+// Separate frame counts for the two animation phases.
+// Phase 1 (vertical split): shorter since digits don't travel far.
+// Phase 2 (horizontal slide): faster pass since colon is already gone.
+#define SPLIT_V_FRAMES  24   // ~0.24s at SPLIT_MS=10
+#define SPLIT_H_FRAMES  14   // ~0.14s
+#define SPLIT_MS        10
 
-#define INFO_SLIDE_FRAMES  SPLIT_FRAMES
+#define INFO_SLIDE_FRAMES  SPLIT_V_FRAMES
 #define INFO_SLIDE_DIST    (UNIT * 4)
 
-// Off-screen travel distance for colon dots — large enough that they are
-// fully invisible before the phase transitions to SPLIT_H / MERGE_H.
-// Using SCREEN_H ensures the dot travels a full screen height past the edge.
-#define COLON_OFFSCREEN  (SCREEN_H)
-
-static int prv_lerp(int a, int b, int step) {
+// Separate lerp for each phase
+static int prv_lerp_v(int a, int b, int step) {
   if (step <= 0) return a;
-  if (step >= SPLIT_FRAMES) return b;
-  return a + ((b - a) * step) / SPLIT_FRAMES;
+  if (step >= SPLIT_V_FRAMES) return b;
+  return a + ((b - a) * step) / SPLIT_V_FRAMES;
+}
+static int prv_lerp_h(int a, int b, int step) {
+  if (step <= 0) return a;
+  if (step >= SPLIT_H_FRAMES) return b;
+  return a + ((b - a) * step) / SPLIT_H_FRAMES;
 }
 
 static const int EASE[10] = { 4, 6, 8, 10, 12, 12, 10, 8, 6, 4 };
@@ -144,6 +154,8 @@ static const int EASE[10] = { 4, 6, 8, 10, 12, 12, 10, 8, 6, 4 };
 #define STEPS_AVG_MAX_MIN 120
 #define DOT               " \xc2\xb7 "
 #define SHAKE1_TIMEOUT_MS 60000
+
+#define COLON_OFFSCREEN  (SCREEN_H)
 
 #if defined(PBL_TOUCH)
 static const uint32_t TOUCH_VIBE_MS[] = {50};
@@ -162,6 +174,10 @@ typedef enum {
 
 static bool s_expand_no_overshoot = false;
 
+// Wide info slide:
+//   slide-in:  s_info_slide goes INFO_SLIDE_DIST → 0  (dir = -1)
+//   slide-out: s_info_slide goes 0 → INFO_SLIDE_DIST  (dir = +1)
+// Applied as: above_y -= slide, below_y += slide
 static int  s_info_slide      = 0;
 static int  s_info_slide_dir  = 0;
 static int  s_info_slide_step = 0;
@@ -205,8 +221,8 @@ static InfoLine s_above_lines[INFO_LINES_MAX];
 static InfoLine s_below_lines[INFO_LINES_MAX];
 static InfoLine s_col_lines[INFO_LINES_MAX];
 
-static int  s_cfg_wide[WIDE_SLOTS]   = { 1, 3, 0, 4, 6, 15 };
-static int  s_cfg_stack[STACK_SLOTS] = { 1, 3, 6, 9, 11, 4, 15, 16 };
+static int  s_cfg_wide[WIDE_SLOTS]   = { 3, 5, 0, 6, 17, 15 };
+static int  s_cfg_stack[STACK_SLOTS] = { 1, 3, 6, 9, 11, 5, 15, 16 };
 static bool s_cfg_temp_f    = true;
 static bool s_cfg_dist_mi   = true;
 static InfoMode   s_cfg_info_mode   = INFO_MODE_DEBUG;
@@ -221,13 +237,12 @@ static const int DEBUG_CYCLE_LAYOUTS[] = { LAYOUT_INFO, LAYOUT_STACK_R, LAYOUT_S
 #define PERSIST_CFG_WIDE     2
 #define PERSIST_CFG_STACK    3
 #define PERSIST_CFG_STACK_HI 4
-#define CFG_VERSION          2
+#define CFG_VERSION          3   // bumped: new defaults + format changes
 
 static int s_sv_hr_cy_s, s_sv_hr_cy_e;
 static int s_sv_mn_cy_s, s_sv_mn_cy_e;
 static int s_sv_h_s,     s_sv_h_e;
 static int s_sv_cy;
-// Colon dot endpoints — travel to/from completely off-screen
 static int s_sv_top_dot_s, s_sv_top_dot_e;
 static int s_sv_bot_dot_s, s_sv_bot_dot_e;
 
@@ -588,42 +603,33 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int h, 
   #undef NUB
 }
 
-// Draw one colon dot — skips rendering if the dot center is off the screen
-// bounds (avoids Pebble SDK artifacts with negative GRect coordinates).
 static void draw_colon_dot(GContext *ctx, int slot_x, int cy, int dx, int dy,
                             int ub_top, int ub_bot) {
   int r = UNIT / 2;
   int dot_y = cy + dy;
-  // Only draw if the dot is at least partially on-screen
   if (dot_y + r < ub_top || dot_y - r > ub_bot) return;
   int ddx = slot_x + SLOT_W / 2 + dx;
   graphics_fill_radial(ctx, GRect(ddx - r, dot_y - r, r * 2, r * 2),
     GOvalScaleModeFitCircle, (uint16_t)r, 0, DEG_TO_TRIGANGLE(360));
 }
-
-// Normal colon: two symmetric dots, uses screen bounds from context
 static void draw_colon_vec(GContext *ctx, int slot_x, int cy, int h, int dx, int dy,
                             int ub_top, int ub_bot) {
   draw_colon_dot(ctx, slot_x, cy - h/4 + 2, dx, dy, ub_top, ub_bot);
   draw_colon_dot(ctx, slot_x, cy + h/4 - 2, dx, dy, ub_top, ub_bot);
 }
-
-// Split colon: each dot at an explicit absolute y
 static void draw_colon_split(GContext *ctx, int slot_x,
                               int top_cy, int bot_cy, int dx, int dy,
                               int ub_top, int ub_bot) {
   draw_colon_dot(ctx, slot_x, top_cy, dx, dy, ub_top, ub_bot);
   draw_colon_dot(ctx, slot_x, bot_cy, dx, dy, ub_top, ub_bot);
 }
-
 static void draw_pair(GContext *ctx, int tens, int ones, int tens_x, int ones_x,
                        int cy, int h, int dx, int dy) {
   draw_digit_vec(ctx, tens, tens_x, cy, h, dx, dy);
   draw_digit_vec(ctx, ones, ones_x, cy, h, dx, dy);
 }
 static void draw_digits_pass(GContext *ctx, int h_tens, int h_ones, int m_tens, int m_ones,
-                              int h, int cy, int dx, int dy,
-                              int ub_top, int ub_bot) {
+                              int h, int cy, int dx, int dy, int ub_top, int ub_bot) {
   draw_digit_vec(ctx, h_tens, SLOT_H_TENS, cy, h, dx, dy);
   draw_digit_vec(ctx, h_ones, SLOT_H_ONES, cy, h, dx, dy);
   draw_colon_vec(ctx, COLON_SLOT_X, cy, h, dx, dy, ub_top, ub_bot);
@@ -649,8 +655,14 @@ static void draw_info_line(GContext *ctx, InfoLine *line, int y,
     GSize sz = graphics_text_layout_get_content_size(
       line->text, font, GRect(0,0,200,20), GTextOverflowModeFill, GTextAlignmentLeft);
     int block_w = ICON_W + ICON_TEXT_GAP + sz.w;
-    if (block_w > col_w) block_w = col_w;
     int icon_off;
+    if (block_w > col_w) {
+      // Text + icon won't fit: skip icon, fill column with text only
+      graphics_context_set_text_color(ctx, s_fg);
+      graphics_draw_text(ctx, line->text, font, GRect(col_x, y-INFO_TOP_PAD, col_w, INFO_LINE_H),
+        GTextOverflowModeTrailingEllipsis, align, NULL);
+      return;
+    }
     if      (align == GTextAlignmentLeft)  { icon_off = 0; }
     else if (align == GTextAlignmentRight) { icon_off = col_w - block_w; }
     else                                   { icon_off = (col_w - block_w) / 2; }
@@ -696,15 +708,21 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
   switch (slot) {
     case SLOT_EMPTY: return false;
     case SLOT_DAY:
-      snprintf(buf,len,"%s", t ? (wide?s_day_names[t->tm_wday]:s_day_short[t->tm_wday]) : "Mon");
+      // Always full day name ("Monday") in both wide and stacked
+      snprintf(buf,len,"%s", t ? s_day_names[t->tm_wday] : "Monday");
       return true;
     case SLOT_DATE:
       if (t) { snprintf(buf,len,"%s %d",s_month_names[t->tm_mon],t->tm_mday); }
-      else   { snprintf(buf,len,"Jan 1"); }
+      else   { snprintf(buf,len,"Aug 21"); }
       return true;
     case SLOT_DAY_DATE:
-      if (t) { snprintf(buf,len,"%s %s %d",s_day_short[t->tm_wday],s_month_names[t->tm_mon],t->tm_mday); }
-      else   { snprintf(buf,len,"Sat May 30"); }
+      // Wide: "Monday, Aug 21"  Stacked: "Mon, Aug 21"
+      if (t) {
+        if (wide) snprintf(buf,len,"%s, %s %d",s_day_names[t->tm_wday],s_month_names[t->tm_mon],t->tm_mday);
+        else      snprintf(buf,len,"%s, %s %d",s_day_short[t->tm_wday],s_month_names[t->tm_mon],t->tm_mday);
+      } else {
+        snprintf(buf,len, wide ? "Monday, Aug 21" : "Mon, Aug 21");
+      }
       return true;
     case SLOT_TEMP:
       if (s_weather_temp_f > -900) {
@@ -713,23 +731,30 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       } else snprintf(buf,len,"--");
       return true;
     case SLOT_WEATHER: {
+      // Wide: icon + temp + conditions.  Stacked: icon + temp only.
       const char *desc = (s_weather_code==0)?"clear":(s_weather_code<=3)?"partly cloudy":
         (s_weather_code<=48)?"foggy":(s_weather_code<=69)?"rainy":
-        (s_weather_code<=79)?"snowy":(s_weather_code<=99)?"stormy":"weather";
+        (s_weather_code<=79)?"snowy":(s_weather_code<=99)?"stormy":"--";
       if (s_weather_temp_f > -900) {
         int t2 = s_cfg_temp_f ? s_weather_temp_f : s_weather_temp_c;
         char u = s_cfg_temp_f ? 'F' : 'C';
-        if (wide) snprintf(buf,len,"%d%c & %s",t2,u,desc);
-        else snprintf(buf,len,"%d%c",t2,u);
+        if (wide) snprintf(buf,len,"%d%c, %s",t2,u,desc);
+        else      snprintf(buf,len,"%d%c",t2,u);
       } else snprintf(buf,len,"--");
       return true; }
     case SLOT_STEPS:
+      // Wide: "3,450 steps · 1.7mi"  Stacked with icon: "3,450" (icon = steps label)
 #if defined(PBL_HEALTH)
       { char sb[16]; prv_fmt_steps(sb,sizeof(sb),s_steps);
-        if (wide&&s_distance_m>0){char db[16];prv_fmt_dist(db,sizeof(db));snprintf(buf,len,"%s steps"DOT"%s",sb,db);}
-        else snprintf(buf,len,"%s steps",sb); }
+        if (wide) {
+          if (s_distance_m>0){char db[16];prv_fmt_dist(db,sizeof(db));snprintf(buf,len,"%s steps"DOT"%s",sb,db);}
+          else snprintf(buf,len,"%s steps",sb);
+        } else {
+          snprintf(buf,len,"%s",sb);  // icon serves as label in stacked
+        }
+      }
 #else
-      snprintf(buf,len,wide?"3,450 steps\xc2\xb7 1.7mi":"3,450 steps");
+      snprintf(buf,len,wide?"3,450 steps\xc2\xb7 1.7mi":"3,450");
 #endif
       return true;
     case SLOT_DISTANCE:
@@ -748,32 +773,38 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
 #endif
       return true;
     case SLOT_PACE:
+      // Wide: "exp 3,200 · 108%"  Stacked with icon: "108%"
 #if defined(PBL_HEALTH)
       if (s_steps_expected>0) {
         if (wide) { char eb[16]; prv_fmt_steps(eb,sizeof(eb),s_steps_expected);
           snprintf(buf,len,"exp %s"DOT"%d%%",eb,(s_steps*100)/s_steps_expected); }
-        else snprintf(buf,len,"%d%% pace",(s_steps*100)/s_steps_expected);
-      } else snprintf(buf,len,"-- pace");
+        else snprintf(buf,len,"%d%%",(s_steps*100)/s_steps_expected);
+      } else snprintf(buf,len,"--%");
 #else
-      snprintf(buf,len,wide?"exp 3,200\xc2\xb7 108%%":"108%% pace");
+      snprintf(buf,len,wide?"exp 3,200\xc2\xb7 108%":"108%");
 #endif
       return true;
     case SLOT_CALORIES:
+      // Wide: "212 cal · 72 bpm"  Stacked with icon: "212"
 #if defined(PBL_HEALTH)
       if (s_calories>0) {
-        if(wide&&s_heart_rate>0) snprintf(buf,len,"%d cal"DOT"%d bpm",s_calories,s_heart_rate);
-        else snprintf(buf,len,"%d cal",s_calories);
-      } else snprintf(buf,len,"-- cal");
+        if (wide && s_heart_rate>0) snprintf(buf,len,"%d cal"DOT"%d bpm",s_calories,s_heart_rate);
+        else if (wide) snprintf(buf,len,"%d cal",s_calories);
+        else snprintf(buf,len,"%d",s_calories);
+      } else snprintf(buf,len,wide?"-- cal":"--");
 #else
-      snprintf(buf,len,wide?"212 cal\xc2\xb7 72 bpm":"212 cal");
+      snprintf(buf,len,wide?"212 cal\xc2\xb7 72 bpm":"212");
 #endif
       return true;
     case SLOT_HEART:
+      // Wide: "72 bpm"  Stacked with icon: "72"
 #if defined(PBL_HEALTH)
-      if (s_heart_rate>0) snprintf(buf,len,"%d bpm",s_heart_rate);
-      else snprintf(buf,len,"-- bpm");
+      if (s_heart_rate>0) {
+        if (wide) snprintf(buf,len,"%d bpm",s_heart_rate);
+        else snprintf(buf,len,"%d",s_heart_rate);
+      } else snprintf(buf,len,wide?"-- bpm":"--");
 #else
-      snprintf(buf,len,"72 bpm");
+      snprintf(buf,len,wide?"72 bpm":"72");
 #endif
       return true;
     case SLOT_SUNRISE:
@@ -921,15 +952,13 @@ static void draw_layer(Layer *layer, GContext *ctx) {
                        s_phase == PHASE_MERGE_H || s_phase == PHASE_MERGE_V)
                       ? localtime(&now_t) : NULL;
 
-  // ---- SPLIT_V / MERGE_V ----
-  // Digit pairs → stacked positions. Colon dots → off-screen (guarded).
   if (s_phase == PHASE_SPLIT_V || s_phase == PHASE_MERGE_V) {
     int step   = s_anim_step;
-    int hr_cy  = prv_lerp(s_sv_hr_cy_s,   s_sv_hr_cy_e,   step);
-    int mn_cy  = prv_lerp(s_sv_mn_cy_s,   s_sv_mn_cy_e,   step);
-    int dh     = prv_lerp(s_sv_h_s,       s_sv_h_e,       step);
-    int top_cy = prv_lerp(s_sv_top_dot_s, s_sv_top_dot_e, step);
-    int bot_cy = prv_lerp(s_sv_bot_dot_s, s_sv_bot_dot_e, step);
+    int hr_cy  = prv_lerp_v(s_sv_hr_cy_s,   s_sv_hr_cy_e,   step);
+    int mn_cy  = prv_lerp_v(s_sv_mn_cy_s,   s_sv_mn_cy_e,   step);
+    int dh     = prv_lerp_v(s_sv_h_s,       s_sv_h_e,       step);
+    int top_cy = prv_lerp_v(s_sv_top_dot_s, s_sv_top_dot_e, step);
+    int bot_cy = prv_lerp_v(s_sv_bot_dot_s, s_sv_bot_dot_e, step);
     graphics_context_set_fill_color(ctx, shadow_col);
     draw_colon_split(ctx, COLON_SLOT_X, top_cy, bot_cy, SHADOW_DX, SHADOW_DY, ub_top, ub_bot);
     graphics_context_set_fill_color(ctx, s_fg);
@@ -943,12 +972,11 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     return;
   }
 
-  // ---- SPLIT_H / MERGE_H ---- No colon (already off-screen)
   if (s_phase == PHASE_SPLIT_H || s_phase == PHASE_MERGE_H) {
     int step      = s_anim_step;
-    int hr_tens_x = prv_lerp(s_sh_hr_tx_s, s_sh_hr_tx_e, step);
-    int mn_tens_x = prv_lerp(s_sh_mn_tx_s, s_sh_mn_tx_e, step);
-    int col_x     = prv_lerp(s_sh_col_s,   s_sh_col_e,   step);
+    int hr_tens_x = prv_lerp_h(s_sh_hr_tx_s, s_sh_hr_tx_e, step);
+    int mn_tens_x = prv_lerp_h(s_sh_mn_tx_s, s_sh_mn_tx_e, step);
+    int col_x     = prv_lerp_h(s_sh_col_s,   s_sh_col_e,   step);
     int tl = s_split_target_layout;
     int dummy_tx, dummy_ox, col_x_final, col_w; GTextAlignment info_align;
     prv_stacked_geom(tl, &dummy_tx, &dummy_ox, &col_x_final, &col_w, &info_align);
@@ -980,6 +1008,8 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int below_end   = ub_bot - HALF_UNIT;
     int time_cy     = (above_end + HALF_UNIT + (below_end - prv_info_block_h(bn, INFO_LINE_STEP_WIDE)) - HALF_UNIT) / 2;
     int col_x = SIDE_MARGIN, col_w = SCREEN_W - 2 * SIDE_MARGIN;
+    // slide: 0 = lines at final position, INFO_SLIDE_DIST = lines displaced outward
+    // above lines move UP when displaced (- slide), below lines move DOWN (+ slide)
     int slide = s_info_slide;
     for (int i = 0; i < an; i++)
       draw_info_line(ctx, &s_above_lines[i], above_start + i*INFO_LINE_STEP_WIDE - slide, col_x, col_w, GTextAlignmentCenter);
@@ -1035,15 +1065,24 @@ static bool prv_ease_shrink_step(void) {
   if (s_h <= s_h_min) { s_h = s_h_min; return true; }
   return false;
 }
-static bool prv_info_slide_step(void) {
+// Info slide: s_info_slide = INFO_SLIDE_DIST (displaced) → 0 (settled) for enter,
+//             s_info_slide = 0 (settled) → INFO_SLIDE_DIST (displaced) for exit.
+static bool prv_info_slide_step_fn(void) {
   if (s_info_slide_dir == 0) return true;
   s_info_slide_step++;
-  s_info_slide = s_info_slide_dir > 0
-    ? INFO_SLIDE_DIST - (INFO_SLIDE_DIST * s_info_slide_step) / INFO_SLIDE_FRAMES
-    : (INFO_SLIDE_DIST * s_info_slide_step) / INFO_SLIDE_FRAMES;
-  if (s_info_slide_step >= INFO_SLIDE_FRAMES) {
-    s_info_slide = (s_info_slide_dir > 0) ? 0 : INFO_SLIDE_DIST;
-    s_info_slide_dir = 0; s_info_slide_step = 0;
+  int t = s_info_slide_step;
+  int f = INFO_SLIDE_FRAMES;
+  // dir = -1 (enter): DIST → 0  (start displaced, settle in)
+  // dir = +1 (exit):  0 → DIST  (start settled, slide away)
+  if (s_info_slide_dir < 0) {
+    s_info_slide = INFO_SLIDE_DIST - (INFO_SLIDE_DIST * t) / f;
+  } else {
+    s_info_slide = (INFO_SLIDE_DIST * t) / f;
+  }
+  if (t >= f) {
+    s_info_slide     = (s_info_slide_dir < 0) ? 0 : INFO_SLIDE_DIST;
+    s_info_slide_dir = 0;
+    s_info_slide_step = 0;
     return true;
   }
   return false;
@@ -1067,21 +1106,16 @@ static void prv_start_split_v(int target_layout) {
   int ub_top = ub.origin.y, ub_h = ub.size.h, ub_bot = ub_top + ub_h;
   int bot_margin = BOTTOM_MARGIN(ub_h);
   s_sv_cy = ub_top + MARGIN_OUTER + s_target_h / 2;
-
   int dh_final   = prv_compute_stacked_h(ub_h);
   int h_cy_final = ub_top + MARGIN_OUTER + dh_final / 2;
   int m_cy_final = ub_bot - bot_margin - dh_final / 2;
   s_sv_hr_cy_s = s_sv_cy;  s_sv_hr_cy_e = h_cy_final;
   s_sv_mn_cy_s = s_sv_cy;  s_sv_mn_cy_e = m_cy_final;
   s_sv_h_s     = s_h;      s_sv_h_e     = dh_final;
-
-  // Colon dots start at their normal positions and travel far off-screen.
-  // Using COLON_OFFSCREEN ensures they are invisible well before SPLIT_H starts.
   int colon_start_top = s_sv_cy - s_h/4 + 2;
   int colon_start_bot = s_sv_cy + s_h/4 - 2;
   s_sv_top_dot_s = colon_start_top;  s_sv_top_dot_e = ub_top - COLON_OFFSCREEN;
   s_sv_bot_dot_s = colon_start_bot;  s_sv_bot_dot_e = ub_bot + COLON_OFFSCREEN;
-
   s_split_target_layout = target_layout;
   s_anim_step = 0; s_phase = PHASE_SPLIT_V; schedule(SPLIT_MS);
 }
@@ -1128,20 +1162,16 @@ static void prv_start_merge_v(void) {
   int ub_h = ub.size.h, ub_top = ub.origin.y, ub_bot = ub_top + ub_h;
   int bot_margin = BOTTOM_MARGIN(ub_h);
   s_sv_cy = ub_top + MARGIN_OUTER + s_target_h / 2;
-
   int dh_final   = prv_compute_stacked_h(ub_h);
   int h_cy_final = ub_top + MARGIN_OUTER + dh_final / 2;
   int m_cy_final = ub_bot - bot_margin - dh_final / 2;
   s_sv_hr_cy_s = h_cy_final;  s_sv_hr_cy_e = s_sv_cy;
   s_sv_mn_cy_s = m_cy_final;  s_sv_mn_cy_e = s_sv_cy;
   s_sv_h_s     = dh_final;    s_sv_h_e     = s_target_h;
-
-  // Colon dots enter from far off-screen and land at final colon positions
   int colon_end_top = s_sv_cy - s_target_h/4 + 2;
   int colon_end_bot = s_sv_cy + s_target_h/4 - 2;
   s_sv_top_dot_s = ub_top - COLON_OFFSCREEN;  s_sv_top_dot_e = colon_end_top;
   s_sv_bot_dot_s = ub_bot + COLON_OFFSCREEN;  s_sv_bot_dot_e = colon_end_bot;
-
   s_anim_step = 0; s_phase = PHASE_MERGE_V; schedule(SPLIT_MS);
 }
 
@@ -1175,7 +1205,7 @@ static void prv_return_to_full(void) {
 static void timer_cb(void *data) {
   s_timer = NULL;
   if (s_info_slide_dir != 0) {
-    prv_info_slide_step();
+    prv_info_slide_step_fn();
     layer_mark_dirty(s_canvas_layer);
   }
   switch (s_phase) {
@@ -1224,16 +1254,16 @@ static void timer_cb(void *data) {
         layer_mark_dirty(s_canvas_layer); schedule(ANIM_STEP_MS);
       } else { s_h=s_target_h; s_phase=PHASE_DONE; layer_mark_dirty(s_canvas_layer); } break; }
     case PHASE_SPLIT_V:
-      if (++s_anim_step < SPLIT_FRAMES) { layer_mark_dirty(s_canvas_layer); schedule(SPLIT_MS); }
+      if (++s_anim_step < SPLIT_V_FRAMES) { layer_mark_dirty(s_canvas_layer); schedule(SPLIT_MS); }
       else { layer_mark_dirty(s_canvas_layer); prv_start_split_h(); } break;
     case PHASE_SPLIT_H:
-      if (++s_anim_step < SPLIT_FRAMES) { layer_mark_dirty(s_canvas_layer); schedule(SPLIT_MS); }
+      if (++s_anim_step < SPLIT_H_FRAMES) { layer_mark_dirty(s_canvas_layer); schedule(SPLIT_MS); }
       else { s_layout = s_split_target_layout; prv_update_targets(); s_phase = PHASE_DONE; layer_mark_dirty(s_canvas_layer); } break;
     case PHASE_MERGE_H:
-      if (++s_anim_step < SPLIT_FRAMES) { layer_mark_dirty(s_canvas_layer); schedule(SPLIT_MS); }
+      if (++s_anim_step < SPLIT_H_FRAMES) { layer_mark_dirty(s_canvas_layer); schedule(SPLIT_MS); }
       else { s_layout = LAYOUT_FULL; prv_update_targets(); prv_start_merge_v(); } break;
     case PHASE_MERGE_V:
-      if (++s_anim_step < SPLIT_FRAMES) { layer_mark_dirty(s_canvas_layer); schedule(SPLIT_MS); }
+      if (++s_anim_step < SPLIT_V_FRAMES) { layer_mark_dirty(s_canvas_layer); schedule(SPLIT_MS); }
       else { s_h = s_target_h; s_phase = PHASE_DONE; layer_mark_dirty(s_canvas_layer); } break;
     case PHASE_DONE:
       if (s_info_slide_dir != 0) schedule(SPLIT_MS);
