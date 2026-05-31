@@ -1,18 +1,11 @@
 // ============================================================
-// TallBoy — main.c  v3.53
+// TallBoy — main.c  v3.53a
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.53 changes:
-//   - Fix wide info slide: formulas were inverted (lines came from
-//     center instead of outer edges). Final settled state also fixed.
-//   - Separate frame counts: SPLIT_V_FRAMES=24, SPLIT_H_FRAMES=14,
-//     SPLIT_MS=10 → phase 1 ≈ 0.24s, phase 2 ≈ 0.14s
-//   - SLOT_DAY_DATE: wide = "Monday, May 30"; stacked = "Mon, May 30"
-//   - SLOT_DAY: always full name "Monday" (both modes)
-//   - SLOT_WEATHER stacked: icon + temp only (desc only in wide)
-//   - Stacked icon text: compact (number only — icon is the label)
-//     Steps: "1,500"  Calories: "212"  Heart: "72 bpm" → "72"
-//     Distance: "1.7mi" → no change  Pace: "108%" compact
+// v3.53a: Fix build error — spurious trailing % in snprintf
+//   format strings for SLOT_PACE fallback strings.
+//   "--%"  → "--%%"
+//   "108%" → "108%%"  (in #else / non-health branches)
 // ============================================================
 
 #include <pebble.h>
@@ -120,17 +113,13 @@ typedef enum {
 #define SHADOW_DX  HALF_UNIT
 #define SHADOW_DY  HALF_UNIT
 
-// Separate frame counts for the two animation phases.
-// Phase 1 (vertical split): shorter since digits don't travel far.
-// Phase 2 (horizontal slide): faster pass since colon is already gone.
-#define SPLIT_V_FRAMES  24   // ~0.24s at SPLIT_MS=10
-#define SPLIT_H_FRAMES  14   // ~0.14s
+#define SPLIT_V_FRAMES  24
+#define SPLIT_H_FRAMES  14
 #define SPLIT_MS        10
 
 #define INFO_SLIDE_FRAMES  SPLIT_V_FRAMES
 #define INFO_SLIDE_DIST    (UNIT * 4)
 
-// Separate lerp for each phase
 static int prv_lerp_v(int a, int b, int step) {
   if (step <= 0) return a;
   if (step >= SPLIT_V_FRAMES) return b;
@@ -174,10 +163,6 @@ typedef enum {
 
 static bool s_expand_no_overshoot = false;
 
-// Wide info slide:
-//   slide-in:  s_info_slide goes INFO_SLIDE_DIST → 0  (dir = -1)
-//   slide-out: s_info_slide goes 0 → INFO_SLIDE_DIST  (dir = +1)
-// Applied as: above_y -= slide, below_y += slide
 static int  s_info_slide      = 0;
 static int  s_info_slide_dir  = 0;
 static int  s_info_slide_step = 0;
@@ -237,7 +222,7 @@ static const int DEBUG_CYCLE_LAYOUTS[] = { LAYOUT_INFO, LAYOUT_STACK_R, LAYOUT_S
 #define PERSIST_CFG_WIDE     2
 #define PERSIST_CFG_STACK    3
 #define PERSIST_CFG_STACK_HI 4
-#define CFG_VERSION          3   // bumped: new defaults + format changes
+#define CFG_VERSION          3
 
 static int s_sv_hr_cy_s, s_sv_hr_cy_e;
 static int s_sv_mn_cy_s, s_sv_mn_cy_e;
@@ -657,7 +642,6 @@ static void draw_info_line(GContext *ctx, InfoLine *line, int y,
     int block_w = ICON_W + ICON_TEXT_GAP + sz.w;
     int icon_off;
     if (block_w > col_w) {
-      // Text + icon won't fit: skip icon, fill column with text only
       graphics_context_set_text_color(ctx, s_fg);
       graphics_draw_text(ctx, line->text, font, GRect(col_x, y-INFO_TOP_PAD, col_w, INFO_LINE_H),
         GTextOverflowModeTrailingEllipsis, align, NULL);
@@ -708,7 +692,6 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
   switch (slot) {
     case SLOT_EMPTY: return false;
     case SLOT_DAY:
-      // Always full day name ("Monday") in both wide and stacked
       snprintf(buf,len,"%s", t ? s_day_names[t->tm_wday] : "Monday");
       return true;
     case SLOT_DATE:
@@ -716,7 +699,6 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       else   { snprintf(buf,len,"Aug 21"); }
       return true;
     case SLOT_DAY_DATE:
-      // Wide: "Monday, Aug 21"  Stacked: "Mon, Aug 21"
       if (t) {
         if (wide) snprintf(buf,len,"%s, %s %d",s_day_names[t->tm_wday],s_month_names[t->tm_mon],t->tm_mday);
         else      snprintf(buf,len,"%s, %s %d",s_day_short[t->tm_wday],s_month_names[t->tm_mon],t->tm_mday);
@@ -731,7 +713,6 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       } else snprintf(buf,len,"--");
       return true;
     case SLOT_WEATHER: {
-      // Wide: icon + temp + conditions.  Stacked: icon + temp only.
       const char *desc = (s_weather_code==0)?"clear":(s_weather_code<=3)?"partly cloudy":
         (s_weather_code<=48)?"foggy":(s_weather_code<=69)?"rainy":
         (s_weather_code<=79)?"snowy":(s_weather_code<=99)?"stormy":"--";
@@ -743,14 +724,13 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       } else snprintf(buf,len,"--");
       return true; }
     case SLOT_STEPS:
-      // Wide: "3,450 steps · 1.7mi"  Stacked with icon: "3,450" (icon = steps label)
 #if defined(PBL_HEALTH)
       { char sb[16]; prv_fmt_steps(sb,sizeof(sb),s_steps);
         if (wide) {
           if (s_distance_m>0){char db[16];prv_fmt_dist(db,sizeof(db));snprintf(buf,len,"%s steps"DOT"%s",sb,db);}
           else snprintf(buf,len,"%s steps",sb);
         } else {
-          snprintf(buf,len,"%s",sb);  // icon serves as label in stacked
+          snprintf(buf,len,"%s",sb);
         }
       }
 #else
@@ -773,19 +753,17 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
 #endif
       return true;
     case SLOT_PACE:
-      // Wide: "exp 3,200 · 108%"  Stacked with icon: "108%"
 #if defined(PBL_HEALTH)
       if (s_steps_expected>0) {
         if (wide) { char eb[16]; prv_fmt_steps(eb,sizeof(eb),s_steps_expected);
           snprintf(buf,len,"exp %s"DOT"%d%%",eb,(s_steps*100)/s_steps_expected); }
         else snprintf(buf,len,"%d%%",(s_steps*100)/s_steps_expected);
-      } else snprintf(buf,len,"--%");
+      } else snprintf(buf,len,"--%%");
 #else
-      snprintf(buf,len,wide?"exp 3,200\xc2\xb7 108%":"108%");
+      snprintf(buf,len,wide?"exp 3,200\xc2\xb7 108%%":"108%%");
 #endif
       return true;
     case SLOT_CALORIES:
-      // Wide: "212 cal · 72 bpm"  Stacked with icon: "212"
 #if defined(PBL_HEALTH)
       if (s_calories>0) {
         if (wide && s_heart_rate>0) snprintf(buf,len,"%d cal"DOT"%d bpm",s_calories,s_heart_rate);
@@ -797,7 +775,6 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
 #endif
       return true;
     case SLOT_HEART:
-      // Wide: "72 bpm"  Stacked with icon: "72"
 #if defined(PBL_HEALTH)
       if (s_heart_rate>0) {
         if (wide) snprintf(buf,len,"%d bpm",s_heart_rate);
@@ -1008,8 +985,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int below_end   = ub_bot - HALF_UNIT;
     int time_cy     = (above_end + HALF_UNIT + (below_end - prv_info_block_h(bn, INFO_LINE_STEP_WIDE)) - HALF_UNIT) / 2;
     int col_x = SIDE_MARGIN, col_w = SCREEN_W - 2 * SIDE_MARGIN;
-    // slide: 0 = lines at final position, INFO_SLIDE_DIST = lines displaced outward
-    // above lines move UP when displaced (- slide), below lines move DOWN (+ slide)
     int slide = s_info_slide;
     for (int i = 0; i < an; i++)
       draw_info_line(ctx, &s_above_lines[i], above_start + i*INFO_LINE_STEP_WIDE - slide, col_x, col_w, GTextAlignmentCenter);
@@ -1065,23 +1040,19 @@ static bool prv_ease_shrink_step(void) {
   if (s_h <= s_h_min) { s_h = s_h_min; return true; }
   return false;
 }
-// Info slide: s_info_slide = INFO_SLIDE_DIST (displaced) → 0 (settled) for enter,
-//             s_info_slide = 0 (settled) → INFO_SLIDE_DIST (displaced) for exit.
 static bool prv_info_slide_step_fn(void) {
   if (s_info_slide_dir == 0) return true;
   s_info_slide_step++;
   int t = s_info_slide_step;
   int f = INFO_SLIDE_FRAMES;
-  // dir = -1 (enter): DIST → 0  (start displaced, settle in)
-  // dir = +1 (exit):  0 → DIST  (start settled, slide away)
   if (s_info_slide_dir < 0) {
     s_info_slide = INFO_SLIDE_DIST - (INFO_SLIDE_DIST * t) / f;
   } else {
     s_info_slide = (INFO_SLIDE_DIST * t) / f;
   }
   if (t >= f) {
-    s_info_slide     = (s_info_slide_dir < 0) ? 0 : INFO_SLIDE_DIST;
-    s_info_slide_dir = 0;
+    s_info_slide      = (s_info_slide_dir < 0) ? 0 : INFO_SLIDE_DIST;
+    s_info_slide_dir  = 0;
     s_info_slide_step = 0;
     return true;
   }
