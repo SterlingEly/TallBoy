@@ -1,12 +1,13 @@
 // ============================================================
-// TallBoy — main.c  v3.52d
+// TallBoy — main.c  v3.52e
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.52d: Fix colon dot animation in SPLIT_V / MERGE_V.
-//   Colon dots now have their own off-screen endpoints, independent
-//   of where the digit pairs land. Top dot exits above screen,
-//   bottom dot exits below screen. No more blink/snap.
-//   s_sv_top_dot_s/e and s_sv_bot_dot_s/e track dot positions.
+// v3.52e: Fix colon dot off-screen rendering.
+//   draw_colon_dot now guards against drawing when the dot center
+//   is outside the screen bounds — negative GRect coords on Pebble
+//   cause rendering artifacts rather than clean clipping.
+//   Off-screen endpoints extended to SCREEN_H past the edge so dots
+//   fully exit before the phase transition.
 // ============================================================
 
 #include <pebble.h>
@@ -120,6 +121,11 @@ typedef enum {
 #define INFO_SLIDE_FRAMES  SPLIT_FRAMES
 #define INFO_SLIDE_DIST    (UNIT * 4)
 
+// Off-screen travel distance for colon dots — large enough that they are
+// fully invisible before the phase transitions to SPLIT_H / MERGE_H.
+// Using SCREEN_H ensures the dot travels a full screen height past the edge.
+#define COLON_OFFSCREEN  (SCREEN_H)
+
 static int prv_lerp(int a, int b, int step) {
   if (step <= 0) return a;
   if (step >= SPLIT_FRAMES) return b;
@@ -156,8 +162,8 @@ typedef enum {
 
 static bool s_expand_no_overshoot = false;
 
-static int  s_info_slide     = 0;
-static int  s_info_slide_dir = 0;
+static int  s_info_slide      = 0;
+static int  s_info_slide_dir  = 0;
 static int  s_info_slide_step = 0;
 
 typedef void (*IconFn)(GContext*,int,int,GColor,bool);
@@ -217,18 +223,14 @@ static const int DEBUG_CYCLE_LAYOUTS[] = { LAYOUT_INFO, LAYOUT_STACK_R, LAYOUT_S
 #define PERSIST_CFG_STACK_HI 4
 #define CFG_VERSION          2
 
-// Digit pair animation for SPLIT_V / MERGE_V
 static int s_sv_hr_cy_s, s_sv_hr_cy_e;
 static int s_sv_mn_cy_s, s_sv_mn_cy_e;
 static int s_sv_h_s,     s_sv_h_e;
 static int s_sv_cy;
-
-// Colon dot animation for SPLIT_V / MERGE_V (INDEPENDENT of digit endpoints)
-// Top dot exits above screen, bottom dot exits below screen.
+// Colon dot endpoints — travel to/from completely off-screen
 static int s_sv_top_dot_s, s_sv_top_dot_e;
 static int s_sv_bot_dot_s, s_sv_bot_dot_e;
 
-// Horizontal slide animation for SPLIT_H / MERGE_H
 static int s_sh_hr_tx_s, s_sh_hr_tx_e;
 static int s_sh_mn_tx_s, s_sh_mn_tx_e;
 static int s_sh_hr_cy, s_sh_mn_cy;
@@ -585,32 +587,46 @@ static void draw_digit_vec(GContext *ctx, int digit, int slot_x, int cy, int h, 
   #undef HBAR
   #undef NUB
 }
-static void draw_colon_dot(GContext *ctx, int slot_x, int cy, int dx, int dy) {
-  int r = UNIT / 2, ddx = slot_x + SLOT_W / 2 + dx;
-  graphics_fill_radial(ctx, GRect(ddx-r, cy-r+dy, r*2, r*2),
+
+// Draw one colon dot — skips rendering if the dot center is off the screen
+// bounds (avoids Pebble SDK artifacts with negative GRect coordinates).
+static void draw_colon_dot(GContext *ctx, int slot_x, int cy, int dx, int dy,
+                            int ub_top, int ub_bot) {
+  int r = UNIT / 2;
+  int dot_y = cy + dy;
+  // Only draw if the dot is at least partially on-screen
+  if (dot_y + r < ub_top || dot_y - r > ub_bot) return;
+  int ddx = slot_x + SLOT_W / 2 + dx;
+  graphics_fill_radial(ctx, GRect(ddx - r, dot_y - r, r * 2, r * 2),
     GOvalScaleModeFitCircle, (uint16_t)r, 0, DEG_TO_TRIGANGLE(360));
 }
-// Normal colon: symmetric dots around cy
-static void draw_colon_vec(GContext *ctx, int slot_x, int cy, int h, int dx, int dy) {
-  draw_colon_dot(ctx, slot_x, cy - h/4 + 2, dx, dy);
-  draw_colon_dot(ctx, slot_x, cy + h/4 - 2, dx, dy);
+
+// Normal colon: two symmetric dots, uses screen bounds from context
+static void draw_colon_vec(GContext *ctx, int slot_x, int cy, int h, int dx, int dy,
+                            int ub_top, int ub_bot) {
+  draw_colon_dot(ctx, slot_x, cy - h/4 + 2, dx, dy, ub_top, ub_bot);
+  draw_colon_dot(ctx, slot_x, cy + h/4 - 2, dx, dy, ub_top, ub_bot);
 }
-// Split colon: each dot at an explicit absolute y (independent paths)
+
+// Split colon: each dot at an explicit absolute y
 static void draw_colon_split(GContext *ctx, int slot_x,
-                              int top_cy, int bot_cy, int dx, int dy) {
-  draw_colon_dot(ctx, slot_x, top_cy, dx, dy);
-  draw_colon_dot(ctx, slot_x, bot_cy, dx, dy);
+                              int top_cy, int bot_cy, int dx, int dy,
+                              int ub_top, int ub_bot) {
+  draw_colon_dot(ctx, slot_x, top_cy, dx, dy, ub_top, ub_bot);
+  draw_colon_dot(ctx, slot_x, bot_cy, dx, dy, ub_top, ub_bot);
 }
+
 static void draw_pair(GContext *ctx, int tens, int ones, int tens_x, int ones_x,
                        int cy, int h, int dx, int dy) {
   draw_digit_vec(ctx, tens, tens_x, cy, h, dx, dy);
   draw_digit_vec(ctx, ones, ones_x, cy, h, dx, dy);
 }
 static void draw_digits_pass(GContext *ctx, int h_tens, int h_ones, int m_tens, int m_ones,
-                              int h, int cy, int dx, int dy) {
+                              int h, int cy, int dx, int dy,
+                              int ub_top, int ub_bot) {
   draw_digit_vec(ctx, h_tens, SLOT_H_TENS, cy, h, dx, dy);
   draw_digit_vec(ctx, h_ones, SLOT_H_ONES, cy, h, dx, dy);
-  draw_colon_vec(ctx, COLON_SLOT_X, cy, h, dx, dy);
+  draw_colon_vec(ctx, COLON_SLOT_X, cy, h, dx, dy, ub_top, ub_bot);
   draw_digit_vec(ctx, m_tens, SLOT_M_TENS, cy, h, dx, dy);
   draw_digit_vec(ctx, m_ones, SLOT_M_ONES, cy, h, dx, dy);
 }
@@ -906,19 +922,18 @@ static void draw_layer(Layer *layer, GContext *ctx) {
                       ? localtime(&now_t) : NULL;
 
   // ---- SPLIT_V / MERGE_V ----
-  // Digit pairs animate to/from stacked positions.
-  // Colon dots animate to/from OFF-SCREEN (top above screen, bottom below screen).
+  // Digit pairs → stacked positions. Colon dots → off-screen (guarded).
   if (s_phase == PHASE_SPLIT_V || s_phase == PHASE_MERGE_V) {
     int step   = s_anim_step;
-    int hr_cy  = prv_lerp(s_sv_hr_cy_s,    s_sv_hr_cy_e,    step);
-    int mn_cy  = prv_lerp(s_sv_mn_cy_s,    s_sv_mn_cy_e,    step);
-    int dh     = prv_lerp(s_sv_h_s,        s_sv_h_e,        step);
-    int top_cy = prv_lerp(s_sv_top_dot_s,  s_sv_top_dot_e,  step);
-    int bot_cy = prv_lerp(s_sv_bot_dot_s,  s_sv_bot_dot_e,  step);
+    int hr_cy  = prv_lerp(s_sv_hr_cy_s,   s_sv_hr_cy_e,   step);
+    int mn_cy  = prv_lerp(s_sv_mn_cy_s,   s_sv_mn_cy_e,   step);
+    int dh     = prv_lerp(s_sv_h_s,       s_sv_h_e,       step);
+    int top_cy = prv_lerp(s_sv_top_dot_s, s_sv_top_dot_e, step);
+    int bot_cy = prv_lerp(s_sv_bot_dot_s, s_sv_bot_dot_e, step);
     graphics_context_set_fill_color(ctx, shadow_col);
-    draw_colon_split(ctx, COLON_SLOT_X, top_cy, bot_cy, SHADOW_DX, SHADOW_DY);
+    draw_colon_split(ctx, COLON_SLOT_X, top_cy, bot_cy, SHADOW_DX, SHADOW_DY, ub_top, ub_bot);
     graphics_context_set_fill_color(ctx, s_fg);
-    draw_colon_split(ctx, COLON_SLOT_X, top_cy, bot_cy, 0, 0);
+    draw_colon_split(ctx, COLON_SLOT_X, top_cy, bot_cy, 0, 0, ub_top, ub_bot);
     graphics_context_set_fill_color(ctx, shadow_col);
     draw_pair(ctx, h_tens, h_ones, SLOT_H_TENS, SLOT_H_ONES, hr_cy, dh, SHADOW_DX, SHADOW_DY);
     draw_pair(ctx, m_tens, m_ones, SLOT_M_TENS, SLOT_M_ONES, mn_cy, dh, SHADOW_DX, SHADOW_DY);
@@ -928,8 +943,7 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     return;
   }
 
-  // ---- SPLIT_H / MERGE_H ----
-  // Colon dots are already off-screen — do NOT draw them.
+  // ---- SPLIT_H / MERGE_H ---- No colon (already off-screen)
   if (s_phase == PHASE_SPLIT_H || s_phase == PHASE_MERGE_H) {
     int step      = s_anim_step;
     int hr_tens_x = prv_lerp(s_sh_hr_tx_s, s_sh_hr_tx_e, step);
@@ -951,9 +965,9 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   if (s_layout == LAYOUT_FULL) {
     int cy = ub_top + MARGIN_OUTER + s_target_h / 2;
     graphics_context_set_fill_color(ctx, shadow_col);
-    draw_digits_pass(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy, SHADOW_DX, SHADOW_DY);
+    draw_digits_pass(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy, SHADOW_DX, SHADOW_DY, ub_top, ub_bot);
     graphics_context_set_fill_color(ctx, s_fg);
-    draw_digits_pass(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy, 0, 0);
+    draw_digits_pass(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy, 0, 0, ub_top, ub_bot);
 
   } else if (s_layout == LAYOUT_INFO) {
     int above_s[3], below_s[3];
@@ -974,9 +988,9 @@ static void draw_layer(Layer *layer, GContext *ctx) {
       draw_info_line(ctx, &s_below_lines[i], gy + slide, col_x, col_w, GTextAlignmentCenter);
     }
     graphics_context_set_fill_color(ctx, shadow_col);
-    draw_digits_pass(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy, SHADOW_DX, SHADOW_DY);
+    draw_digits_pass(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy, SHADOW_DX, SHADOW_DY, ub_top, ub_bot);
     graphics_context_set_fill_color(ctx, s_fg);
-    draw_digits_pass(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy, 0, 0);
+    draw_digits_pass(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy, 0, 0, ub_top, ub_bot);
 
   } else {
     int dh = prv_compute_stacked_h(ub_h);
@@ -1028,9 +1042,8 @@ static bool prv_info_slide_step(void) {
     ? INFO_SLIDE_DIST - (INFO_SLIDE_DIST * s_info_slide_step) / INFO_SLIDE_FRAMES
     : (INFO_SLIDE_DIST * s_info_slide_step) / INFO_SLIDE_FRAMES;
   if (s_info_slide_step >= INFO_SLIDE_FRAMES) {
-    s_info_slide      = (s_info_slide_dir > 0) ? 0 : INFO_SLIDE_DIST;
-    s_info_slide_dir  = 0;
-    s_info_slide_step = 0;
+    s_info_slide = (s_info_slide_dir > 0) ? 0 : INFO_SLIDE_DIST;
+    s_info_slide_dir = 0; s_info_slide_step = 0;
     return true;
   }
   return false;
@@ -1055,7 +1068,6 @@ static void prv_start_split_v(int target_layout) {
   int bot_margin = BOTTOM_MARGIN(ub_h);
   s_sv_cy = ub_top + MARGIN_OUTER + s_target_h / 2;
 
-  // Digits travel to their stacked row positions
   int dh_final   = prv_compute_stacked_h(ub_h);
   int h_cy_final = ub_top + MARGIN_OUTER + dh_final / 2;
   int m_cy_final = ub_bot - bot_margin - dh_final / 2;
@@ -1063,11 +1075,12 @@ static void prv_start_split_v(int target_layout) {
   s_sv_mn_cy_s = s_sv_cy;  s_sv_mn_cy_e = m_cy_final;
   s_sv_h_s     = s_h;      s_sv_h_e     = dh_final;
 
-  // Colon dots travel to off-screen — top above, bottom below (independent of digit destinations)
-  int colon_start_top = s_sv_cy - s_h/4 + 2;  // where top dot starts (in normal colon)
-  int colon_start_bot = s_sv_cy + s_h/4 - 2;  // where bottom dot starts
-  s_sv_top_dot_s = colon_start_top;  s_sv_top_dot_e = ub_top - UNIT * 4;
-  s_sv_bot_dot_s = colon_start_bot;  s_sv_bot_dot_e = ub_bot + UNIT * 4;
+  // Colon dots start at their normal positions and travel far off-screen.
+  // Using COLON_OFFSCREEN ensures they are invisible well before SPLIT_H starts.
+  int colon_start_top = s_sv_cy - s_h/4 + 2;
+  int colon_start_bot = s_sv_cy + s_h/4 - 2;
+  s_sv_top_dot_s = colon_start_top;  s_sv_top_dot_e = ub_top - COLON_OFFSCREEN;
+  s_sv_bot_dot_s = colon_start_bot;  s_sv_bot_dot_e = ub_bot + COLON_OFFSCREEN;
 
   s_split_target_layout = target_layout;
   s_anim_step = 0; s_phase = PHASE_SPLIT_V; schedule(SPLIT_MS);
@@ -1116,7 +1129,6 @@ static void prv_start_merge_v(void) {
   int bot_margin = BOTTOM_MARGIN(ub_h);
   s_sv_cy = ub_top + MARGIN_OUTER + s_target_h / 2;
 
-  // Digits travel from stacked positions back to center
   int dh_final   = prv_compute_stacked_h(ub_h);
   int h_cy_final = ub_top + MARGIN_OUTER + dh_final / 2;
   int m_cy_final = ub_bot - bot_margin - dh_final / 2;
@@ -1124,11 +1136,11 @@ static void prv_start_merge_v(void) {
   s_sv_mn_cy_s = m_cy_final;  s_sv_mn_cy_e = s_sv_cy;
   s_sv_h_s     = dh_final;    s_sv_h_e     = s_target_h;
 
-  // Colon dots enter from off-screen — start far off, end at normal colon positions
+  // Colon dots enter from far off-screen and land at final colon positions
   int colon_end_top = s_sv_cy - s_target_h/4 + 2;
   int colon_end_bot = s_sv_cy + s_target_h/4 - 2;
-  s_sv_top_dot_s = ub_top - UNIT * 4;  s_sv_top_dot_e = colon_end_top;
-  s_sv_bot_dot_s = ub_bot + UNIT * 4;  s_sv_bot_dot_e = colon_end_bot;
+  s_sv_top_dot_s = ub_top - COLON_OFFSCREEN;  s_sv_top_dot_e = colon_end_top;
+  s_sv_bot_dot_s = ub_bot + COLON_OFFSCREEN;  s_sv_bot_dot_e = colon_end_bot;
 
   s_anim_step = 0; s_phase = PHASE_MERGE_V; schedule(SPLIT_MS);
 }
