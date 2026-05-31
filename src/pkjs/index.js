@@ -1,30 +1,26 @@
 // ============================================================
-// TallBoy — src/pkjs/index.js  v3.47d
-// PebbleKit JS: weather, solar, config page (up/down reorder)
+// TallBoy — src/pkjs/index.js  v3.52a
+// PebbleKit JS: weather, solar, config page
 //
 // SLOT TYPE IDs (must match main.c SlotType enum):
 //   0=empty, 1=day, 2=date, 3=day+date, 4=temp, 5=weather
 //   6=steps, 7=distance, 8=exp_steps, 9=pace
 //   10=calories, 11=heart_rate, 12=sunrise, 13=sunset
 //   14=daylight, 15=battery, 16=bluetooth
-//   17=TIME_MARKER
 //
 // MESSAGE KEYS (must match appinfo.json appKeys):
 //   WeatherTempF=0, WeatherTempC=1, WeatherCode=2
 //   SunriseTime=3, SunsetTime=4
-//   CfgSlot1=5..CfgSlot7=11  (full 7-item ordered array incl TIME_MARKER)
-//   CfgTempUnit=12 (0=F,1=C), CfgDistUnit=13 (0=mi,1=km)
-//   CfgClockFormat=14 (0=12h,1=24h)
+//   CfgInfoMode=5, CfgInfoLayout=6
+//   CfgTempUnit=7, CfgDistUnit=8, CfgClockFormat=9
+//   CfgWide1=10..CfgWide6=15
+//   CfgStack1=16..CfgStack8=23
 //
-// NOTE: Drag-to-reorder does NOT work in Pebble's embedded webview
-// (drag events are swallowed). Using up/down buttons instead.
-//
-// NOTE: moveRow() must call setSelectValue() to force visual update —
-// just setting .value is unreliable in Pebble's embedded webview.
+// InfoMode values:   0=debug, 1=off, 2=always, 3=shake, 4=shake1min
+// InfoLayout values: 0=wide, 1=stack_l, 2=stack_r
 // ============================================================
 
-var STORAGE_KEY = 'tallboy_settings_v347d';
-var TIME_MARKER = 17;
+var STORAGE_KEY = 'tallboy_settings_v352';
 
 var SLOT_NAMES = {
   0:  'Empty',
@@ -41,13 +37,20 @@ var SLOT_NAMES = {
   11: 'Heart rate',
   12: 'Sunrise',
   13: 'Sunset',
-  14: 'Daylight',
+  14: 'Daylight hours',
   15: 'Battery',
-  16: 'Bluetooth',
-  17: '\u{1F550} Time'
+  16: 'Bluetooth'
 };
 
-var DEFAULT_ORDER = [3, 5, 12, TIME_MARKER, 6, 9, 15];
+var DEFAULT_SETTINGS = {
+  infoMode:   0,   // debug
+  infoLayout: 1,   // stack_l
+  wide:    [1, 3, 0, 4, 6, 15],
+  stack:   [1, 3, 6, 9, 11, 4, 15, 16],
+  tempUnit:  0,   // F
+  distUnit:  0,   // mi
+  clockFmt:  0    // 12h
+};
 
 function loadSettings() {
   try {
@@ -55,14 +58,17 @@ function loadSettings() {
     if (saved) {
       var p = JSON.parse(saved);
       return {
-        order: p.order || DEFAULT_ORDER.slice(),
-        CfgTempUnit:    p.CfgTempUnit    || 0,
-        CfgDistUnit:    p.CfgDistUnit    || 0,
-        CfgClockFormat: p.CfgClockFormat || 0
+        infoMode:   p.infoMode   !== undefined ? p.infoMode   : DEFAULT_SETTINGS.infoMode,
+        infoLayout: p.infoLayout !== undefined ? p.infoLayout : DEFAULT_SETTINGS.infoLayout,
+        wide:       p.wide       || DEFAULT_SETTINGS.wide.slice(),
+        stack:      p.stack      || DEFAULT_SETTINGS.stack.slice(),
+        tempUnit:   p.tempUnit   !== undefined ? p.tempUnit   : DEFAULT_SETTINGS.tempUnit,
+        distUnit:   p.distUnit   !== undefined ? p.distUnit   : DEFAULT_SETTINGS.distUnit,
+        clockFmt:   p.clockFmt   !== undefined ? p.clockFmt   : DEFAULT_SETTINGS.clockFmt
       };
     }
   } catch(e) { console.log('Load error: ' + e); }
-  return { order: DEFAULT_ORDER.slice(), CfgTempUnit: 0, CfgDistUnit: 0, CfgClockFormat: 0 };
+  return JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
 }
 
 function saveSettings(s) {
@@ -71,13 +77,16 @@ function saveSettings(s) {
 
 function sendSettings(s) {
   var msg = {
-    CfgTempUnit:    s.CfgTempUnit,
-    CfgDistUnit:    s.CfgDistUnit,
-    CfgClockFormat: s.CfgClockFormat
+    CfgInfoMode:    s.infoMode,
+    CfgInfoLayout:  s.infoLayout,
+    CfgTempUnit:    s.tempUnit,
+    CfgDistUnit:    s.distUnit,
+    CfgClockFormat: s.clockFmt
   };
-  for (var i = 0; i < 7; i++) msg['CfgSlot' + (i + 1)] = s.order[i];
+  for (var i = 0; i < 6; i++)  msg['CfgWide'  + (i + 1)] = s.wide[i];
+  for (var i = 0; i < 8; i++)  msg['CfgStack' + (i + 1)] = s.stack[i];
   Pebble.sendAppMessage(msg,
-    function() { console.log('Settings sent'); },
+    function() { console.log('Settings sent OK'); },
     function(e) { console.log('Settings error: ' + e.error.message); });
 }
 
@@ -119,110 +128,135 @@ function fetchWeather() {
 
 // ============================================================
 // CONFIG PAGE
-// Up/down arrow buttons for reordering (drag doesn't work in
-// Pebble's embedded webview — drag events are swallowed).
-//
-// moveRow() uses setSelectValue() which explicitly iterates
-// <option> children and sets .selected — this is more reliable
-// than just setting .value in Pebble's webview.
 // ============================================================
-function buildConfigPage(s) {
-  var order = s.order.slice();
+function slotSelect(id, currentVal) {
+  var out = '<select id="' + id + '">';
+  for (var v in SLOT_NAMES) {
+    var sel = (parseInt(v) === currentVal) ? ' selected' : '';
+    out += '<option value="' + v + '"' + sel + '>' + SLOT_NAMES[v] + '<\/option>';
+  }
+  out += '<\/select>';
+  return out;
+}
 
-  function slotOptions(current) {
-    var out = '';
-    for (var id in SLOT_NAMES) {
-      var sel = (parseInt(id) === current) ? ' selected' : '';
-      out += '<option value="' + id + '"' + sel + '>' + SLOT_NAMES[id] + '<\/option>';
+function radioGroup(name, labels, values, currentVal) {
+  var out = '<div class="toggle">';
+  for (var i = 0; i < labels.length; i++) {
+    var chk = (values[i] === currentVal) ? ' checked' : '';
+    out += '<input type="radio" name="' + name + '" id="' + name + i + '" value="' + values[i] + '"' + chk + '>';
+    out += '<label for="' + name + i + '">' + labels[i] + '<\/label>';
+  }
+  out += '<\/div>';
+  return out;
+}
+
+function buildConfigPage(s) {
+  // Wide slot rows (6 slots, labeled)
+  var wideRows = '';
+  var wideLabels = ['Above 1', 'Above 2', 'Above 3', 'Below 1', 'Below 2', 'Below 3'];
+  for (var i = 0; i < 6; i++) {
+    wideRows += '<div class="row">'
+      + '<span class="lbl">' + wideLabels[i] + '<\/span>'
+      + slotSelect('w' + i, s.wide[i])
+      + '<\/div>';
+    if (i === 2) {
+      wideRows += '<div class="divider">\u23F0 Time<\/div>';
     }
-    return out;
   }
 
-  var rows = '';
-  for (var i = 0; i < 7; i++) {
-    rows += '<div class="row" id="row' + i + '">';
-    rows += '<div class="arrows">';
-    rows += '<button class="arr" onclick="moveRow(' + i + ',-1)">&#9650;<\/button>';
-    rows += '<button class="arr" onclick="moveRow(' + i + ',1)">&#9660;<\/button>';
-    rows += '<\/div>';
-    rows += '<select id="sel' + i + '">' + slotOptions(order[i]) + '<\/select>';
-    rows += '<\/div>';
+  // Stack slot rows (8 slots)
+  var stackRows = '';
+  for (var i = 0; i < 8; i++) {
+    stackRows += '<div class="row">'
+      + '<span class="lbl">' + (i + 1) + '<\/span>'
+      + slotSelect('s' + i, s.stack[i])
+      + '<\/div>';
   }
 
   var html = '<!DOCTYPE html><html><head>'
     + '<meta name="viewport" content="width=device-width,initial-scale=1">'
     + '<style>'
-    + 'body{font:14px sans-serif;background:#111;color:#eee;padding:16px;max-width:360px;margin:0 auto}'
-    + 'h2{color:#fff;margin:0 0 4px}p.sub{color:#888;font-size:12px;margin:0 0 16px}'
-    + '.section{margin-bottom:20px}'
+    + 'body{font:14px sans-serif;background:#111;color:#eee;padding:14px;max-width:360px;margin:0 auto}'
+    + 'h2{color:#fff;margin:0 0 16px;font-size:20px}'
+    + '.section{margin-bottom:22px}'
     + '.section h3{color:#aaa;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin:0 0 8px;border-bottom:1px solid #333;padding-bottom:4px}'
-    + '.row{display:flex;align-items:center;gap:8px;padding:5px 8px;background:#1a1a1a;border:1px solid #333;border-radius:6px;margin-bottom:5px}'
-    + '.arrows{display:flex;flex-direction:column;gap:2px;flex-shrink:0}'
-    + '.arr{background:#2a2a2a;border:1px solid #444;color:#ccc;padding:2px 6px;border-radius:3px;cursor:pointer;font-size:12px;line-height:1}'
-    + '.arr:active{background:#444}'
+    + '.row{display:flex;align-items:center;gap:8px;padding:5px 6px;background:#1a1a1a;border:1px solid #2a2a2a;border-radius:6px;margin-bottom:4px}'
+    + '.lbl{color:#888;font-size:12px;min-width:52px;flex-shrink:0}'
     + 'select{flex:1;padding:6px 8px;background:#222;border:1px solid #444;color:#eee;border-radius:4px;font-size:13px}'
-    + '.toggle{display:flex}'
+    + '.divider{text-align:center;color:#555;font-size:12px;padding:6px 0;border-top:1px dashed #333;border-bottom:1px dashed #333;margin:4px 0}'
+    + '.toggle{display:flex;margin-bottom:0}'
     + '.toggle input{display:none}'
-    + '.toggle label{flex:1;text-align:center;padding:8px;background:#222;border:1px solid #444;cursor:pointer;color:#aaa;font-size:13px}'
+    + '.toggle label{flex:1;text-align:center;padding:8px 4px;background:#222;border:1px solid #444;cursor:pointer;color:#aaa;font-size:12px;line-height:1.2}'
     + '.toggle input:checked+label{background:#4a9;color:#fff;border-color:#4a9}'
     + '.toggle label:first-of-type{border-radius:6px 0 0 6px}'
     + '.toggle label:last-of-type{border-radius:0 6px 6px 0}'
     + '.pair{display:flex;gap:10px}.pair>div{flex:1}'
-    + '#save{width:100%;padding:14px;background:#4a9;border:none;color:#fff;font-size:16px;font-weight:bold;border-radius:8px;cursor:pointer;margin-top:8px}'
+    + '#save{width:100%;padding:14px;background:#4a9;border:none;color:#fff;font-size:16px;font-weight:bold;border-radius:8px;cursor:pointer;margin-top:4px}'
     + '#save:active{background:#3a8}'
     + '<\/style><\/head><body>'
-    + '<h2>TallBoy<\/h2><p class="sub">&#9650;&#9660; to reorder  \u2022  &#x1F550; = time position<\/p>'
-    + '<div class="section"><h3>Slot Order<\/h3>'
-    + '<div id="list">' + rows + '<\/div><\/div>'
-    + '<div class="section"><h3>Units<\/h3>'
+    + '<h2>TallBoy<\/h2>'
+
+    // ---- Info Mode ----
+    + '<div class="section"><h3>Info Display Mode<\/h3>'
+    + radioGroup('im',
+        ['Always On', 'Always Off', 'Shake to Toggle', 'Shake — Show 1 min', 'Debug'],
+        [2, 1, 3, 4, 0],
+        s.infoMode)
+    + '<\/div>'
+
+    // ---- Info Layout ----
+    + '<div class="section"><h3>Info Layout<\/h3>'
+    + radioGroup('il',
+        ['Wide', 'Stacked Left', 'Stacked Right'],
+        [0, 1, 2],
+        s.infoLayout)
+    + '<\/div>'
+
+    // ---- Wide Mode Slots ----
+    + '<div class="section"><h3>Wide Mode Info Lines<\/h3>'
+    + '<p style="color:#666;font-size:12px;margin:0 0 8px">First 3 lines appear above the time, last 3 below.<\/p>'
+    + wideRows
+    + '<\/div>'
+
+    // ---- Stacked Mode Slots ----
+    + '<div class="section"><h3>Stacked Mode Info Lines<\/h3>'
+    + '<p style="color:#666;font-size:12px;margin:0 0 8px">Used by both Stacked Left and Stacked Right.<\/p>'
+    + stackRows
+    + '<\/div>'
+
+    // ---- Units ----
+    + '<div class="section"><h3>Units &amp; Format<\/h3>'
     + '<div class="pair">'
     + '<div><label style="color:#aaa;font-size:12px;display:block;margin-bottom:4px">Temp<\/label>'
-    + '<div class="toggle">'
-    + '<input type="radio" name="tu" id="tu0" value="0"' + (s.CfgTempUnit === 0 ? ' checked' : '') + '><label for="tu0">\u00b0F<\/label>'
-    + '<input type="radio" name="tu" id="tu1" value="1"' + (s.CfgTempUnit === 1 ? ' checked' : '') + '><label for="tu1">\u00b0C<\/label>'
-    + '<\/div><\/div>'
+    + radioGroup('tu', ['\u00b0F', '\u00b0C'], [0, 1], s.tempUnit)
+    + '<\/div>'
     + '<div><label style="color:#aaa;font-size:12px;display:block;margin-bottom:4px">Distance<\/label>'
-    + '<div class="toggle">'
-    + '<input type="radio" name="du" id="du0" value="0"' + (s.CfgDistUnit === 0 ? ' checked' : '') + '><label for="du0">mi<\/label>'
-    + '<input type="radio" name="du" id="du1" value="1"' + (s.CfgDistUnit === 1 ? ' checked' : '') + '><label for="du1">km<\/label>'
-    + '<\/div><\/div><\/div><\/div>'
-    + '<div class="section"><h3>Clock<\/h3>'
-    + '<div class="toggle">'
-    + '<input type="radio" name="cf" id="cf0" value="0"' + (s.CfgClockFormat === 0 ? ' checked' : '') + '><label for="cf0">12h<\/label>'
-    + '<input type="radio" name="cf" id="cf1" value="1"' + (s.CfgClockFormat === 1 ? ' checked' : '') + '><label for="cf1">24h<\/label>'
+    + radioGroup('du', ['mi', 'km'], [0, 1], s.distUnit)
     + '<\/div><\/div>'
+    + '<div style="margin-top:10px"><label style="color:#aaa;font-size:12px;display:block;margin-bottom:4px">Clock<\/label>'
+    + radioGroup('cf', ['12-hour', '24-hour'], [0, 1], s.clockFmt)
+    + '<\/div><\/div>'
+
     + '<button id="save" onclick="doSave()">Save<\/button>'
+
     + '<script>'
-    // setSelectValue: explicitly iterate options and set .selected
-    // More reliable than .value= in Pebble's embedded webview
-    + 'function setSelectValue(sel, val) {'
-    + '  val = String(val);'
-    + '  for (var i = 0; i < sel.options.length; i++) {'
-    + '    sel.options[i].selected = (sel.options[i].value === val);'
-    + '  }'
-    + '}'
-    + 'function moveRow(idx, dir) {'
-    + '  var newIdx = idx + dir;'
-    + '  if (newIdx < 0 || newIdx >= 7) return;'
-    + '  var s1 = document.getElementById("sel" + idx);'
-    + '  var s2 = document.getElementById("sel" + newIdx);'
-    + '  var tmp = s1.value;'
-    + '  setSelectValue(s1, s2.value);'
-    + '  setSelectValue(s2, tmp);'
-    + '}'
     + 'function doSave() {'
-    + '  var order = [];'
-    + '  for (var i = 0; i < 7; i++) {'
-    + '    order.push(parseInt(document.getElementById("sel" + i).value));'
-    + '  }'
+    + '  var im = document.querySelector("input[name=im]:checked");'
+    + '  var il = document.querySelector("input[name=il]:checked");'
     + '  var tu = document.querySelector("input[name=tu]:checked");'
     + '  var du = document.querySelector("input[name=du]:checked");'
     + '  var cf = document.querySelector("input[name=cf]:checked");'
+    + '  var wide = [], stack = [];'
+    + '  for (var i = 0; i < 6; i++) wide.push(parseInt(document.getElementById("w"+i).value));'
+    + '  for (var i = 0; i < 8; i++) stack.push(parseInt(document.getElementById("s"+i).value));'
     + '  var s = {'
-    + '    order: order,'
-    + '    CfgTempUnit:    tu ? parseInt(tu.value) : 0,'
-    + '    CfgDistUnit:    du ? parseInt(du.value) : 0,'
-    + '    CfgClockFormat: cf ? parseInt(cf.value) : 0'
+    + '    infoMode:   im ? parseInt(im.value) : 0,'
+    + '    infoLayout: il ? parseInt(il.value) : 1,'
+    + '    wide:  wide,'
+    + '    stack: stack,'
+    + '    tempUnit:  tu ? parseInt(tu.value) : 0,'
+    + '    distUnit:  du ? parseInt(du.value) : 0,'
+    + '    clockFmt:  cf ? parseInt(cf.value) : 0'
     + '  };'
     + '  location.href = "pebblejs://close#" + encodeURIComponent(JSON.stringify(s));'
     + '}'
