@@ -1,12 +1,12 @@
 // ============================================================
-// TallBoy — main.c  v3.52c
+// TallBoy — main.c  v3.52d
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.52c:
-//   - Colon no longer drawn during SPLIT_H / MERGE_H (already offscreen)
-//   - Wide info lines slide up/down on enter/exit (above lines go up, below go down)
-//   - New SLOT_SUN_TIMES (17): combined "sunrise · sunset" for wide mode
-//   - Touch re-enabled (quiet mode OS fix); default radius stays at UNIT*2
+// v3.52d: Fix colon dot animation in SPLIT_V / MERGE_V.
+//   Colon dots now have their own off-screen endpoints, independent
+//   of where the digit pairs land. Top dot exits above screen,
+//   bottom dot exits below screen. No more blink/snap.
+//   s_sv_top_dot_s/e and s_sv_bot_dot_s/e track dot positions.
 // ============================================================
 
 #include <pebble.h>
@@ -29,7 +29,7 @@ typedef enum {
   SLOT_DAYLIGHT   = 14,
   SLOT_BATTERY    = 15,
   SLOT_BLUETOOTH  = 16,
-  SLOT_SUN_TIMES  = 17   // combined "rise · set" — wide mode only
+  SLOT_SUN_TIMES  = 17
 } SlotType;
 
 #define LAYOUT_FULL    0
@@ -117,7 +117,6 @@ typedef enum {
 #define SPLIT_FRAMES  48
 #define SPLIT_MS      16
 
-// Wide info slide: lines travel this many px vertically on enter/exit
 #define INFO_SLIDE_FRAMES  SPLIT_FRAMES
 #define INFO_SLIDE_DIST    (UNIT * 4)
 
@@ -157,12 +156,9 @@ typedef enum {
 
 static bool s_expand_no_overshoot = false;
 
-// Wide info slide state: animated offset applied to above/below lines
-// Positive = lines are shifted away from time (above up, below down)
-// 0 = fully settled in place
-static int  s_info_slide    = 0;   // current offset magnitude (px)
-static int  s_info_slide_dir = 0;  // +1 = exiting, -1 = entering, 0 = done
-static int  s_info_slide_step = 0; // frame counter
+static int  s_info_slide     = 0;
+static int  s_info_slide_dir = 0;
+static int  s_info_slide_step = 0;
 
 typedef void (*IconFn)(GContext*,int,int,GColor,bool);
 typedef struct {
@@ -221,15 +217,23 @@ static const int DEBUG_CYCLE_LAYOUTS[] = { LAYOUT_INFO, LAYOUT_STACK_R, LAYOUT_S
 #define PERSIST_CFG_STACK_HI 4
 #define CFG_VERSION          2
 
+// Digit pair animation for SPLIT_V / MERGE_V
 static int s_sv_hr_cy_s, s_sv_hr_cy_e;
 static int s_sv_mn_cy_s, s_sv_mn_cy_e;
 static int s_sv_h_s,     s_sv_h_e;
 static int s_sv_cy;
+
+// Colon dot animation for SPLIT_V / MERGE_V (INDEPENDENT of digit endpoints)
+// Top dot exits above screen, bottom dot exits below screen.
+static int s_sv_top_dot_s, s_sv_top_dot_e;
+static int s_sv_bot_dot_s, s_sv_bot_dot_e;
+
+// Horizontal slide animation for SPLIT_H / MERGE_H
 static int s_sh_hr_tx_s, s_sh_hr_tx_e;
 static int s_sh_mn_tx_s, s_sh_mn_tx_e;
 static int s_sh_hr_cy, s_sh_mn_cy;
 static int s_sh_h;
-static int s_sh_col_s,     s_sh_col_e;
+static int s_sh_col_s, s_sh_col_e;
 static int s_split_target_layout;
 
 static void prv_save_config(void) {
@@ -586,11 +590,12 @@ static void draw_colon_dot(GContext *ctx, int slot_x, int cy, int dx, int dy) {
   graphics_fill_radial(ctx, GRect(ddx-r, cy-r+dy, r*2, r*2),
     GOvalScaleModeFitCircle, (uint16_t)r, 0, DEG_TO_TRIGANGLE(360));
 }
+// Normal colon: symmetric dots around cy
 static void draw_colon_vec(GContext *ctx, int slot_x, int cy, int h, int dx, int dy) {
   draw_colon_dot(ctx, slot_x, cy - h/4 + 2, dx, dy);
   draw_colon_dot(ctx, slot_x, cy + h/4 - 2, dx, dy);
 }
-// Split colon: top dot tracks hr_cy, bottom dot tracks mn_cy
+// Split colon: each dot at an explicit absolute y (independent paths)
 static void draw_colon_split(GContext *ctx, int slot_x,
                               int top_cy, int bot_cy, int dx, int dy) {
   draw_colon_dot(ctx, slot_x, top_cy, dx, dy);
@@ -775,7 +780,6 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       snprintf(buf,len,"%s",s_bt_connected?"":"no bt");
       return true;
     case SLOT_SUN_TIMES: {
-      // Combined "rise · set" — wide mode only (stacked falls back to sunrise)
       char rb[12], sb2[12];
       prv_fmt_time_min(rb, sizeof(rb), s_sunrise_min);
       prv_fmt_time_min(sb2, sizeof(sb2), s_sunset_min);
@@ -902,17 +906,19 @@ static void draw_layer(Layer *layer, GContext *ctx) {
                       ? localtime(&now_t) : NULL;
 
   // ---- SPLIT_V / MERGE_V ----
-  // Colon: top dot tracks hr_cy (exits up), bottom dot tracks mn_cy (exits down)
-  // No colon drawn in SPLIT_H/MERGE_H — dots are already off-screen
+  // Digit pairs animate to/from stacked positions.
+  // Colon dots animate to/from OFF-SCREEN (top above screen, bottom below screen).
   if (s_phase == PHASE_SPLIT_V || s_phase == PHASE_MERGE_V) {
-    int step  = s_anim_step;
-    int hr_cy = prv_lerp(s_sv_hr_cy_s, s_sv_hr_cy_e, step);
-    int mn_cy = prv_lerp(s_sv_mn_cy_s, s_sv_mn_cy_e, step);
-    int dh    = prv_lerp(s_sv_h_s, s_sv_h_e, step);
+    int step   = s_anim_step;
+    int hr_cy  = prv_lerp(s_sv_hr_cy_s,    s_sv_hr_cy_e,    step);
+    int mn_cy  = prv_lerp(s_sv_mn_cy_s,    s_sv_mn_cy_e,    step);
+    int dh     = prv_lerp(s_sv_h_s,        s_sv_h_e,        step);
+    int top_cy = prv_lerp(s_sv_top_dot_s,  s_sv_top_dot_e,  step);
+    int bot_cy = prv_lerp(s_sv_bot_dot_s,  s_sv_bot_dot_e,  step);
     graphics_context_set_fill_color(ctx, shadow_col);
-    draw_colon_split(ctx, COLON_SLOT_X, hr_cy, mn_cy, SHADOW_DX, SHADOW_DY);
+    draw_colon_split(ctx, COLON_SLOT_X, top_cy, bot_cy, SHADOW_DX, SHADOW_DY);
     graphics_context_set_fill_color(ctx, s_fg);
-    draw_colon_split(ctx, COLON_SLOT_X, hr_cy, mn_cy, 0, 0);
+    draw_colon_split(ctx, COLON_SLOT_X, top_cy, bot_cy, 0, 0);
     graphics_context_set_fill_color(ctx, shadow_col);
     draw_pair(ctx, h_tens, h_ones, SLOT_H_TENS, SLOT_H_ONES, hr_cy, dh, SHADOW_DX, SHADOW_DY);
     draw_pair(ctx, m_tens, m_ones, SLOT_M_TENS, SLOT_M_ONES, mn_cy, dh, SHADOW_DX, SHADOW_DY);
@@ -923,9 +929,9 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   }
 
   // ---- SPLIT_H / MERGE_H ----
-  // Colon dots already off-screen from SPLIT_V — do NOT draw them here.
+  // Colon dots are already off-screen — do NOT draw them.
   if (s_phase == PHASE_SPLIT_H || s_phase == PHASE_MERGE_H) {
-    int step = s_anim_step;
+    int step      = s_anim_step;
     int hr_tens_x = prv_lerp(s_sh_hr_tx_s, s_sh_hr_tx_e, step);
     int mn_tens_x = prv_lerp(s_sh_mn_tx_s, s_sh_mn_tx_e, step);
     int col_x     = prv_lerp(s_sh_col_s,   s_sh_col_e,   step);
@@ -933,7 +939,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int dummy_tx, dummy_ox, col_x_final, col_w; GTextAlignment info_align;
     prv_stacked_geom(tl, &dummy_tx, &dummy_ox, &col_x_final, &col_w, &info_align);
     prv_draw_stacked_info(ctx, tm_now, col_x, col_w, info_align, ub_top, ub_bot);
-    // No colon — already exited in SPLIT_V / not yet entered until MERGE_V
     graphics_context_set_fill_color(ctx, shadow_col);
     draw_pair(ctx, h_tens, h_ones, hr_tens_x, hr_tens_x + SLOT_W, s_sh_hr_cy, s_sh_h, SHADOW_DX, SHADOW_DY);
     draw_pair(ctx, m_tens, m_ones, mn_tens_x, mn_tens_x + SLOT_W, s_sh_mn_cy, s_sh_h, SHADOW_DX, SHADOW_DY);
@@ -943,7 +948,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     return;
   }
 
-  // ---- Normal rendering ----
   if (s_layout == LAYOUT_FULL) {
     int cy = ub_top + MARGIN_OUTER + s_target_h / 2;
     graphics_context_set_fill_color(ctx, shadow_col);
@@ -962,7 +966,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int below_end   = ub_bot - HALF_UNIT;
     int time_cy     = (above_end + HALF_UNIT + (below_end - prv_info_block_h(bn, INFO_LINE_STEP_WIDE)) - HALF_UNIT) / 2;
     int col_x = SIDE_MARGIN, col_w = SCREEN_W - 2 * SIDE_MARGIN;
-    // Apply slide offset: above lines slide up (negative dy), below slide down (positive dy)
     int slide = s_info_slide;
     for (int i = 0; i < an; i++)
       draw_info_line(ctx, &s_above_lines[i], above_start + i*INFO_LINE_STEP_WIDE - slide, col_x, col_w, GTextAlignmentCenter);
@@ -1018,8 +1021,6 @@ static bool prv_ease_shrink_step(void) {
   if (s_h <= s_h_min) { s_h = s_h_min; return true; }
   return false;
 }
-
-// Advance wide info slide by one frame. Returns true when settled.
 static bool prv_info_slide_step(void) {
   if (s_info_slide_dir == 0) return true;
   s_info_slide_step++;
@@ -1034,24 +1035,16 @@ static bool prv_info_slide_step(void) {
   }
   return false;
 }
-
 static void prv_start_anticipate(void) { s_phase = PHASE_ANTICIPATE; schedule(ANTICIPATION_MS); }
 static void prv_start_blink(void) {
   s_h = s_target_h; s_going_down = true; s_anim_rep = 0; s_overshot = false;
   s_phase = PHASE_BLINK; layer_mark_dirty(s_canvas_layer); schedule(ANIM_STEP_MS);
 }
-
-// Start wide info slide in: lines travel from INFO_SLIDE_DIST → 0
 static void prv_info_slide_in(void) {
-  s_info_slide      = INFO_SLIDE_DIST;
-  s_info_slide_dir  = -1;  // decreasing offset = sliding into place
-  s_info_slide_step = 0;
+  s_info_slide = INFO_SLIDE_DIST; s_info_slide_dir = -1; s_info_slide_step = 0;
 }
-// Start wide info slide out: lines travel from 0 → INFO_SLIDE_DIST
 static void prv_info_slide_out(void) {
-  s_info_slide      = 0;
-  s_info_slide_dir  = +1;  // increasing offset = sliding away
-  s_info_slide_step = 0;
+  s_info_slide = 0; s_info_slide_dir = +1; s_info_slide_step = 0;
 }
 
 static void prv_start_split_v(int target_layout) {
@@ -1061,12 +1054,21 @@ static void prv_start_split_v(int target_layout) {
   int ub_top = ub.origin.y, ub_h = ub.size.h, ub_bot = ub_top + ub_h;
   int bot_margin = BOTTOM_MARGIN(ub_h);
   s_sv_cy = ub_top + MARGIN_OUTER + s_target_h / 2;
+
+  // Digits travel to their stacked row positions
   int dh_final   = prv_compute_stacked_h(ub_h);
   int h_cy_final = ub_top + MARGIN_OUTER + dh_final / 2;
   int m_cy_final = ub_bot - bot_margin - dh_final / 2;
-  s_sv_hr_cy_s = s_sv_cy;   s_sv_hr_cy_e = h_cy_final;
-  s_sv_mn_cy_s = s_sv_cy;   s_sv_mn_cy_e = m_cy_final;
-  s_sv_h_s     = s_h;       s_sv_h_e     = dh_final;
+  s_sv_hr_cy_s = s_sv_cy;  s_sv_hr_cy_e = h_cy_final;
+  s_sv_mn_cy_s = s_sv_cy;  s_sv_mn_cy_e = m_cy_final;
+  s_sv_h_s     = s_h;      s_sv_h_e     = dh_final;
+
+  // Colon dots travel to off-screen — top above, bottom below (independent of digit destinations)
+  int colon_start_top = s_sv_cy - s_h/4 + 2;  // where top dot starts (in normal colon)
+  int colon_start_bot = s_sv_cy + s_h/4 - 2;  // where bottom dot starts
+  s_sv_top_dot_s = colon_start_top;  s_sv_top_dot_e = ub_top - UNIT * 4;
+  s_sv_bot_dot_s = colon_start_bot;  s_sv_bot_dot_e = ub_bot + UNIT * 4;
+
   s_split_target_layout = target_layout;
   s_anim_step = 0; s_phase = PHASE_SPLIT_V; schedule(SPLIT_MS);
 }
@@ -1113,12 +1115,21 @@ static void prv_start_merge_v(void) {
   int ub_h = ub.size.h, ub_top = ub.origin.y, ub_bot = ub_top + ub_h;
   int bot_margin = BOTTOM_MARGIN(ub_h);
   s_sv_cy = ub_top + MARGIN_OUTER + s_target_h / 2;
+
+  // Digits travel from stacked positions back to center
   int dh_final   = prv_compute_stacked_h(ub_h);
   int h_cy_final = ub_top + MARGIN_OUTER + dh_final / 2;
   int m_cy_final = ub_bot - bot_margin - dh_final / 2;
   s_sv_hr_cy_s = h_cy_final;  s_sv_hr_cy_e = s_sv_cy;
   s_sv_mn_cy_s = m_cy_final;  s_sv_mn_cy_e = s_sv_cy;
   s_sv_h_s     = dh_final;    s_sv_h_e     = s_target_h;
+
+  // Colon dots enter from off-screen — start far off, end at normal colon positions
+  int colon_end_top = s_sv_cy - s_target_h/4 + 2;
+  int colon_end_bot = s_sv_cy + s_target_h/4 - 2;
+  s_sv_top_dot_s = ub_top - UNIT * 4;  s_sv_top_dot_e = colon_end_top;
+  s_sv_bot_dot_s = ub_bot + UNIT * 4;  s_sv_bot_dot_e = colon_end_bot;
+
   s_anim_step = 0; s_phase = PHASE_MERGE_V; schedule(SPLIT_MS);
 }
 
@@ -1139,7 +1150,6 @@ static void prv_return_to_full(void) {
   if (s_layout == LAYOUT_STACK_L || s_layout == LAYOUT_STACK_R) {
     prv_start_merge_h();
   } else {
-    // Wide → Full: slide info out while squishing
     prv_info_slide_out();
     s_layout = LAYOUT_FULL;
     prv_update_targets();
@@ -1152,7 +1162,6 @@ static void prv_return_to_full(void) {
 
 static void timer_cb(void *data) {
   s_timer = NULL;
-  // Advance info slide concurrently with any h animation
   if (s_info_slide_dir != 0) {
     prv_info_slide_step();
     layer_mark_dirty(s_canvas_layer);
@@ -1215,7 +1224,6 @@ static void timer_cb(void *data) {
       if (++s_anim_step < SPLIT_FRAMES) { layer_mark_dirty(s_canvas_layer); schedule(SPLIT_MS); }
       else { s_h = s_target_h; s_phase = PHASE_DONE; layer_mark_dirty(s_canvas_layer); } break;
     case PHASE_DONE:
-      // Keep firing if info slide still running
       if (s_info_slide_dir != 0) schedule(SPLIT_MS);
       break;
   }
@@ -1236,7 +1244,6 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
     if (target == LAYOUT_STACK_L || target == LAYOUT_STACK_R) {
       prv_start_split_v(target);
     } else {
-      // Wide info entering: slide lines in while digits squish
       s_layout = target;
       prv_update_targets();
       s_h_min = H_MIN;
