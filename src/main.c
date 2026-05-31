@@ -1,9 +1,12 @@
 // ============================================================
-// TallBoy — main.c  v3.52b
+// TallBoy — main.c  v3.52c
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.52b: Use clock_is_24h_style() system setting instead of
-//   s_cfg_24h config var. Removes clock format from config/persist.
+// v3.52c:
+//   - Colon no longer drawn during SPLIT_H / MERGE_H (already offscreen)
+//   - Wide info lines slide up/down on enter/exit (above lines go up, below go down)
+//   - New SLOT_SUN_TIMES (17): combined "sunrise · sunset" for wide mode
+//   - Touch re-enabled (quiet mode OS fix); default radius stays at UNIT*2
 // ============================================================
 
 #include <pebble.h>
@@ -25,7 +28,8 @@ typedef enum {
   SLOT_SUNSET     = 13,
   SLOT_DAYLIGHT   = 14,
   SLOT_BATTERY    = 15,
-  SLOT_BLUETOOTH  = 16
+  SLOT_BLUETOOTH  = 16,
+  SLOT_SUN_TIMES  = 17   // combined "rise · set" — wide mode only
 } SlotType;
 
 #define LAYOUT_FULL    0
@@ -102,10 +106,8 @@ typedef enum {
 #define H_ABSOLUTE_MIN  (UNIT * 5)
 #define INFO_LINE_BUF   48
 #define INFO_LINES_MAX  8
-#define NUM_SLOTS       6
 
 #define STACK_INFO_MARGIN  (UNIT * 2)
-#define STACK_INFO_LINES   8
 #define WIDE_SLOTS         6
 #define STACK_SLOTS        8
 
@@ -114,6 +116,10 @@ typedef enum {
 
 #define SPLIT_FRAMES  48
 #define SPLIT_MS      16
+
+// Wide info slide: lines travel this many px vertically on enter/exit
+#define INFO_SLIDE_FRAMES  SPLIT_FRAMES
+#define INFO_SLIDE_DIST    (UNIT * 4)
 
 static int prv_lerp(int a, int b, int step) {
   if (step <= 0) return a;
@@ -150,6 +156,13 @@ typedef enum {
 } Phase;
 
 static bool s_expand_no_overshoot = false;
+
+// Wide info slide state: animated offset applied to above/below lines
+// Positive = lines are shifted away from time (above up, below down)
+// 0 = fully settled in place
+static int  s_info_slide    = 0;   // current offset magnitude (px)
+static int  s_info_slide_dir = 0;  // +1 = exiting, -1 = entering, 0 = done
+static int  s_info_slide_step = 0; // frame counter
 
 typedef void (*IconFn)(GContext*,int,int,GColor,bool);
 typedef struct {
@@ -194,7 +207,6 @@ static int  s_cfg_wide[WIDE_SLOTS]   = { 1, 3, 0, 4, 6, 15 };
 static int  s_cfg_stack[STACK_SLOTS] = { 1, 3, 6, 9, 11, 4, 15, 16 };
 static bool s_cfg_temp_f    = true;
 static bool s_cfg_dist_mi   = true;
-// 24h time: always use clock_is_24h_style() — no config var needed
 static InfoMode   s_cfg_info_mode   = INFO_MODE_DEBUG;
 static InfoLayout s_cfg_info_layout = INFO_LAYOUT_STACK_L;
 
@@ -217,14 +229,11 @@ static int s_sh_hr_tx_s, s_sh_hr_tx_e;
 static int s_sh_mn_tx_s, s_sh_mn_tx_e;
 static int s_sh_hr_cy, s_sh_mn_cy;
 static int s_sh_h;
-static int s_sh_col_s,       s_sh_col_e;
-static int s_sh_colon_x_s,   s_sh_colon_x_e;
-static int s_sh_colon_cy;
+static int s_sh_col_s,     s_sh_col_e;
 static int s_split_target_layout;
 
 static void prv_save_config(void) {
   persist_write_int(PERSIST_CFG_VERSION, CFG_VERSION);
-  // Bit layout: [0]=temp_f [1]=dist_mi [2..4]=info_mode [5..6]=info_layout
   int32_t flags = (s_cfg_temp_f  ? 1 : 0)
                 | (s_cfg_dist_mi ? 2 : 0)
                 | ((int)s_cfg_info_mode   << 2)
@@ -581,6 +590,7 @@ static void draw_colon_vec(GContext *ctx, int slot_x, int cy, int h, int dx, int
   draw_colon_dot(ctx, slot_x, cy - h/4 + 2, dx, dy);
   draw_colon_dot(ctx, slot_x, cy + h/4 - 2, dx, dy);
 }
+// Split colon: top dot tracks hr_cy, bottom dot tracks mn_cy
 static void draw_colon_split(GContext *ctx, int slot_x,
                               int top_cy, int bot_cy, int dx, int dy) {
   draw_colon_dot(ctx, slot_x, top_cy, dx, dy);
@@ -764,6 +774,14 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
     case SLOT_BLUETOOTH:
       snprintf(buf,len,"%s",s_bt_connected?"":"no bt");
       return true;
+    case SLOT_SUN_TIMES: {
+      // Combined "rise · set" — wide mode only (stacked falls back to sunrise)
+      char rb[12], sb2[12];
+      prv_fmt_time_min(rb, sizeof(rb), s_sunrise_min);
+      prv_fmt_time_min(sb2, sizeof(sb2), s_sunset_min);
+      if (wide) snprintf(buf,len,"%s"DOT"%s",rb,sb2);
+      else      snprintf(buf,len,"%s",rb);
+      return true; }
     default: return false;
   }
 }
@@ -773,7 +791,7 @@ static IconFn prv_slot_icon(SlotType slot, bool *is_battery, bool *is_weather, i
     case SLOT_STEPS: case SLOT_DISTANCE: case SLOT_EXP_STEPS: case SLOT_PACE: return icon_steps;
     case SLOT_CALORIES: return icon_calories;
     case SLOT_HEART: return icon_heart;
-    case SLOT_SUNRISE: case SLOT_SUNSET: case SLOT_DAYLIGHT: return icon_sun;
+    case SLOT_SUNRISE: case SLOT_SUNSET: case SLOT_DAYLIGHT: case SLOT_SUN_TIMES: return icon_sun;
     case SLOT_BATTERY: *is_battery=true; *extra=s_battery_pct; return NULL;
     case SLOT_BLUETOOTH: return icon_bt;
     case SLOT_TEMP: case SLOT_WEATHER: *is_weather=true; *extra=s_weather_code; return NULL;
@@ -873,7 +891,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 #endif
 
-  // Use Pebble system 24h setting directly
   int hr_disp = s_hour;
   if (!clock_is_24h_style()) { hr_disp = s_hour % 12; if (!hr_disp) hr_disp = 12; }
   int h_tens=hr_disp/10, h_ones=hr_disp%10, m_tens=s_minute/10, m_ones=s_minute%10;
@@ -884,6 +901,9 @@ static void draw_layer(Layer *layer, GContext *ctx) {
                        s_phase == PHASE_MERGE_H || s_phase == PHASE_MERGE_V)
                       ? localtime(&now_t) : NULL;
 
+  // ---- SPLIT_V / MERGE_V ----
+  // Colon: top dot tracks hr_cy (exits up), bottom dot tracks mn_cy (exits down)
+  // No colon drawn in SPLIT_H/MERGE_H — dots are already off-screen
   if (s_phase == PHASE_SPLIT_V || s_phase == PHASE_MERGE_V) {
     int step  = s_anim_step;
     int hr_cy = prv_lerp(s_sv_hr_cy_s, s_sv_hr_cy_e, step);
@@ -901,20 +921,19 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     draw_pair(ctx, m_tens, m_ones, SLOT_M_TENS, SLOT_M_ONES, mn_cy, dh, 0, 0);
     return;
   }
+
+  // ---- SPLIT_H / MERGE_H ----
+  // Colon dots already off-screen from SPLIT_V — do NOT draw them here.
   if (s_phase == PHASE_SPLIT_H || s_phase == PHASE_MERGE_H) {
     int step = s_anim_step;
     int hr_tens_x = prv_lerp(s_sh_hr_tx_s, s_sh_hr_tx_e, step);
     int mn_tens_x = prv_lerp(s_sh_mn_tx_s, s_sh_mn_tx_e, step);
     int col_x     = prv_lerp(s_sh_col_s,   s_sh_col_e,   step);
-    int colon_x   = prv_lerp(s_sh_colon_x_s, s_sh_colon_x_e, step);
     int tl = s_split_target_layout;
     int dummy_tx, dummy_ox, col_x_final, col_w; GTextAlignment info_align;
     prv_stacked_geom(tl, &dummy_tx, &dummy_ox, &col_x_final, &col_w, &info_align);
     prv_draw_stacked_info(ctx, tm_now, col_x, col_w, info_align, ub_top, ub_bot);
-    graphics_context_set_fill_color(ctx, shadow_col);
-    draw_colon_vec(ctx, colon_x, s_sh_colon_cy, s_sh_h, SHADOW_DX, SHADOW_DY);
-    graphics_context_set_fill_color(ctx, s_fg);
-    draw_colon_vec(ctx, colon_x, s_sh_colon_cy, s_sh_h, 0, 0);
+    // No colon — already exited in SPLIT_V / not yet entered until MERGE_V
     graphics_context_set_fill_color(ctx, shadow_col);
     draw_pair(ctx, h_tens, h_ones, hr_tens_x, hr_tens_x + SLOT_W, s_sh_hr_cy, s_sh_h, SHADOW_DX, SHADOW_DY);
     draw_pair(ctx, m_tens, m_ones, mn_tens_x, mn_tens_x + SLOT_W, s_sh_mn_cy, s_sh_h, SHADOW_DX, SHADOW_DY);
@@ -924,12 +943,14 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     return;
   }
 
+  // ---- Normal rendering ----
   if (s_layout == LAYOUT_FULL) {
     int cy = ub_top + MARGIN_OUTER + s_target_h / 2;
     graphics_context_set_fill_color(ctx, shadow_col);
     draw_digits_pass(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy, SHADOW_DX, SHADOW_DY);
     graphics_context_set_fill_color(ctx, s_fg);
     draw_digits_pass(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy, 0, 0);
+
   } else if (s_layout == LAYOUT_INFO) {
     int above_s[3], below_s[3];
     for (int i = 0; i < 3; i++) above_s[i] = s_cfg_wide[i];
@@ -941,16 +962,19 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int below_end   = ub_bot - HALF_UNIT;
     int time_cy     = (above_end + HALF_UNIT + (below_end - prv_info_block_h(bn, INFO_LINE_STEP_WIDE)) - HALF_UNIT) / 2;
     int col_x = SIDE_MARGIN, col_w = SCREEN_W - 2 * SIDE_MARGIN;
+    // Apply slide offset: above lines slide up (negative dy), below slide down (positive dy)
+    int slide = s_info_slide;
     for (int i = 0; i < an; i++)
-      draw_info_line(ctx, &s_above_lines[i], above_start + i*INFO_LINE_STEP_WIDE, col_x, col_w, GTextAlignmentCenter);
+      draw_info_line(ctx, &s_above_lines[i], above_start + i*INFO_LINE_STEP_WIDE - slide, col_x, col_w, GTextAlignmentCenter);
     for (int i = 0; i < bn; i++) {
       int gy = below_end - prv_info_block_h(bn, INFO_LINE_STEP_WIDE) + i * INFO_LINE_STEP_WIDE;
-      draw_info_line(ctx, &s_below_lines[i], gy, col_x, col_w, GTextAlignmentCenter);
+      draw_info_line(ctx, &s_below_lines[i], gy + slide, col_x, col_w, GTextAlignmentCenter);
     }
     graphics_context_set_fill_color(ctx, shadow_col);
     draw_digits_pass(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy, SHADOW_DX, SHADOW_DY);
     graphics_context_set_fill_color(ctx, s_fg);
     draw_digits_pass(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy, 0, 0);
+
   } else {
     int dh = prv_compute_stacked_h(ub_h);
     int h_cy = ub_top + MARGIN_OUTER + dh / 2;
@@ -994,11 +1018,42 @@ static bool prv_ease_shrink_step(void) {
   if (s_h <= s_h_min) { s_h = s_h_min; return true; }
   return false;
 }
+
+// Advance wide info slide by one frame. Returns true when settled.
+static bool prv_info_slide_step(void) {
+  if (s_info_slide_dir == 0) return true;
+  s_info_slide_step++;
+  s_info_slide = s_info_slide_dir > 0
+    ? INFO_SLIDE_DIST - (INFO_SLIDE_DIST * s_info_slide_step) / INFO_SLIDE_FRAMES
+    : (INFO_SLIDE_DIST * s_info_slide_step) / INFO_SLIDE_FRAMES;
+  if (s_info_slide_step >= INFO_SLIDE_FRAMES) {
+    s_info_slide      = (s_info_slide_dir > 0) ? 0 : INFO_SLIDE_DIST;
+    s_info_slide_dir  = 0;
+    s_info_slide_step = 0;
+    return true;
+  }
+  return false;
+}
+
 static void prv_start_anticipate(void) { s_phase = PHASE_ANTICIPATE; schedule(ANTICIPATION_MS); }
 static void prv_start_blink(void) {
   s_h = s_target_h; s_going_down = true; s_anim_rep = 0; s_overshot = false;
   s_phase = PHASE_BLINK; layer_mark_dirty(s_canvas_layer); schedule(ANIM_STEP_MS);
 }
+
+// Start wide info slide in: lines travel from INFO_SLIDE_DIST → 0
+static void prv_info_slide_in(void) {
+  s_info_slide      = INFO_SLIDE_DIST;
+  s_info_slide_dir  = -1;  // decreasing offset = sliding into place
+  s_info_slide_step = 0;
+}
+// Start wide info slide out: lines travel from 0 → INFO_SLIDE_DIST
+static void prv_info_slide_out(void) {
+  s_info_slide      = 0;
+  s_info_slide_dir  = +1;  // increasing offset = sliding away
+  s_info_slide_step = 0;
+}
+
 static void prv_start_split_v(int target_layout) {
   if (s_h > s_target_h) s_h = s_target_h;
   Layer *root = window_get_root_layer(s_window);
@@ -1027,11 +1082,8 @@ static void prv_start_split_h(void) {
   int h_cy_final = ub_top + MARGIN_OUTER + dh_final / 2;
   int m_cy_final = ub_bot - bot_margin - dh_final / 2;
   s_sh_hr_cy = h_cy_final; s_sh_mn_cy = m_cy_final; s_sh_h = dh_final;
-  s_sh_colon_cy = s_sv_cy;
   s_sh_hr_tx_s = SLOT_H_TENS;  s_sh_hr_tx_e = stk_tens_x;
   s_sh_mn_tx_s = SLOT_M_TENS;  s_sh_mn_tx_e = stk_tens_x;
-  int colon_exit = (tl == LAYOUT_STACK_L) ? (SCREEN_W + SLOT_W) : (-SLOT_W * 2);
-  s_sh_colon_x_s = COLON_SLOT_X;  s_sh_colon_x_e = colon_exit;
   int info_start = (tl == LAYOUT_STACK_L) ? SCREEN_W : (SIDE_MARGIN - col_w - UNIT);
   s_sh_col_s = info_start;  s_sh_col_e = col_x_final;
   s_anim_step = 0; s_phase = PHASE_SPLIT_H; schedule(SPLIT_MS);
@@ -1048,11 +1100,8 @@ static void prv_start_merge_h(void) {
   int h_cy_final = ub_top + MARGIN_OUTER + dh_final / 2;
   int m_cy_final = ub_bot - bot_margin - dh_final / 2;
   s_sh_hr_cy = h_cy_final; s_sh_mn_cy = m_cy_final; s_sh_h = dh_final;
-  s_sh_colon_cy = ub_top + MARGIN_OUTER + s_target_h / 2;
   s_sh_hr_tx_s = stk_tens_x;  s_sh_hr_tx_e = SLOT_H_TENS;
   s_sh_mn_tx_s = stk_tens_x;  s_sh_mn_tx_e = SLOT_M_TENS;
-  int colon_enter = (tl == LAYOUT_STACK_L) ? (SCREEN_W + SLOT_W) : (-SLOT_W * 2);
-  s_sh_colon_x_s = colon_enter;  s_sh_colon_x_e = COLON_SLOT_X;
   int info_end = (tl == LAYOUT_STACK_L) ? SCREEN_W : (SIDE_MARGIN - col_w - UNIT);
   s_sh_col_s = col_x_final;  s_sh_col_e = info_end;
   s_split_target_layout = tl;
@@ -1090,6 +1139,8 @@ static void prv_return_to_full(void) {
   if (s_layout == LAYOUT_STACK_L || s_layout == LAYOUT_STACK_R) {
     prv_start_merge_h();
   } else {
+    // Wide → Full: slide info out while squishing
+    prv_info_slide_out();
     s_layout = LAYOUT_FULL;
     prv_update_targets();
     s_h_min = H_MIN;
@@ -1101,6 +1152,11 @@ static void prv_return_to_full(void) {
 
 static void timer_cb(void *data) {
   s_timer = NULL;
+  // Advance info slide concurrently with any h animation
+  if (s_info_slide_dir != 0) {
+    prv_info_slide_step();
+    layer_mark_dirty(s_canvas_layer);
+  }
   switch (s_phase) {
     case PHASE_ANTICIPATE:
       s_h += ANTICIPATION_PX; layer_mark_dirty(s_canvas_layer);
@@ -1158,7 +1214,10 @@ static void timer_cb(void *data) {
     case PHASE_MERGE_V:
       if (++s_anim_step < SPLIT_FRAMES) { layer_mark_dirty(s_canvas_layer); schedule(SPLIT_MS); }
       else { s_h = s_target_h; s_phase = PHASE_DONE; layer_mark_dirty(s_canvas_layer); } break;
-    case PHASE_DONE: break;
+    case PHASE_DONE:
+      // Keep firing if info slide still running
+      if (s_info_slide_dir != 0) schedule(SPLIT_MS);
+      break;
   }
 }
 
@@ -1177,10 +1236,12 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
     if (target == LAYOUT_STACK_L || target == LAYOUT_STACK_R) {
       prv_start_split_v(target);
     } else {
+      // Wide info entering: slide lines in while digits squish
       s_layout = target;
       prv_update_targets();
       s_h_min = H_MIN;
       s_expand_no_overshoot = true;
+      prv_info_slide_in();
       prv_start_anticipate();
     }
     if (s_cfg_info_mode == INFO_MODE_SHAKE1) prv_schedule_shake1();
@@ -1240,7 +1301,6 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
   if(t) s_cfg_temp_f = (t->value->int32 == 0);
   t = dict_find(iter, MESSAGE_KEY_CfgDistUnit);
   if(t) s_cfg_dist_mi = (t->value->int32 == 0);
-  // CfgClockFormat key intentionally not handled — using clock_is_24h_style()
   for (int i = 0; i < WIDE_SLOTS; i++) {
     t = dict_find(iter, MESSAGE_KEY_CfgWide1 + i);
     if(t) s_cfg_wide[i] = (int)t->value->int32;
