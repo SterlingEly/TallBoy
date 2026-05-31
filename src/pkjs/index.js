@@ -1,30 +1,56 @@
 // ============================================================
-// TallBoy — src/pkjs/index.js  v3.52a
+// TallBoy — src/pkjs/index.js  v3.52c
 // PebbleKit JS: weather, solar, config page
 //
 // SLOT TYPE IDs (must match main.c SlotType enum):
 //   0=empty, 1=day, 2=date, 3=day+date, 4=temp, 5=weather
 //   6=steps, 7=distance, 8=exp_steps, 9=pace
 //   10=calories, 11=heart_rate, 12=sunrise, 13=sunset
-//   14=daylight, 15=battery, 16=bluetooth
+//   14=daylight, 15=battery, 16=bluetooth, 17=sunrise+sunset
+//   (in wide mode: steps shows "steps · dist", calories shows "cal · bpm",
+//    pace shows "exp steps · %", weather shows "temp & desc")
 //
 // MESSAGE KEYS (must match appinfo.json appKeys):
 //   WeatherTempF=0, WeatherTempC=1, WeatherCode=2
 //   SunriseTime=3, SunsetTime=4
 //   CfgInfoMode=5, CfgInfoLayout=6
-//   CfgTempUnit=7, CfgDistUnit=8, CfgClockFormat=9
+//   CfgTempUnit=7, CfgDistUnit=8
 //   CfgWide1=10..CfgWide6=15
 //   CfgStack1=16..CfgStack8=23
+//   (CfgClockFormat=9 intentionally unused — system setting used instead)
 //
 // InfoMode values:   0=debug, 1=off, 2=always, 3=shake, 4=shake1min
 // InfoLayout values: 0=wide, 1=stack_l, 2=stack_r
 // ============================================================
 
-var STORAGE_KEY = 'tallboy_settings_v352';
+var STORAGE_KEY = 'tallboy_settings_v352c';
 
-var SLOT_NAMES = {
+// Wide and stacked share the same slot IDs; wide mode renders richer combined text.
+// Labels marked (wide+) indicate the slot outputs combined data in wide mode.
+var SLOT_NAMES_WIDE = {
   0:  'Empty',
   1:  'Day of week',
+  2:  'Date',
+  3:  'Day & Date',
+  4:  'Temperature',
+  5:  'Weather (temp & desc)',
+  6:  'Steps (+ distance)',
+  7:  'Distance',
+  8:  'Expected steps',
+  9:  'Pace (exp + %)',
+  10: 'Calories (+ heart rate)',
+  11: 'Heart rate',
+  12: 'Sunrise',
+  13: 'Sunset',
+  14: 'Daylight hours',
+  15: 'Battery',
+  16: 'Bluetooth',
+  17: 'Sunrise & Sunset'
+};
+
+var SLOT_NAMES_STACK = {
+  0:  'Empty',
+  1:  'Day',
   2:  'Date',
   3:  'Day & Date',
   4:  'Temperature',
@@ -37,19 +63,19 @@ var SLOT_NAMES = {
   11: 'Heart rate',
   12: 'Sunrise',
   13: 'Sunset',
-  14: 'Daylight hours',
+  14: 'Daylight',
   15: 'Battery',
   16: 'Bluetooth'
+  // 17 not included — wide-only combined slot
 };
 
 var DEFAULT_SETTINGS = {
   infoMode:   0,   // debug
   infoLayout: 1,   // stack_l
-  wide:    [1, 3, 0, 4, 6, 15],
+  wide:    [3, 5, 0, 6, 17, 15],
   stack:   [1, 3, 6, 9, 11, 4, 15, 16],
   tempUnit:  0,   // F
-  distUnit:  0,   // mi
-  clockFmt:  0    // 12h
+  distUnit:  0    // mi
 };
 
 function loadSettings() {
@@ -63,8 +89,7 @@ function loadSettings() {
         wide:       p.wide       || DEFAULT_SETTINGS.wide.slice(),
         stack:      p.stack      || DEFAULT_SETTINGS.stack.slice(),
         tempUnit:   p.tempUnit   !== undefined ? p.tempUnit   : DEFAULT_SETTINGS.tempUnit,
-        distUnit:   p.distUnit   !== undefined ? p.distUnit   : DEFAULT_SETTINGS.distUnit,
-        clockFmt:   p.clockFmt   !== undefined ? p.clockFmt   : DEFAULT_SETTINGS.clockFmt
+        distUnit:   p.distUnit   !== undefined ? p.distUnit   : DEFAULT_SETTINGS.distUnit
       };
     }
   } catch(e) { console.log('Load error: ' + e); }
@@ -77,11 +102,10 @@ function saveSettings(s) {
 
 function sendSettings(s) {
   var msg = {
-    CfgInfoMode:    s.infoMode,
-    CfgInfoLayout:  s.infoLayout,
-    CfgTempUnit:    s.tempUnit,
-    CfgDistUnit:    s.distUnit,
-    CfgClockFormat: s.clockFmt
+    CfgInfoMode:   s.infoMode,
+    CfgInfoLayout: s.infoLayout,
+    CfgTempUnit:   s.tempUnit,
+    CfgDistUnit:   s.distUnit
   };
   for (var i = 0; i < 6; i++)  msg['CfgWide'  + (i + 1)] = s.wide[i];
   for (var i = 0; i < 8; i++)  msg['CfgStack' + (i + 1)] = s.stack[i];
@@ -129,11 +153,11 @@ function fetchWeather() {
 // ============================================================
 // CONFIG PAGE
 // ============================================================
-function slotSelect(id, currentVal) {
+function slotSelect(id, currentVal, names) {
   var out = '<select id="' + id + '">';
-  for (var v in SLOT_NAMES) {
+  for (var v in names) {
     var sel = (parseInt(v) === currentVal) ? ' selected' : '';
-    out += '<option value="' + v + '"' + sel + '>' + SLOT_NAMES[v] + '<\/option>';
+    out += '<option value="' + v + '"' + sel + '>' + names[v] + '<\/option>';
   }
   out += '<\/select>';
   return out;
@@ -146,30 +170,30 @@ function radioGroup(name, labels, values, currentVal) {
     out += '<input type="radio" name="' + name + '" id="' + name + i + '" value="' + values[i] + '"' + chk + '>';
     out += '<label for="' + name + i + '">' + labels[i] + '<\/label>';
   }
-  out += '<\/div>';
+  out += '<\\/div>';
   return out;
 }
 
 function buildConfigPage(s) {
-  // Wide slot rows (6 slots, labeled)
+  // Wide slot rows — 3 above, divider, 3 below
   var wideRows = '';
   var wideLabels = ['Above 1', 'Above 2', 'Above 3', 'Below 1', 'Below 2', 'Below 3'];
   for (var i = 0; i < 6; i++) {
     wideRows += '<div class="row">'
       + '<span class="lbl">' + wideLabels[i] + '<\/span>'
-      + slotSelect('w' + i, s.wide[i])
+      + slotSelect('w' + i, s.wide[i], SLOT_NAMES_WIDE)
       + '<\/div>';
     if (i === 2) {
       wideRows += '<div class="divider">\u23F0 Time<\/div>';
     }
   }
 
-  // Stack slot rows (8 slots)
+  // Stack slot rows
   var stackRows = '';
   for (var i = 0; i < 8; i++) {
     stackRows += '<div class="row">'
       + '<span class="lbl">' + (i + 1) + '<\/span>'
-      + slotSelect('s' + i, s.stack[i])
+      + slotSelect('s' + i, s.stack[i], SLOT_NAMES_STACK)
       + '<\/div>';
   }
 
@@ -196,15 +220,13 @@ function buildConfigPage(s) {
     + '<\/style><\/head><body>'
     + '<h2>TallBoy<\/h2>'
 
-    // ---- Info Mode ----
     + '<div class="section"><h3>Info Display Mode<\/h3>'
     + radioGroup('im',
-        ['Always On', 'Always Off', 'Shake to Toggle', 'Shake — Show 1 min', 'Debug'],
+        ['Always On', 'Always Off', 'Shake to Toggle', 'Shake — 1 min', 'Debug'],
         [2, 1, 3, 4, 0],
         s.infoMode)
     + '<\/div>'
 
-    // ---- Info Layout ----
     + '<div class="section"><h3>Info Layout<\/h3>'
     + radioGroup('il',
         ['Wide', 'Stacked Left', 'Stacked Right'],
@@ -212,30 +234,26 @@ function buildConfigPage(s) {
         s.infoLayout)
     + '<\/div>'
 
-    // ---- Wide Mode Slots ----
     + '<div class="section"><h3>Wide Mode Info Lines<\/h3>'
-    + '<p style="color:#666;font-size:12px;margin:0 0 8px">First 3 lines appear above the time, last 3 below.<\/p>'
+    + '<p style="color:#666;font-size:12px;margin:0 0 8px">First 3 above the time, last 3 below. Some slots show combined data in wide mode.<\/p>'
     + wideRows
     + '<\/div>'
 
-    // ---- Stacked Mode Slots ----
     + '<div class="section"><h3>Stacked Mode Info Lines<\/h3>'
-    + '<p style="color:#666;font-size:12px;margin:0 0 8px">Used by both Stacked Left and Stacked Right.<\/p>'
+    + '<p style="color:#666;font-size:12px;margin:0 0 8px">Shared between Stacked Left and Stacked Right.<\/p>'
     + stackRows
     + '<\/div>'
 
-    // ---- Units ----
-    + '<div class="section"><h3>Units &amp; Format<\/h3>'
+    + '<div class="section"><h3>Units<\/h3>'
     + '<div class="pair">'
-    + '<div><label style="color:#aaa;font-size:12px;display:block;margin-bottom:4px">Temp<\/label>'
+    + '<div><label style="color:#aaa;font-size:12px;display:block;margin-bottom:4px">Temperature<\/label>'
     + radioGroup('tu', ['\u00b0F', '\u00b0C'], [0, 1], s.tempUnit)
     + '<\/div>'
     + '<div><label style="color:#aaa;font-size:12px;display:block;margin-bottom:4px">Distance<\/label>'
     + radioGroup('du', ['mi', 'km'], [0, 1], s.distUnit)
     + '<\/div><\/div>'
-    + '<div style="margin-top:10px"><label style="color:#aaa;font-size:12px;display:block;margin-bottom:4px">Clock<\/label>'
-    + radioGroup('cf', ['12-hour', '24-hour'], [0, 1], s.clockFmt)
-    + '<\/div><\/div>'
+    + '<p style="color:#555;font-size:11px;margin:8px 0 0">Clock format uses your Pebble system setting.<\/p>'
+    + '<\/div>'
 
     + '<button id="save" onclick="doSave()">Save<\/button>'
 
@@ -245,7 +263,6 @@ function buildConfigPage(s) {
     + '  var il = document.querySelector("input[name=il]:checked");'
     + '  var tu = document.querySelector("input[name=tu]:checked");'
     + '  var du = document.querySelector("input[name=du]:checked");'
-    + '  var cf = document.querySelector("input[name=cf]:checked");'
     + '  var wide = [], stack = [];'
     + '  for (var i = 0; i < 6; i++) wide.push(parseInt(document.getElementById("w"+i).value));'
     + '  for (var i = 0; i < 8; i++) stack.push(parseInt(document.getElementById("s"+i).value));'
@@ -254,9 +271,8 @@ function buildConfigPage(s) {
     + '    infoLayout: il ? parseInt(il.value) : 1,'
     + '    wide:  wide,'
     + '    stack: stack,'
-    + '    tempUnit:  tu ? parseInt(tu.value) : 0,'
-    + '    distUnit:  du ? parseInt(du.value) : 0,'
-    + '    clockFmt:  cf ? parseInt(cf.value) : 0'
+    + '    tempUnit: tu ? parseInt(tu.value) : 0,'
+    + '    distUnit: du ? parseInt(du.value) : 0'
     + '  };'
     + '  location.href = "pebblejs://close#" + encodeURIComponent(JSON.stringify(s));'
     + '}'
