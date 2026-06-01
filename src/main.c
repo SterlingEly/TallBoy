@@ -1,16 +1,19 @@
 // ============================================================
-// TallBoy — main.c  v3.54
+// TallBoy — main.c  v3.55
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.54 changes:
-//   - SLOT_DAY_DATE stacked: remove comma ("Mon Aug 21" not "Mon, Aug 21")
-//   - Icon vertical alignment: ICON_V_ADJUST nudges icon up to better
-//     center with text optical mass (not bounding box center)
-//   - Stacked info line spacing: use proportional placement
-//     (i * avail_h) / (cn-1) instead of i * floor(avail_h/(cn-1))
-//     so all gaps are equal and the last line reaches draw_bot
-//   - STACK_R icon placement: icon goes to the RIGHT of text
-//     (between text and digits), not left — text right-aligns to icon
+// v3.55 changes:
+//   - ICON_V_ADJUST: emery = -5 (moves icon DOWN 5px from bbox center,
+//     net 7px down from v3.54's +2 position)
+//   - Wide mode date: full month names ("January" not "Jan")
+//   - Non-health platforms: health slots return false (hidden),
+//     no fake fallback data strings
+//   - Touch: confirmed wired via touch_service_subscribe / TouchEvent_Touchdown
+//     NOTE: screen must already be ON for touch events to fire.
+//     Touch-to-wake is a separate OS feature; our handler fires for
+//     taps while the display is active.
+//   - appinfo.json: all raster PNG resources removed (vector-only)
+//   - src/digit.c: gutted to empty stub
 // ============================================================
 
 #include <pebble.h>
@@ -75,8 +78,10 @@ typedef enum {
   #define INFO_FONT_KEY    FONT_KEY_GOTHIC_24_BOLD
   #define UNIT                 8
   #define ICON_W              14
-  // Nudge icon up from bounding-box center to align with text optical center
-  #define ICON_V_ADJUST        2
+  // Negative value moves icon DOWN from bbox center.
+  // -5 places the icon 5px below bbox center, visually aligning
+  // with the optical center of the Gothic 24 Bold glyphs.
+  #define ICON_V_ADJUST       -5
   static const uint16_t s_radius_opts[] = { UNIT*2, UNIT*3, UNIT*4 };
   #define RADIUS_COUNT 3
   static int s_radius_idx = 0;
@@ -639,14 +644,14 @@ static void draw_stacked_pass(GContext *ctx, int h_tens, int h_ones, int m_tens,
 // ============================================================
 // INFO LINE RENDERING
 // ============================================================
-// draw_info_line: renders one info line at baseline y.
-//   align: LEFT = icon left, text right of icon (standard)
-//           RIGHT = text left, icon right of text (puts icon near digits in STACK_R)
-//           CENTER = centered block (wide mode)
+// Icon placement per alignment:
+//   LEFT   = icon left edge of col, text to its right
+//   RIGHT  = icon right edge of col (near digits), text left-aligned to its left
+//   CENTER = [icon + text] block centered in col
 static void draw_info_line(GContext *ctx, InfoLine *line, int y,
                             int col_x, int col_w, GTextAlignment align) {
   GFont font = fonts_get_system_font(INFO_FONT_KEY);
-  // Icon y: center in line cell, then nudge up by ICON_V_ADJUST for optical alignment with text
+  // ICON_V_ADJUST: positive = nudge UP, negative = nudge DOWN from bbox center
   int iy = y - INFO_TOP_PAD + (INFO_LINE_H - ICON_W) / 2 - ICON_V_ADJUST;
   if (line->has_icon) {
     bool large = ICON_LARGE;
@@ -654,16 +659,15 @@ static void draw_info_line(GContext *ctx, InfoLine *line, int y,
       line->text, font, GRect(0,0,200,20), GTextOverflowModeFill, GTextAlignmentLeft);
     int block_w = ICON_W + ICON_TEXT_GAP + sz.w;
     if (block_w > col_w) {
-      // Won't fit with icon — fall back to text only
+      // Text + icon won't fit: drop icon, render text only
       graphics_context_set_text_color(ctx, s_fg);
       graphics_draw_text(ctx, line->text, font, GRect(col_x, y-INFO_TOP_PAD, col_w, INFO_LINE_H),
-        GTextOverflowModeTrailingEllipsis, align == GTextAlignmentRight ? GTextAlignmentRight : GTextAlignmentLeft, NULL);
+        GTextOverflowModeTrailingEllipsis,
+        (align == GTextAlignmentRight) ? GTextAlignmentRight : GTextAlignmentLeft, NULL);
       return;
     }
     int icon_sx, text_sx, text_w;
     if (align == GTextAlignmentRight) {
-      // Icon on the RIGHT side (between text and digits in STACK_R)
-      // Text is right-aligned in [col_x .. col_x+col_w-ICON_W-ICON_TEXT_GAP]
       text_sx = col_x;
       text_w  = col_w - ICON_W - ICON_TEXT_GAP;
       icon_sx = col_x + col_w - ICON_W;
@@ -672,7 +676,6 @@ static void draw_info_line(GContext *ctx, InfoLine *line, int y,
       text_sx = col_x + ICON_W + ICON_TEXT_GAP;
       text_w  = col_x + col_w - text_sx;
     } else {
-      // Center: center the [icon + text] block
       int off = (col_w - block_w) / 2;
       if (off < 0) off = 0;
       icon_sx = col_x + off;
@@ -685,9 +688,9 @@ static void draw_info_line(GContext *ctx, InfoLine *line, int y,
     else                       line->icon_fn(ctx, icon_sx, iy, s_fg, large);
     graphics_context_set_text_color(ctx, s_fg);
     if (text_w > 0) {
-      GTextAlignment text_align = (align == GTextAlignmentRight) ? GTextAlignmentRight : GTextAlignmentLeft;
+      GTextAlignment ta = (align == GTextAlignmentRight) ? GTextAlignmentRight : GTextAlignmentLeft;
       graphics_draw_text(ctx, line->text, font, GRect(text_sx, y-INFO_TOP_PAD, text_w, INFO_LINE_H),
-        GTextOverflowModeTrailingEllipsis, text_align, NULL);
+        GTextOverflowModeTrailingEllipsis, ta, NULL);
     }
   } else {
     graphics_context_set_text_color(ctx, s_fg);
@@ -711,9 +714,11 @@ static void prv_fmt_time_min(char *buf, int len, int m) {
   int h=(m/60)%12; if(!h)h=12;
   snprintf(buf,len,"%d:%02d%s",h,m%60,m<720?"am":"pm");
 }
-static const char *s_day_names[]   = {"Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"};
-static const char *s_day_short[]   = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
-static const char *s_month_names[] = {"Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
+static const char *s_day_names[]        = {"Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"};
+static const char *s_day_short[]        = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+static const char *s_month_names[]      = {"Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
+static const char *s_month_names_long[] = {"January","February","March","April","May","June",
+                                           "July","August","September","October","November","December"};
 
 static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool wide) {
   switch (slot) {
@@ -722,16 +727,23 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       snprintf(buf,len,"%s", t ? s_day_names[t->tm_wday] : "Monday");
       return true;
     case SLOT_DATE:
-      if (t) { snprintf(buf,len,"%s %d",s_month_names[t->tm_mon],t->tm_mday); }
-      else   { snprintf(buf,len,"Aug 21"); }
+      // Wide: full month name; stacked: abbreviated
+      if (t) {
+        const char *mon = wide ? s_month_names_long[t->tm_mon] : s_month_names[t->tm_mon];
+        snprintf(buf,len,"%s %d", mon, t->tm_mday);
+      } else {
+        snprintf(buf,len, wide ? "August 21" : "Aug 21");
+      }
       return true;
     case SLOT_DAY_DATE:
-      // Wide: "Monday, Aug 21"  Stacked: "Mon Aug 21" (no comma — avoids overflow)
+      // Wide: "Monday, August 21"  Stacked: "Mon Aug 21"
       if (t) {
-        if (wide) snprintf(buf,len,"%s, %s %d",s_day_names[t->tm_wday],s_month_names[t->tm_mon],t->tm_mday);
-        else      snprintf(buf,len,"%s %s %d",s_day_short[t->tm_wday],s_month_names[t->tm_mon],t->tm_mday);
+        if (wide) snprintf(buf,len,"%s, %s %d",
+                           s_day_names[t->tm_wday], s_month_names_long[t->tm_mon], t->tm_mday);
+        else      snprintf(buf,len,"%s %s %d",
+                           s_day_short[t->tm_wday], s_month_names[t->tm_mon], t->tm_mday);
       } else {
-        snprintf(buf,len, wide ? "Monday, Aug 21" : "Mon Aug 21");
+        snprintf(buf,len, wide ? "Monday, August 21" : "Mon Aug 21");
       }
       return true;
     case SLOT_TEMP:
@@ -761,25 +773,25 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
           snprintf(buf,len,"%s",sb);
         }
       }
-#else
-      snprintf(buf,len,wide?"3,450 steps\xc2\xb7 1.7mi":"3,450");
-#endif
       return true;
+#else
+      return false;  // no health data on this platform
+#endif
     case SLOT_DISTANCE:
 #if defined(PBL_HEALTH)
       { char db[16]; prv_fmt_dist(db,sizeof(db)); snprintf(buf,len,"%s",db); }
-#else
-      snprintf(buf,len,"1.7mi");
-#endif
       return true;
+#else
+      return false;
+#endif
     case SLOT_EXP_STEPS:
 #if defined(PBL_HEALTH)
       if (s_steps_expected>0) { char eb[16]; prv_fmt_steps(eb,sizeof(eb),s_steps_expected); snprintf(buf,len,"exp %s",eb); }
       else snprintf(buf,len,"exp --");
-#else
-      snprintf(buf,len,"exp 3,200");
-#endif
       return true;
+#else
+      return false;
+#endif
     case SLOT_PACE:
 #if defined(PBL_HEALTH)
       if (s_steps_expected>0) {
@@ -787,10 +799,10 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
           snprintf(buf,len,"exp %s"DOT"%d%%",eb,(s_steps*100)/s_steps_expected); }
         else snprintf(buf,len,"%d%%",(s_steps*100)/s_steps_expected);
       } else snprintf(buf,len,"--%%");
-#else
-      snprintf(buf,len,wide?"exp 3,200\xc2\xb7 108%%":"108%%");
-#endif
       return true;
+#else
+      return false;
+#endif
     case SLOT_CALORIES:
 #if defined(PBL_HEALTH)
       if (s_calories>0) {
@@ -798,20 +810,20 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
         else if (wide) snprintf(buf,len,"%d cal",s_calories);
         else snprintf(buf,len,"%d",s_calories);
       } else snprintf(buf,len,wide?"-- cal":"--");
-#else
-      snprintf(buf,len,wide?"212 cal\xc2\xb7 72 bpm":"212");
-#endif
       return true;
+#else
+      return false;
+#endif
     case SLOT_HEART:
 #if defined(PBL_HEALTH)
       if (s_heart_rate>0) {
         if (wide) snprintf(buf,len,"%d bpm",s_heart_rate);
         else snprintf(buf,len,"%d",s_heart_rate);
       } else snprintf(buf,len,wide?"-- bpm":"--");
-#else
-      snprintf(buf,len,wide?"72 bpm":"72");
-#endif
       return true;
+#else
+      return false;
+#endif
     case SLOT_SUNRISE:
       { char rb[12]; prv_fmt_time_min(rb,sizeof(rb),s_sunrise_min); snprintf(buf,len,"%s",rb); }
       return true;
@@ -918,7 +930,6 @@ static void prv_draw_stacked_info(GContext *ctx, struct tm *tm_now,
   int draw_bot = ub_bot - STACK_INFO_MARGIN;
   int avail_h  = draw_bot - draw_top - INFO_GLYPH_H;
   for (int i = 0; i < cn; i++) {
-    // Proportional placement: avoids floor-division drift that makes last line too high
     int y = draw_top + (cn > 1 ? (i * avail_h) / (cn - 1) : 0);
     draw_info_line(ctx, &s_col_lines[i], y, col_x, col_w, align);
   }
@@ -1301,6 +1312,9 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   layer_mark_dirty(s_canvas_layer);
 }
 #if defined(PBL_TOUCH)
+// touch_handler: fires on screen touch while display is ON.
+// Requires screen to already be awake — touch-to-wake is a separate
+// OS feature and is not available from watchface code.
 static void touch_handler(const TouchEvent *event, void *context) {
   if (event->type != TouchEvent_Touchdown) return;
   vibes_enqueue_custom_pattern(TOUCH_VIBE);
@@ -1372,6 +1386,7 @@ static void window_load(Window *window) {
     unobstructed_area_service_subscribe(ua, NULL); }
   accel_tap_service_subscribe(accel_tap_handler);
 #if defined(PBL_TOUCH)
+  // Subscribe to touchscreen events. Fires while screen is on.
   touch_service_subscribe(touch_handler, NULL);
 #endif
   s_phase = PHASE_DONE; s_overshot = false; s_ease_idx = 0;
