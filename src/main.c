@@ -1,11 +1,16 @@
 // ============================================================
-// TallBoy — main.c  v3.53a
+// TallBoy — main.c  v3.54
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.53a: Fix build error — spurious trailing % in snprintf
-//   format strings for SLOT_PACE fallback strings.
-//   "--%"  → "--%%"
-//   "108%" → "108%%"  (in #else / non-health branches)
+// v3.54 changes:
+//   - SLOT_DAY_DATE stacked: remove comma ("Mon Aug 21" not "Mon, Aug 21")
+//   - Icon vertical alignment: ICON_V_ADJUST nudges icon up to better
+//     center with text optical mass (not bounding box center)
+//   - Stacked info line spacing: use proportional placement
+//     (i * avail_h) / (cn-1) instead of i * floor(avail_h/(cn-1))
+//     so all gaps are equal and the last line reaches draw_bot
+//   - STACK_R icon placement: icon goes to the RIGHT of text
+//     (between text and digits), not left — text right-aligns to icon
 // ============================================================
 
 #include <pebble.h>
@@ -70,6 +75,8 @@ typedef enum {
   #define INFO_FONT_KEY    FONT_KEY_GOTHIC_24_BOLD
   #define UNIT                 8
   #define ICON_W              14
+  // Nudge icon up from bounding-box center to align with text optical center
+  #define ICON_V_ADJUST        2
   static const uint16_t s_radius_opts[] = { UNIT*2, UNIT*3, UNIT*4 };
   #define RADIUS_COUNT 3
   static int s_radius_idx = 0;
@@ -92,6 +99,7 @@ typedef enum {
   #define INFO_FONT_KEY    FONT_KEY_GOTHIC_18_BOLD
   #define UNIT                 6
   #define ICON_W              11
+  #define ICON_V_ADJUST        1
 #endif
 
 #define ICON_LARGE       (ICON_W == 14)
@@ -631,37 +639,56 @@ static void draw_stacked_pass(GContext *ctx, int h_tens, int h_ones, int m_tens,
 // ============================================================
 // INFO LINE RENDERING
 // ============================================================
+// draw_info_line: renders one info line at baseline y.
+//   align: LEFT = icon left, text right of icon (standard)
+//           RIGHT = text left, icon right of text (puts icon near digits in STACK_R)
+//           CENTER = centered block (wide mode)
 static void draw_info_line(GContext *ctx, InfoLine *line, int y,
                             int col_x, int col_w, GTextAlignment align) {
   GFont font = fonts_get_system_font(INFO_FONT_KEY);
-  int iy = y - INFO_TOP_PAD + (INFO_LINE_H - ICON_W) / 2;
+  // Icon y: center in line cell, then nudge up by ICON_V_ADJUST for optical alignment with text
+  int iy = y - INFO_TOP_PAD + (INFO_LINE_H - ICON_W) / 2 - ICON_V_ADJUST;
   if (line->has_icon) {
     bool large = ICON_LARGE;
     GSize sz = graphics_text_layout_get_content_size(
       line->text, font, GRect(0,0,200,20), GTextOverflowModeFill, GTextAlignmentLeft);
     int block_w = ICON_W + ICON_TEXT_GAP + sz.w;
-    int icon_off;
     if (block_w > col_w) {
+      // Won't fit with icon — fall back to text only
       graphics_context_set_text_color(ctx, s_fg);
       graphics_draw_text(ctx, line->text, font, GRect(col_x, y-INFO_TOP_PAD, col_w, INFO_LINE_H),
-        GTextOverflowModeTrailingEllipsis, align, NULL);
+        GTextOverflowModeTrailingEllipsis, align == GTextAlignmentRight ? GTextAlignmentRight : GTextAlignmentLeft, NULL);
       return;
     }
-    if      (align == GTextAlignmentLeft)  { icon_off = 0; }
-    else if (align == GTextAlignmentRight) { icon_off = col_w - block_w; }
-    else                                   { icon_off = (col_w - block_w) / 2; }
-    if (icon_off < 0) icon_off = 0;
-    int icon_sx = col_x + icon_off;
-    int text_sx = icon_sx + ICON_W + ICON_TEXT_GAP;
-    int text_w  = (col_x + col_w) - text_sx;
+    int icon_sx, text_sx, text_w;
+    if (align == GTextAlignmentRight) {
+      // Icon on the RIGHT side (between text and digits in STACK_R)
+      // Text is right-aligned in [col_x .. col_x+col_w-ICON_W-ICON_TEXT_GAP]
+      text_sx = col_x;
+      text_w  = col_w - ICON_W - ICON_TEXT_GAP;
+      icon_sx = col_x + col_w - ICON_W;
+    } else if (align == GTextAlignmentLeft) {
+      icon_sx = col_x;
+      text_sx = col_x + ICON_W + ICON_TEXT_GAP;
+      text_w  = col_x + col_w - text_sx;
+    } else {
+      // Center: center the [icon + text] block
+      int off = (col_w - block_w) / 2;
+      if (off < 0) off = 0;
+      icon_sx = col_x + off;
+      text_sx = icon_sx + ICON_W + ICON_TEXT_GAP;
+      text_w  = (col_x + col_w) - text_sx;
+    }
     if (text_w < 0) text_w = 0;
     if      (line->is_battery) icon_battery(ctx, icon_sx, iy, s_fg, line->icon_extra, large);
     else if (line->is_weather) icon_weather(ctx, icon_sx, iy, s_fg, line->icon_extra, large);
     else                       line->icon_fn(ctx, icon_sx, iy, s_fg, large);
     graphics_context_set_text_color(ctx, s_fg);
-    if (text_w > 0)
+    if (text_w > 0) {
+      GTextAlignment text_align = (align == GTextAlignmentRight) ? GTextAlignmentRight : GTextAlignmentLeft;
       graphics_draw_text(ctx, line->text, font, GRect(text_sx, y-INFO_TOP_PAD, text_w, INFO_LINE_H),
-        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+        GTextOverflowModeTrailingEllipsis, text_align, NULL);
+    }
   } else {
     graphics_context_set_text_color(ctx, s_fg);
     graphics_draw_text(ctx, line->text, font, GRect(col_x, y-INFO_TOP_PAD, col_w, INFO_LINE_H),
@@ -699,11 +726,12 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       else   { snprintf(buf,len,"Aug 21"); }
       return true;
     case SLOT_DAY_DATE:
+      // Wide: "Monday, Aug 21"  Stacked: "Mon Aug 21" (no comma — avoids overflow)
       if (t) {
         if (wide) snprintf(buf,len,"%s, %s %d",s_day_names[t->tm_wday],s_month_names[t->tm_mon],t->tm_mday);
-        else      snprintf(buf,len,"%s, %s %d",s_day_short[t->tm_wday],s_month_names[t->tm_mon],t->tm_mday);
+        else      snprintf(buf,len,"%s %s %d",s_day_short[t->tm_wday],s_month_names[t->tm_mon],t->tm_mday);
       } else {
-        snprintf(buf,len, wide ? "Monday, Aug 21" : "Mon, Aug 21");
+        snprintf(buf,len, wide ? "Monday, Aug 21" : "Mon Aug 21");
       }
       return true;
     case SLOT_TEMP:
@@ -889,9 +917,11 @@ static void prv_draw_stacked_info(GContext *ctx, struct tm *tm_now,
   int draw_top = ub_top + STACK_INFO_MARGIN;
   int draw_bot = ub_bot - STACK_INFO_MARGIN;
   int avail_h  = draw_bot - draw_top - INFO_GLYPH_H;
-  int step     = (avail_h > 0 && cn > 1) ? avail_h / (cn - 1) : INFO_LINE_STEP;
-  for (int i = 0; i < cn; i++)
-    draw_info_line(ctx, &s_col_lines[i], draw_top + i * step, col_x, col_w, align);
+  for (int i = 0; i < cn; i++) {
+    // Proportional placement: avoids floor-division drift that makes last line too high
+    int y = draw_top + (cn > 1 ? (i * avail_h) / (cn - 1) : 0);
+    draw_info_line(ctx, &s_col_lines[i], y, col_x, col_w, align);
+  }
 }
 
 // ============================================================
