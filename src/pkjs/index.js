@@ -1,5 +1,5 @@
 // ============================================================
-// TallBoy — src/pkjs/index.js  v3.53
+// TallBoy -- src/pkjs/index.js  v3.54
 // PebbleKit JS: weather, solar, config page
 //
 // SLOT TYPE IDs (must match main.c SlotType enum):
@@ -8,56 +8,43 @@
 //   10=calories, 11=heart_rate, 12=sunrise, 13=sunset
 //   14=daylight, 15=battery, 16=bluetooth, 17=sunrise+sunset
 //
-// Wide rendering behavior:
-//   SLOT_DAY_DATE → "Monday, Aug 21" (full name)
-//   SLOT_WEATHER  → icon + temp + conditions
-//   SLOT_STEPS    → "3,450 · 1.7mi"
-//   SLOT_CALORIES → "212 cal · 72 bpm"
-//   SLOT_PACE     → "exp 3,200 · 108%"
-//   SLOT_SUN_TIMES → "6:12am · 8:45pm"
-//
-// Stacked rendering (compact, icon = label):
-//   SLOT_DAY_DATE → "Mon, Aug 21"
-//   SLOT_DAY      → "Monday"
-//   SLOT_WEATHER  → icon + temp only
-//   SLOT_STEPS    → icon + "3,450"
-//   SLOT_CALORIES → icon + "212"
-//   SLOT_HEART    → icon + "72"
-//   SLOT_PACE     → icon + "108%"
+// InfoMode values:   0=debug, 1=off, 2=always, 3=shake, 4=shake1min
+// InfoLayout values: 0=wide, 1=stack_l, 2=stack_r
 // ============================================================
 
-var STORAGE_KEY = 'tallboy_settings_v353';
+var STORAGE_KEY = 'tallboy_settings_v354';
 
-// Wide: only offer slots that make sense at full width / combined display
+// Wide slots: full-width centered lines, combined data where available.
+// Labels are plain ASCII -- no special characters.
 var SLOT_NAMES_WIDE = {
   0:  'Empty',
-  3:  'Day & Date  \u2192  Monday, Aug 21',
-  5:  'Weather  \u2192  72\u00b0F, partly cloudy',
-  6:  'Steps  \u2192  3,450 \u00b7 1.7mi',
-  9:  'Pace  \u2192  exp 3,200 \u00b7 108%',
-  10: 'Calories  \u2192  212 cal \u00b7 72 bpm',
-  11: 'Heart rate  \u2192  72 bpm',
+  3:  'Day + Date',
+  5:  'Weather',
+  6:  'Steps + Distance',
+  9:  'Pace + Expected',
+  10: 'Calories + Heart Rate',
+  11: 'Heart Rate',
   12: 'Sunrise',
   13: 'Sunset',
-  14: 'Daylight hours',
+  14: 'Daylight Duration',
   15: 'Battery',
   16: 'Bluetooth',
-  17: 'Sunrise & Sunset  \u2192  6:12am \u00b7 8:45pm'
+  17: 'Sunrise + Sunset'
 };
 
-// Stacked: full slot list with clear labels for compact rendering
+// Stacked slots: compact, icon serves as label for data slots.
 var SLOT_NAMES_STACK = {
   0:  'Empty',
-  1:  'Day  \u2192  Monday',
-  2:  'Date  \u2192  Aug 21',
-  3:  'Day & Date  \u2192  Mon, Aug 21',
-  5:  'Weather  \u2192  72\u00b0F',
+  1:  'Day of Week',
+  2:  'Date',
+  3:  'Day + Date',
+  5:  'Weather',
   6:  'Steps',
   7:  'Distance',
-  8:  'Expected steps',
+  8:  'Expected Steps',
   9:  'Pace %',
   10: 'Calories',
-  11: 'Heart rate',
+  11: 'Heart Rate',
   12: 'Sunrise',
   13: 'Sunset',
   14: 'Daylight',
@@ -171,6 +158,7 @@ function radioGroup(name, labels, values, currentVal) {
 }
 
 function buildConfigPage(s) {
+  // Wide slot rows: 3 above time, 3 below (no time divider row needed)
   var wideRows = '';
   var wideLabels = ['Above 1', 'Above 2', 'Above 3', 'Below 1', 'Below 2', 'Below 3'];
   for (var i = 0; i < 6; i++) {
@@ -178,9 +166,6 @@ function buildConfigPage(s) {
       + '<span class="lbl">' + wideLabels[i] + '<\/span>'
       + slotSelect('w' + i, s.wide[i], SLOT_NAMES_WIDE)
       + '<\/div>';
-    if (i === 2) {
-      wideRows += '<div class="divider">\u23F0 Time<\/div>';
-    }
   }
 
   var stackRows = '';
@@ -201,7 +186,6 @@ function buildConfigPage(s) {
     + '.row{display:flex;align-items:center;gap:8px;padding:5px 6px;background:#1a1a1a;border:1px solid #2a2a2a;border-radius:6px;margin-bottom:4px}'
     + '.lbl{color:#888;font-size:12px;min-width:52px;flex-shrink:0}'
     + 'select{flex:1;padding:6px 8px;background:#222;border:1px solid #444;color:#eee;border-radius:4px;font-size:12px}'
-    + '.divider{text-align:center;color:#555;font-size:12px;padding:6px 0;border-top:1px dashed #333;border-bottom:1px dashed #333;margin:4px 0}'
     + '.toggle{display:flex;margin-bottom:0}'
     + '.toggle input{display:none}'
     + '.toggle label{flex:1;text-align:center;padding:8px 4px;background:#222;border:1px solid #444;cursor:pointer;color:#aaa;font-size:12px;line-height:1.2}'
@@ -216,7 +200,7 @@ function buildConfigPage(s) {
 
     + '<div class="section"><h3>Info Display Mode<\/h3>'
     + radioGroup('im',
-        ['Always On', 'Always Off', 'Shake to Toggle', 'Shake \u2014 1 min', 'Debug'],
+        ['Always On', 'Always Off', 'Shake', 'Shake - 1 min', 'Debug'],
         [2, 1, 3, 4, 0],
         s.infoMode)
     + '<\/div>'
@@ -229,7 +213,7 @@ function buildConfigPage(s) {
     + '<\/div>'
 
     + '<div class="section"><h3>Wide Mode Lines<\/h3>'
-    + '<p style="color:#666;font-size:12px;margin:0 0 8px">First 3 above the time, last 3 below.<\/p>'
+    + '<p style="color:#666;font-size:12px;margin:0 0 8px">3 lines above the time, 3 below.<\/p>'
     + wideRows
     + '<\/div>'
 
@@ -241,7 +225,7 @@ function buildConfigPage(s) {
     + '<div class="section"><h3>Units<\/h3>'
     + '<div class="pair">'
     + '<div><label style="color:#aaa;font-size:12px;display:block;margin-bottom:4px">Temperature<\/label>'
-    + radioGroup('tu', ['\u00b0F', '\u00b0C'], [0, 1], s.tempUnit)
+    + radioGroup('tu', ['F', 'C'], [0, 1], s.tempUnit)
     + '<\/div>'
     + '<div><label style="color:#aaa;font-size:12px;display:block;margin-bottom:4px">Distance<\/label>'
     + radioGroup('du', ['mi', 'km'], [0, 1], s.distUnit)
