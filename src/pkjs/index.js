@@ -1,5 +1,5 @@
 // ============================================================
-// TallBoy -- src/pkjs/index.js  v3.56
+// TallBoy -- src/pkjs/index.js  v3.57
 // PebbleKit JS: weather, solar, config page
 //
 // SLOT TYPE IDs (must match main.c SlotType enum):
@@ -12,9 +12,9 @@
 // InfoLayout values: 0=wide, 1=stack_l, 2=stack_r
 // ============================================================
 
-var STORAGE_KEY = 'tallboy_settings_v356';
+var STORAGE_KEY = 'tallboy_settings_v357';
 
-// Stacked slots (per spec, in display order)
+// Stacked slots (in display order)
 var SLOT_NAMES_STACK = [
   { v:  0, n: 'Empty' },
   { v:  1, n: 'Day' },
@@ -34,21 +34,19 @@ var SLOT_NAMES_STACK = [
   { v: 16, n: 'Bluetooth' }
 ];
 
-// Wide slots (per spec, in display order)
+// Wide slots (in display order)
 var SLOT_NAMES_WIDE = [
   { v:  0, n: 'Empty' },
   { v:  3, n: 'Day & Date' },
   { v:  5, n: 'Weather' },
   { v:  6, n: 'Steps & Distance' },
-  { v: 18, n: 'Steps & Expected Steps' },
   { v:  9, n: 'Steps & Pace %' },
-  { v: 19, n: 'Expected Steps & Pace %' },
   { v: 10, n: 'Active Calories & Heart Rate' },
   { v: 17, n: 'Sunrise & Sunset' },
   { v: 14, n: 'Daylight' },
-  { v: 20, n: 'Battery & Bluetooth' }
+  { v: 15, n: 'Battery' },
+  { v: 16, n: 'Bluetooth' }
 ];
-// Note: slot IDs 18, 19, 20 are new combined slots to be added to main.c SlotType
 
 var DEFAULT_SETTINGS = {
   infoMode:   0,
@@ -56,7 +54,8 @@ var DEFAULT_SETTINGS = {
   wide:    [3, 5, 0, 6, 17, 15],
   stack:   [1, 3, 6, 9, 11, 5, 15, 16],
   tempUnit:  0,
-  distUnit:  0
+  distUnit:  0,
+  invert:    0
 };
 
 function loadSettings() {
@@ -70,7 +69,8 @@ function loadSettings() {
         wide:       p.wide       || DEFAULT_SETTINGS.wide.slice(),
         stack:      p.stack      || DEFAULT_SETTINGS.stack.slice(),
         tempUnit:   p.tempUnit   !== undefined ? p.tempUnit   : DEFAULT_SETTINGS.tempUnit,
-        distUnit:   p.distUnit   !== undefined ? p.distUnit   : DEFAULT_SETTINGS.distUnit
+        distUnit:   p.distUnit   !== undefined ? p.distUnit   : DEFAULT_SETTINGS.distUnit,
+        invert:     p.invert     !== undefined ? p.invert     : DEFAULT_SETTINGS.invert
       };
     }
   } catch(e) { console.log('Load error: ' + e); }
@@ -86,7 +86,8 @@ function sendSettings(s) {
     CfgInfoMode:   s.infoMode,
     CfgInfoLayout: s.infoLayout,
     CfgTempUnit:   s.tempUnit,
-    CfgDistUnit:   s.distUnit
+    CfgDistUnit:   s.distUnit,
+    CfgInvert:     s.invert
   };
   for (var i = 0; i < 6; i++)  msg['CfgWide'  + (i + 1)] = s.wide[i];
   for (var i = 0; i < 8; i++)  msg['CfgStack' + (i + 1)] = s.stack[i];
@@ -192,6 +193,7 @@ function buildConfigPage(s) {
     + '.pair{display:flex;gap:10px}.pair>div{flex:1}'
     + '#save{width:100%;padding:14px;background:#4a9;border:none;color:#fff;font-size:16px;font-weight:bold;border-radius:8px;cursor:pointer;margin-top:4px}'
     + '#save:active{background:#3a8}'
+    + '.note{color:#555;font-size:11px;margin:6px 0 0}'
     + '<\/style><\/head><body>'
     + '<h2>TallBoy<\/h2>'
 
@@ -210,12 +212,12 @@ function buildConfigPage(s) {
     + '<\/div>'
 
     + '<div class="section"><h3>Wide Mode Lines<\/h3>'
-    + '<p style="color:#666;font-size:12px;margin:0 0 8px">3 lines above the time, 3 below.<\/p>'
+    + '<p class="note" style="margin:0 0 8px">3 lines above the time, 3 below.<\/p>'
     + wideRows
     + '<\/div>'
 
     + '<div class="section"><h3>Stacked Mode Lines<\/h3>'
-    + '<p style="color:#666;font-size:12px;margin:0 0 8px">Shared by Stacked Left and Stacked Right.<\/p>'
+    + '<p class="note" style="margin:0 0 8px">Shared by Stacked Left and Stacked Right.<\/p>'
     + stackRows
     + '<\/div>'
 
@@ -227,7 +229,12 @@ function buildConfigPage(s) {
     + '<div><label style="color:#aaa;font-size:12px;display:block;margin-bottom:4px">Distance<\/label>'
     + radioGroup('du', ['mi', 'km'], [0, 1], s.distUnit)
     + '<\/div><\/div>'
-    + '<p style="color:#555;font-size:11px;margin:8px 0 0">Clock format uses your Pebble system setting.<\/p>'
+    + '<p class="note">Clock format uses your Pebble system setting.<\/p>'
+    + '<\/div>'
+
+    + '<div class="section"><h3>Display<\/h3>'
+    + '<label style="color:#aaa;font-size:12px;display:block;margin-bottom:4px">Theme (black &amp; white Pebbles only)<\/label>'
+    + radioGroup('inv', ['Black on white', 'White on black'], [1, 0], s.invert)
     + '<\/div>'
 
     + '<button id="save" onclick="doSave()">Save<\/button>'
@@ -238,16 +245,18 @@ function buildConfigPage(s) {
     + '  var il = document.querySelector("input[name=il]:checked");'
     + '  var tu = document.querySelector("input[name=tu]:checked");'
     + '  var du = document.querySelector("input[name=du]:checked");'
+    + '  var inv = document.querySelector("input[name=inv]:checked");'
     + '  var wide = [], stack = [];'
     + '  for (var i = 0; i < 6; i++) wide.push(parseInt(document.getElementById("w"+i).value));'
     + '  for (var i = 0; i < 8; i++) stack.push(parseInt(document.getElementById("s"+i).value));'
     + '  var s = {'
-    + '    infoMode:   im ? parseInt(im.value) : 0,'
-    + '    infoLayout: il ? parseInt(il.value) : 1,'
+    + '    infoMode:   im  ? parseInt(im.value)  : 0,'
+    + '    infoLayout: il  ? parseInt(il.value)  : 1,'
     + '    wide:  wide,'
     + '    stack: stack,'
-    + '    tempUnit: tu ? parseInt(tu.value) : 0,'
-    + '    distUnit: du ? parseInt(du.value) : 0'
+    + '    tempUnit: tu  ? parseInt(tu.value)  : 0,'
+    + '    distUnit: du  ? parseInt(du.value)  : 0,'
+    + '    invert:   inv ? parseInt(inv.value) : 0'
     + '  };'
     + '  location.href = "pebblejs://close#" + encodeURIComponent(JSON.stringify(s));'
     + '}'
