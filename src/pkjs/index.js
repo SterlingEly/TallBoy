@@ -1,5 +1,5 @@
 // ============================================================
-// TallBoy -- src/pkjs/index.js  v3.54
+// TallBoy -- src/pkjs/index.js  v3.56
 // PebbleKit JS: weather, solar, config page
 //
 // SLOT TYPE IDs (must match main.c SlotType enum):
@@ -12,53 +12,51 @@
 // InfoLayout values: 0=wide, 1=stack_l, 2=stack_r
 // ============================================================
 
-var STORAGE_KEY = 'tallboy_settings_v354';
+var STORAGE_KEY = 'tallboy_settings_v356';
 
-// Wide slots: full-width centered lines, combined data where available.
-// Labels are plain ASCII -- no special characters.
-var SLOT_NAMES_WIDE = {
-  0:  'Empty',
-  3:  'Day + Date',
-  5:  'Weather',
-  6:  'Steps + Distance',
-  9:  'Pace + Expected',
-  10: 'Calories + Heart Rate',
-  11: 'Heart Rate',
-  12: 'Sunrise',
-  13: 'Sunset',
-  14: 'Daylight Duration',
-  15: 'Battery',
-  16: 'Bluetooth',
-  17: 'Sunrise + Sunset'
-};
+// Stacked slots (per spec, in display order)
+var SLOT_NAMES_STACK = [
+  { v:  0, n: 'Empty' },
+  { v:  1, n: 'Day' },
+  { v:  2, n: 'Date' },
+  { v:  3, n: 'Day & Date' },
+  { v:  5, n: 'Weather' },
+  { v:  6, n: 'Steps' },
+  { v:  7, n: 'Distance' },
+  { v:  8, n: 'Expected Steps' },
+  { v:  9, n: 'Step Pace %' },
+  { v: 10, n: 'Active Calories' },
+  { v: 11, n: 'Heart Rate' },
+  { v: 12, n: 'Sunrise' },
+  { v: 13, n: 'Sunset' },
+  { v: 14, n: 'Daylight' },
+  { v: 15, n: 'Battery' },
+  { v: 16, n: 'Bluetooth' }
+];
 
-// Stacked slots: compact, icon serves as label for data slots.
-var SLOT_NAMES_STACK = {
-  0:  'Empty',
-  1:  'Day of Week',
-  2:  'Date',
-  3:  'Day + Date',
-  5:  'Weather',
-  6:  'Steps',
-  7:  'Distance',
-  8:  'Expected Steps',
-  9:  'Pace %',
-  10: 'Calories',
-  11: 'Heart Rate',
-  12: 'Sunrise',
-  13: 'Sunset',
-  14: 'Daylight',
-  15: 'Battery',
-  16: 'Bluetooth'
-};
+// Wide slots (per spec, in display order)
+var SLOT_NAMES_WIDE = [
+  { v:  0, n: 'Empty' },
+  { v:  3, n: 'Day & Date' },
+  { v:  5, n: 'Weather' },
+  { v:  6, n: 'Steps & Distance' },
+  { v: 18, n: 'Steps & Expected Steps' },
+  { v:  9, n: 'Steps & Pace %' },
+  { v: 19, n: 'Expected Steps & Pace %' },
+  { v: 10, n: 'Active Calories & Heart Rate' },
+  { v: 17, n: 'Sunrise & Sunset' },
+  { v: 14, n: 'Daylight' },
+  { v: 20, n: 'Battery & Bluetooth' }
+];
+// Note: slot IDs 18, 19, 20 are new combined slots to be added to main.c SlotType
 
 var DEFAULT_SETTINGS = {
-  infoMode:   0,   // debug
-  infoLayout: 1,   // stack_l
+  infoMode:   0,
+  infoLayout: 1,
   wide:    [3, 5, 0, 6, 17, 15],
   stack:   [1, 3, 6, 9, 11, 5, 15, 16],
-  tempUnit:  0,   // F
-  distUnit:  0    // mi
+  tempUnit:  0,
+  distUnit:  0
 };
 
 function loadSettings() {
@@ -136,11 +134,11 @@ function fetchWeather() {
 // ============================================================
 // CONFIG PAGE
 // ============================================================
-function slotSelect(id, currentVal, names) {
+function slotSelectFromList(id, currentVal, list) {
   var out = '<select id="' + id + '">';
-  for (var v in names) {
-    var sel = (parseInt(v) === currentVal) ? ' selected' : '';
-    out += '<option value="' + v + '"' + sel + '>' + names[v] + '<\/option>';
+  for (var i = 0; i < list.length; i++) {
+    var sel = (list[i].v === currentVal) ? ' selected' : '';
+    out += '<option value="' + list[i].v + '"' + sel + '>' + list[i].n + '<\/option>';
   }
   out += '<\/select>';
   return out;
@@ -158,13 +156,12 @@ function radioGroup(name, labels, values, currentVal) {
 }
 
 function buildConfigPage(s) {
-  // Wide slot rows: 3 above time, 3 below (no time divider row needed)
   var wideRows = '';
   var wideLabels = ['Above 1', 'Above 2', 'Above 3', 'Below 1', 'Below 2', 'Below 3'];
   for (var i = 0; i < 6; i++) {
     wideRows += '<div class="row">'
       + '<span class="lbl">' + wideLabels[i] + '<\/span>'
-      + slotSelect('w' + i, s.wide[i], SLOT_NAMES_WIDE)
+      + slotSelectFromList('w' + i, s.wide[i], SLOT_NAMES_WIDE)
       + '<\/div>';
   }
 
@@ -172,7 +169,7 @@ function buildConfigPage(s) {
   for (var i = 0; i < 8; i++) {
     stackRows += '<div class="row">'
       + '<span class="lbl">' + (i + 1) + '<\/span>'
-      + slotSelect('s' + i, s.stack[i], SLOT_NAMES_STACK)
+      + slotSelectFromList('s' + i, s.stack[i], SLOT_NAMES_STACK)
       + '<\/div>';
   }
 
