@@ -1,16 +1,17 @@
 // ============================================================
-// TallBoy — main.c  v3.56
+// TallBoy — main.c  v3.57
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.56 changes:
-//   - Radius preview: first option is now 3px (vs 16px UNIT*2).
-//     SELECT button cycles corner radius (touch alternative).
-//   - Wide→full return: fast linear blink instead of slow eased shrink.
-//     New s_blink_single flag: one down+up cycle, no overshoot.
-//   - s_info_slide reset to 0 when switching to LAYOUT_FULL (safety).
-//   - ICON_TEXT_GAP = HALF_UNIT (4px emery, 3px others, was hardcoded 2).
-//   - Bottom stacked info margin: respects Quick Look via BOTTOM_MARGIN,
-//     same treatment as digits.
+// v3.57 changes:
+//   - Radius corrected: options are UNIT*2/3/4 (16/24/32px),
+//     not 3px. SELECT cycles 2→3→4 units.
+//   - tm_now always populated (was NULL during animations, causing
+//     fallback dummy strings like "Monday, August 21" to flash
+//     when wide info slid in)
+//   - Wide-info ENTRY: fast blink (same as exit), not slow squish
+//   - INFO_SLIDE_FRAMES halved (12) so slide-in/out is quicker
+//   - s_cfg_invert: B&W platforms can invert fg/bg (white on black
+//     or black on white). CfgInvert message key added.
 // ============================================================
 
 #include <pebble.h>
@@ -76,8 +77,8 @@ typedef enum {
   #define UNIT                 8
   #define ICON_W              14
   #define ICON_V_ADJUST       -5
-  // Corner radius options: 3px preview, UNIT*3=24, UNIT*4=32
-  static const uint16_t s_radius_opts[] = { 3, UNIT*3, UNIT*4 };
+  // Corner radius options: 2, 3, 4 units (16, 24, 32px on emery)
+  static const uint16_t s_radius_opts[] = { UNIT*2, UNIT*3, UNIT*4 };
   #define RADIUS_COUNT 3
   static int s_radius_idx = 0;
 #else
@@ -114,10 +115,7 @@ typedef enum {
 #define INFO_LINE_BUF   48
 #define INFO_LINES_MAX  8
 
-// Top margin for stacked info column (from screen edge / ub_top)
 #define STACK_INFO_TOP_MARGIN   (UNIT * 2)
-// Bottom margin for stacked info column: same as digits (respects QuickLook)
-// Computed at draw time: BOTTOM_MARGIN(ub_h)
 #define WIDE_SLOTS         6
 #define STACK_SLOTS        8
 
@@ -128,7 +126,8 @@ typedef enum {
 #define SPLIT_H_FRAMES  14
 #define SPLIT_MS        10
 
-#define INFO_SLIDE_FRAMES  SPLIT_V_FRAMES
+// Slide animation for wide-info lines (halved from v3.56 for snappier entry/exit)
+#define INFO_SLIDE_FRAMES  12
 #define INFO_SLIDE_DIST    (UNIT * 4)
 
 static int prv_lerp_v(int a, int b, int step) {
@@ -151,7 +150,7 @@ static const int EASE[10] = { 4, 6, 8, 10, 12, 12, 10, 8, 6, 4 };
 #define ANTICIPATION_MS   16
 #define COUNTDOWN_HOLD_MS 120
 #define BLINK_REPS        2
-#define BLINK_STEP        6    // linear px per tick for blink animation
+#define BLINK_STEP        6
 #define STEPS_AVG_MAX_MIN 120
 #define DOT               " \xc2\xb7 "
 #define SHAKE1_TIMEOUT_MS 60000
@@ -174,7 +173,6 @@ typedef enum {
 } Phase;
 
 static bool s_expand_no_overshoot = false;
-// When true, PHASE_BLINK does only one down+up cycle (used for wide→full return)
 static bool s_blink_single = false;
 
 static int  s_info_slide      = 0;
@@ -224,6 +222,7 @@ static int  s_cfg_wide[WIDE_SLOTS]   = { 3, 5, 0, 6, 17, 15 };
 static int  s_cfg_stack[STACK_SLOTS] = { 1, 3, 6, 9, 11, 5, 15, 16 };
 static bool s_cfg_temp_f    = true;
 static bool s_cfg_dist_mi   = true;
+static bool s_cfg_invert    = false;  // B&W only: invert fg/bg
 static InfoMode   s_cfg_info_mode   = INFO_MODE_DEBUG;
 static InfoLayout s_cfg_info_layout = INFO_LAYOUT_STACK_L;
 
@@ -236,7 +235,7 @@ static const int DEBUG_CYCLE_LAYOUTS[] = { LAYOUT_INFO, LAYOUT_STACK_R, LAYOUT_S
 #define PERSIST_CFG_WIDE     2
 #define PERSIST_CFG_STACK    3
 #define PERSIST_CFG_STACK_HI 4
-#define CFG_VERSION          3
+#define CFG_VERSION          4   // bumped for s_cfg_invert in flags
 
 static int s_sv_hr_cy_s, s_sv_hr_cy_e;
 static int s_sv_mn_cy_s, s_sv_mn_cy_e;
@@ -257,7 +256,8 @@ static void prv_save_config(void) {
   int32_t flags = (s_cfg_temp_f  ? 1 : 0)
                 | (s_cfg_dist_mi ? 2 : 0)
                 | ((int)s_cfg_info_mode   << 2)
-                | ((int)s_cfg_info_layout << 5);
+                | ((int)s_cfg_info_layout << 5)
+                | (s_cfg_invert           ? (1 << 7) : 0);
   persist_write_int(PERSIST_CFG_FLAGS, flags);
   int32_t wp = 0;
   for (int i = 0; i < WIDE_SLOTS; i++) wp |= (s_cfg_wide[i] & 0x1f) << (i * 5);
@@ -277,6 +277,7 @@ static void prv_load_config(void) {
     s_cfg_dist_mi      = (flags & 2) != 0;
     int mode   = (flags >> 2) & 0x7;
     int layout = (flags >> 5) & 0x3;
+    s_cfg_invert       = (flags & (1 << 7)) != 0;
     s_cfg_info_mode   = (mode   < 5) ? (InfoMode)mode     : INFO_MODE_DEBUG;
     s_cfg_info_layout = (layout < 3) ? (InfoLayout)layout : INFO_LAYOUT_STACK_L;
   }
@@ -645,14 +646,9 @@ static void draw_stacked_pass(GContext *ctx, int h_tens, int h_ones, int m_tens,
 // ============================================================
 // INFO LINE RENDERING
 // ============================================================
-// Icon placement per alignment:
-//   LEFT   = icon left edge of col, text to its right
-//   RIGHT  = icon right edge of col (near digits), text right-aligns to its left
-//   CENTER = [icon + text] block centered in col
 static void draw_info_line(GContext *ctx, InfoLine *line, int y,
                             int col_x, int col_w, GTextAlignment align) {
   GFont font = fonts_get_system_font(INFO_FONT_KEY);
-  // ICON_V_ADJUST: positive = nudge UP, negative = nudge DOWN from bbox center
   int iy = y - INFO_TOP_PAD + (INFO_LINE_H - ICON_W) / 2 - ICON_V_ADJUST;
   if (line->has_icon) {
     bool large = ICON_LARGE;
@@ -660,7 +656,6 @@ static void draw_info_line(GContext *ctx, InfoLine *line, int y,
       line->text, font, GRect(0,0,200,20), GTextOverflowModeFill, GTextAlignmentLeft);
     int block_w = ICON_W + ICON_TEXT_GAP + sz.w;
     if (block_w > col_w) {
-      // Text + icon won't fit: drop icon, render text only
       graphics_context_set_text_color(ctx, s_fg);
       graphics_draw_text(ctx, line->text, font, GRect(col_x, y-INFO_TOP_PAD, col_w, INFO_LINE_H),
         GTextOverflowModeTrailingEllipsis,
@@ -725,42 +720,40 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
   switch (slot) {
     case SLOT_EMPTY: return false;
     case SLOT_DAY:
-      snprintf(buf,len,"%s", t ? s_day_names[t->tm_wday] : "Monday");
-      return true;
+      snprintf(buf,len,"%s", t ? s_day_names[t->tm_wday] : "");
+      return t != NULL;
     case SLOT_DATE:
       if (t) {
         const char *mon = wide ? s_month_names_long[t->tm_mon] : s_month_names[t->tm_mon];
         snprintf(buf,len,"%s %d", mon, t->tm_mday);
-      } else {
-        snprintf(buf,len, wide ? "August 21" : "Aug 21");
+        return true;
       }
-      return true;
+      return false;
     case SLOT_DAY_DATE:
       if (t) {
         if (wide) snprintf(buf,len,"%s, %s %d",
                            s_day_names[t->tm_wday], s_month_names_long[t->tm_mon], t->tm_mday);
         else      snprintf(buf,len,"%s %s %d",
                            s_day_short[t->tm_wday], s_month_names[t->tm_mon], t->tm_mday);
-      } else {
-        snprintf(buf,len, wide ? "Monday, August 21" : "Mon Aug 21");
+        return true;
       }
-      return true;
+      return false;
     case SLOT_TEMP:
       if (s_weather_temp_f > -900) {
         if (s_cfg_temp_f) snprintf(buf,len,"%dF",s_weather_temp_f);
         else snprintf(buf,len,"%dC",s_weather_temp_c);
-      } else snprintf(buf,len,"--");
-      return true;
+        return true;
+      }
+      return false;
     case SLOT_WEATHER: {
+      if (s_weather_temp_f <= -900) return false;
       const char *desc = (s_weather_code==0)?"clear":(s_weather_code<=3)?"partly cloudy":
         (s_weather_code<=48)?"foggy":(s_weather_code<=69)?"rainy":
         (s_weather_code<=79)?"snowy":(s_weather_code<=99)?"stormy":"--";
-      if (s_weather_temp_f > -900) {
-        int t2 = s_cfg_temp_f ? s_weather_temp_f : s_weather_temp_c;
-        char u = s_cfg_temp_f ? 'F' : 'C';
-        if (wide) snprintf(buf,len,"%d%c, %s",t2,u,desc);
-        else      snprintf(buf,len,"%d%c",t2,u);
-      } else snprintf(buf,len,"--");
+      int t2 = s_cfg_temp_f ? s_weather_temp_f : s_weather_temp_c;
+      char u = s_cfg_temp_f ? 'F' : 'C';
+      if (wide) snprintf(buf,len,"%d%c, %s",t2,u,desc);
+      else      snprintf(buf,len,"%d%c",t2,u);
       return true; }
     case SLOT_STEPS:
 #if defined(PBL_HEALTH)
@@ -786,7 +779,7 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
     case SLOT_EXP_STEPS:
 #if defined(PBL_HEALTH)
       if (s_steps_expected>0) { char eb[16]; prv_fmt_steps(eb,sizeof(eb),s_steps_expected); snprintf(buf,len,"exp %s",eb); }
-      else snprintf(buf,len,"exp --");
+      else return false;
       return true;
 #else
       return false;
@@ -797,8 +790,9 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
         if (wide) { char eb[16]; prv_fmt_steps(eb,sizeof(eb),s_steps_expected);
           snprintf(buf,len,"exp %s"DOT"%d%%",eb,(s_steps*100)/s_steps_expected); }
         else snprintf(buf,len,"%d%%",(s_steps*100)/s_steps_expected);
-      } else snprintf(buf,len,"--%%");
-      return true;
+        return true;
+      }
+      return false;
 #else
       return false;
 #endif
@@ -808,8 +802,9 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
         if (wide && s_heart_rate>0) snprintf(buf,len,"%d cal"DOT"%d bpm",s_calories,s_heart_rate);
         else if (wide) snprintf(buf,len,"%d cal",s_calories);
         else snprintf(buf,len,"%d",s_calories);
-      } else snprintf(buf,len,wide?"-- cal":"--");
-      return true;
+        return true;
+      }
+      return false;
 #else
       return false;
 #endif
@@ -818,31 +813,35 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       if (s_heart_rate>0) {
         if (wide) snprintf(buf,len,"%d bpm",s_heart_rate);
         else snprintf(buf,len,"%d",s_heart_rate);
-      } else snprintf(buf,len,wide?"-- bpm":"--");
-      return true;
+        return true;
+      }
+      return false;
 #else
       return false;
 #endif
     case SLOT_SUNRISE:
+      if (s_sunrise_min < 0) return false;
       { char rb[12]; prv_fmt_time_min(rb,sizeof(rb),s_sunrise_min); snprintf(buf,len,"%s",rb); }
       return true;
     case SLOT_SUNSET:
+      if (s_sunset_min < 0) return false;
       { char sb2[12]; prv_fmt_time_min(sb2,sizeof(sb2),s_sunset_min); snprintf(buf,len,"%s",sb2); }
       return true;
     case SLOT_DAYLIGHT:
-      if (s_sunrise_min>=0&&s_sunset_min>=0) {
-        int mins=s_sunset_min-s_sunrise_min; if(mins<0)mins=0;
-        snprintf(buf,len,"%dh%02dm",mins/60,mins%60);
-      } else snprintf(buf,len,"--h--m");
+      if (s_sunrise_min<0 || s_sunset_min<0) return false;
+      { int mins=s_sunset_min-s_sunrise_min; if(mins<0)mins=0;
+        snprintf(buf,len,"%dh%02dm",mins/60,mins%60); }
       return true;
     case SLOT_BATTERY:
       if (s_charging) { snprintf(buf,len,"%d%% +",s_battery_pct); }
       else            { snprintf(buf,len,"%d%%",s_battery_pct); }
       return true;
     case SLOT_BLUETOOTH:
-      snprintf(buf,len,"%s",s_bt_connected?"":"no bt");
+      if (s_bt_connected) return false;  // hidden when connected
+      snprintf(buf,len,"no bt");
       return true;
     case SLOT_SUN_TIMES: {
+      if (s_sunrise_min < 0 || s_sunset_min < 0) return false;
       char rb[12], sb2[12];
       prv_fmt_time_min(rb, sizeof(rb), s_sunrise_min);
       prv_fmt_time_min(sb2, sizeof(sb2), s_sunset_min);
@@ -870,7 +869,6 @@ static int build_lines(InfoLine *lines, int max, int *slots, int n_slots, struct
   for (int i = 0; i < n_slots && count < max; i++) {
     SlotType slot = (SlotType)slots[i];
     if (slot == SLOT_EMPTY) continue;
-    if (slot == SLOT_BLUETOOTH && s_bt_connected) continue;
     InfoLine *line = &lines[count];
     char buf[INFO_LINE_BUF];
     if (!prv_slot_text(buf, sizeof(buf), slot, t, wide)) continue;
@@ -925,8 +923,6 @@ static void prv_draw_stacked_info(GContext *ctx, struct tm *tm_now,
   if (!tm_now || col_w <= 20) return;
   int cn = build_lines(s_col_lines, INFO_LINES_MAX, s_cfg_stack, STACK_SLOTS, tm_now, false);
   if (cn <= 0) return;
-  // Top: fixed margin from screen top
-  // Bottom: same as digits — BOTTOM_MARGIN respects Quick Look
   int draw_top = ub_top + STACK_INFO_TOP_MARGIN;
   int draw_bot = ub_bot - BOTTOM_MARGIN(ub_h);
   int avail_h  = draw_bot - draw_top - INFO_GLYPH_H;
@@ -944,12 +940,17 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   GRect ub     = layer_get_unobstructed_bounds(root);
   int ub_top   = ub.origin.y, ub_h = ub.size.h, ub_bot = ub_top + ub_h;
   GRect bounds = layer_get_bounds(layer);
+
+  // Determine foreground/background colors
 #if defined(PBL_COLOR) && defined(PBL_HEALTH)
   GColor bg = prv_pace_color(s_steps, s_steps_expected);
   s_fg = prv_bg_needs_dark_fg(bg) ? GColorBlack : GColorWhite;
 #else
-  GColor bg = s_bg; s_fg = GColorWhite;
+  // B&W: invert option swaps fg and bg
+  GColor bg = s_cfg_invert ? GColorWhite : GColorBlack;
+  s_fg       = s_cfg_invert ? GColorBlack : GColorWhite;
 #endif
+
   GColor shadow_col = gcolor_equal(s_fg, GColorWhite) ? GColorBlack : GColorWhite;
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
@@ -965,11 +966,10 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   if (!clock_is_24h_style()) { hr_disp = s_hour % 12; if (!hr_disp) hr_disp = 12; }
   int h_tens=hr_disp/10, h_ones=hr_disp%10, m_tens=s_minute/10, m_ones=s_minute%10;
   int bot_margin = BOTTOM_MARGIN(ub_h);
+
+  // Always populate tm_now — avoids dummy strings flashing during animation
   time_t now_t = time(NULL);
-  struct tm *tm_now = (s_phase == PHASE_DONE ||
-                       s_phase == PHASE_SPLIT_V || s_phase == PHASE_SPLIT_H ||
-                       s_phase == PHASE_MERGE_H || s_phase == PHASE_MERGE_V)
-                      ? localtime(&now_t) : NULL;
+  struct tm *tm_now = localtime(&now_t);
 
   if (s_phase == PHASE_SPLIT_V || s_phase == PHASE_MERGE_V) {
     int step   = s_anim_step;
@@ -1010,7 +1010,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   }
 
   if (s_layout == LAYOUT_FULL) {
-    // Safety: clear slide state so any leftover slide doesn't affect redraws
     s_info_slide = 0;
     int cy = ub_top + MARGIN_OUTER + s_target_h / 2;
     graphics_context_set_fill_color(ctx, shadow_col);
@@ -1102,7 +1101,6 @@ static bool prv_info_slide_step_fn(void) {
   }
   return false;
 }
-static void prv_start_anticipate(void) { s_phase = PHASE_ANTICIPATE; schedule(ANTICIPATION_MS); }
 static void prv_start_blink(void) {
   s_h = s_target_h; s_going_down = true; s_anim_rep = 0; s_overshot = false;
   s_phase = PHASE_BLINK; layer_mark_dirty(s_canvas_layer); schedule(ANIM_STEP_MS);
@@ -1112,6 +1110,17 @@ static void prv_info_slide_in(void) {
 }
 static void prv_info_slide_out(void) {
   s_info_slide = 0; s_info_slide_dir = +1; s_info_slide_step = 0;
+}
+// Start fast blink with one cycle, no overshoot. Used for wide-info entry/exit.
+static void prv_start_fast_blink(void) {
+  s_going_down = true;
+  s_anim_rep = 0;
+  s_overshot = false;
+  s_ease_idx = 0;
+  s_blink_single = true;
+  s_expand_no_overshoot = true;
+  s_phase = PHASE_BLINK;
+  schedule(ANIM_STEP_MS);
 }
 
 static void prv_start_split_v(int target_layout) {
@@ -1207,19 +1216,11 @@ static void prv_return_to_full(void) {
   if (s_layout == LAYOUT_STACK_L || s_layout == LAYOUT_STACK_R) {
     prv_start_merge_h();
   } else {
-    // Wide info mode → full: slide lines out, linear blink (not slow eased squish)
     prv_info_slide_out();
     s_layout = LAYOUT_FULL;
     prv_update_targets();
     s_h_min = H_MIN;
-    s_going_down = true;
-    s_anim_rep = 0;
-    s_overshot = false;
-    s_ease_idx = 0;
-    s_blink_single = true;   // one down+up cycle, no double blink
-    s_expand_no_overshoot = true;  // no overshoot when snapping back
-    s_phase = PHASE_BLINK;
-    schedule(ANIM_STEP_MS);
+    prv_start_fast_blink();
   }
   layer_mark_dirty(s_canvas_layer);
 }
@@ -1252,8 +1253,7 @@ static void timer_cb(void *data) {
       if (s_going_down) {
         s_h -= BLINK_STEP; layer_mark_dirty(s_canvas_layer);
         if (s_h<=H_MIN) {
-          s_h=H_MIN; s_going_down=false; s_overshot=false;
-          s_ease_idx = 0;
+          s_h=H_MIN; s_going_down=false; s_overshot=false; s_ease_idx=0;
         }
         schedule(ANIM_STEP_MS);
       } else {
@@ -1321,12 +1321,12 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
     if (target == LAYOUT_STACK_L || target == LAYOUT_STACK_R) {
       prv_start_split_v(target);
     } else {
+      // Enter wide info mode: fast blink + simultaneous slide-in
       s_layout = target;
       prv_update_targets();
       s_h_min = H_MIN;
-      s_expand_no_overshoot = true;
       prv_info_slide_in();
-      prv_start_anticipate();
+      prv_start_fast_blink();
     }
     if (s_cfg_info_mode == INFO_MODE_SHAKE1) prv_schedule_shake1();
   } else {
@@ -1335,8 +1335,6 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   layer_mark_dirty(s_canvas_layer);
 }
 #if defined(PBL_TOUCH)
-// Fires on screen touch while display is ON. Touch-to-wake is an OS feature,
-// not available to watchfaces. Screen must already be awake.
 static void touch_handler(const TouchEvent *event, void *context) {
   if (event->type != TouchEvent_Touchdown) return;
   vibes_enqueue_custom_pattern(TOUCH_VIBE);
@@ -1348,7 +1346,6 @@ static void touch_handler(const TouchEvent *event, void *context) {
 #endif
 static void prv_noop_click(ClickRecognizerRef ref, void *ctx) { (void)ref; (void)ctx; }
 #if defined(PBL_PLATFORM_EMERY)
-// SELECT cycles corner radius — always available, unlike touch (needs screen on)
 static void prv_select_click(ClickRecognizerRef ref, void *ctx) {
   (void)ref; (void)ctx;
   s_radius_idx = (s_radius_idx + 1) % RADIUS_COUNT;
@@ -1368,7 +1365,13 @@ static void tick_handler(struct tm *t, TimeUnits units) {
   bool animated = (s_layout == LAYOUT_FULL || s_layout == LAYOUT_INFO);
   if (s_phase == PHASE_DONE && animated) {
     s_pending_hour=t->tm_hour; s_pending_minute=t->tm_min; s_digit_pending=true;
-    s_h_min=H_MIN; prv_start_anticipate();
+    s_h_min=H_MIN;
+    // Wide-info entry: fast blink; full: standard anticipate/squish/expand
+    if (s_layout == LAYOUT_INFO) {
+      prv_start_fast_blink();
+    } else {
+      s_phase = PHASE_ANTICIPATE; schedule(ANTICIPATION_MS);
+    }
   } else if (s_phase == PHASE_SQUISH) {
     s_pending_hour=t->tm_hour; s_pending_minute=t->tm_min; s_digit_pending=true;
   } else { s_hour=t->tm_hour; s_minute=t->tm_min; layer_mark_dirty(s_canvas_layer); }
@@ -1399,6 +1402,8 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
   if(t) s_cfg_temp_f = (t->value->int32 == 0);
   t = dict_find(iter, MESSAGE_KEY_CfgDistUnit);
   if(t) s_cfg_dist_mi = (t->value->int32 == 0);
+  t = dict_find(iter, MESSAGE_KEY_CfgInvert);
+  if(t) s_cfg_invert = (t->value->int32 != 0);
   for (int i = 0; i < WIDE_SLOTS; i++) {
     t = dict_find(iter, MESSAGE_KEY_CfgWide1 + i);
     if(t) s_cfg_wide[i] = (int)t->value->int32;
