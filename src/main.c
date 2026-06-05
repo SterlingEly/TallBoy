@@ -1,19 +1,16 @@
 // ============================================================
-// TallBoy — main.c  v3.55
+// TallBoy — main.c  v3.56
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.55 changes:
-//   - ICON_V_ADJUST: emery = -5 (moves icon DOWN 5px from bbox center,
-//     net 7px down from v3.54's +2 position)
-//   - Wide mode date: full month names ("January" not "Jan")
-//   - Non-health platforms: health slots return false (hidden),
-//     no fake fallback data strings
-//   - Touch: confirmed wired via touch_service_subscribe / TouchEvent_Touchdown
-//     NOTE: screen must already be ON for touch events to fire.
-//     Touch-to-wake is a separate OS feature; our handler fires for
-//     taps while the display is active.
-//   - appinfo.json: all raster PNG resources removed (vector-only)
-//   - src/digit.c: gutted to empty stub
+// v3.56 changes:
+//   - Radius preview: first option is now 3px (vs 16px UNIT*2).
+//     SELECT button cycles corner radius (touch alternative).
+//   - Wide→full return: fast linear blink instead of slow eased shrink.
+//     New s_blink_single flag: one down+up cycle, no overshoot.
+//   - s_info_slide reset to 0 when switching to LAYOUT_FULL (safety).
+//   - ICON_TEXT_GAP = HALF_UNIT (4px emery, 3px others, was hardcoded 2).
+//   - Bottom stacked info margin: respects Quick Look via BOTTOM_MARGIN,
+//     same treatment as digits.
 // ============================================================
 
 #include <pebble.h>
@@ -78,11 +75,9 @@ typedef enum {
   #define INFO_FONT_KEY    FONT_KEY_GOTHIC_24_BOLD
   #define UNIT                 8
   #define ICON_W              14
-  // Negative value moves icon DOWN from bbox center.
-  // -5 places the icon 5px below bbox center, visually aligning
-  // with the optical center of the Gothic 24 Bold glyphs.
   #define ICON_V_ADJUST       -5
-  static const uint16_t s_radius_opts[] = { UNIT*2, UNIT*3, UNIT*4 };
+  // Corner radius options: 3px preview, UNIT*3=24, UNIT*4=32
+  static const uint16_t s_radius_opts[] = { 3, UNIT*3, UNIT*4 };
   #define RADIUS_COUNT 3
   static int s_radius_idx = 0;
 #else
@@ -108,7 +103,7 @@ typedef enum {
 #endif
 
 #define ICON_LARGE       (ICON_W == 14)
-#define ICON_TEXT_GAP    2
+#define ICON_TEXT_GAP    HALF_UNIT
 #define MARGIN_CANVAS   UNIT
 #define MARGIN_DIGIT    UNIT
 #define MARGIN_OUTER    (MARGIN_CANVAS + MARGIN_DIGIT)
@@ -119,7 +114,10 @@ typedef enum {
 #define INFO_LINE_BUF   48
 #define INFO_LINES_MAX  8
 
-#define STACK_INFO_MARGIN  (UNIT * 2)
+// Top margin for stacked info column (from screen edge / ub_top)
+#define STACK_INFO_TOP_MARGIN   (UNIT * 2)
+// Bottom margin for stacked info column: same as digits (respects QuickLook)
+// Computed at draw time: BOTTOM_MARGIN(ub_h)
 #define WIDE_SLOTS         6
 #define STACK_SLOTS        8
 
@@ -153,6 +151,7 @@ static const int EASE[10] = { 4, 6, 8, 10, 12, 12, 10, 8, 6, 4 };
 #define ANTICIPATION_MS   16
 #define COUNTDOWN_HOLD_MS 120
 #define BLINK_REPS        2
+#define BLINK_STEP        6    // linear px per tick for blink animation
 #define STEPS_AVG_MAX_MIN 120
 #define DOT               " \xc2\xb7 "
 #define SHAKE1_TIMEOUT_MS 60000
@@ -175,6 +174,8 @@ typedef enum {
 } Phase;
 
 static bool s_expand_no_overshoot = false;
+// When true, PHASE_BLINK does only one down+up cycle (used for wide→full return)
+static bool s_blink_single = false;
 
 static int  s_info_slide      = 0;
 static int  s_info_slide_dir  = 0;
@@ -646,7 +647,7 @@ static void draw_stacked_pass(GContext *ctx, int h_tens, int h_ones, int m_tens,
 // ============================================================
 // Icon placement per alignment:
 //   LEFT   = icon left edge of col, text to its right
-//   RIGHT  = icon right edge of col (near digits), text left-aligned to its left
+//   RIGHT  = icon right edge of col (near digits), text right-aligns to its left
 //   CENTER = [icon + text] block centered in col
 static void draw_info_line(GContext *ctx, InfoLine *line, int y,
                             int col_x, int col_w, GTextAlignment align) {
@@ -727,7 +728,6 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       snprintf(buf,len,"%s", t ? s_day_names[t->tm_wday] : "Monday");
       return true;
     case SLOT_DATE:
-      // Wide: full month name; stacked: abbreviated
       if (t) {
         const char *mon = wide ? s_month_names_long[t->tm_mon] : s_month_names[t->tm_mon];
         snprintf(buf,len,"%s %d", mon, t->tm_mday);
@@ -736,7 +736,6 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       }
       return true;
     case SLOT_DAY_DATE:
-      // Wide: "Monday, August 21"  Stacked: "Mon Aug 21"
       if (t) {
         if (wide) snprintf(buf,len,"%s, %s %d",
                            s_day_names[t->tm_wday], s_month_names_long[t->tm_mon], t->tm_mday);
@@ -775,7 +774,7 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       }
       return true;
 #else
-      return false;  // no health data on this platform
+      return false;
 #endif
     case SLOT_DISTANCE:
 #if defined(PBL_HEALTH)
@@ -922,15 +921,17 @@ static void prv_stacked_geom(int layout, int *tens_x, int *ones_x,
 }
 static void prv_draw_stacked_info(GContext *ctx, struct tm *tm_now,
                                    int col_x, int col_w, GTextAlignment align,
-                                   int ub_top, int ub_bot) {
+                                   int ub_top, int ub_bot, int ub_h) {
   if (!tm_now || col_w <= 20) return;
   int cn = build_lines(s_col_lines, INFO_LINES_MAX, s_cfg_stack, STACK_SLOTS, tm_now, false);
   if (cn <= 0) return;
-  int draw_top = ub_top + STACK_INFO_MARGIN;
-  int draw_bot = ub_bot - STACK_INFO_MARGIN;
+  // Top: fixed margin from screen top
+  // Bottom: same as digits — BOTTOM_MARGIN respects Quick Look
+  int draw_top = ub_top + STACK_INFO_TOP_MARGIN;
+  int draw_bot = ub_bot - BOTTOM_MARGIN(ub_h);
   int avail_h  = draw_bot - draw_top - INFO_GLYPH_H;
   for (int i = 0; i < cn; i++) {
-    int y = draw_top + (cn > 1 ? (i * avail_h) / (cn - 1) : 0);
+    int y = draw_top + (cn > 1 && avail_h > 0 ? (i * avail_h) / (cn - 1) : 0);
     draw_info_line(ctx, &s_col_lines[i], y, col_x, col_w, align);
   }
 }
@@ -998,7 +999,7 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int tl = s_split_target_layout;
     int dummy_tx, dummy_ox, col_x_final, col_w; GTextAlignment info_align;
     prv_stacked_geom(tl, &dummy_tx, &dummy_ox, &col_x_final, &col_w, &info_align);
-    prv_draw_stacked_info(ctx, tm_now, col_x, col_w, info_align, ub_top, ub_bot);
+    prv_draw_stacked_info(ctx, tm_now, col_x, col_w, info_align, ub_top, ub_bot, ub_h);
     graphics_context_set_fill_color(ctx, shadow_col);
     draw_pair(ctx, h_tens, h_ones, hr_tens_x, hr_tens_x + SLOT_W, s_sh_hr_cy, s_sh_h, SHADOW_DX, SHADOW_DY);
     draw_pair(ctx, m_tens, m_ones, mn_tens_x, mn_tens_x + SLOT_W, s_sh_mn_cy, s_sh_h, SHADOW_DX, SHADOW_DY);
@@ -1009,6 +1010,8 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   }
 
   if (s_layout == LAYOUT_FULL) {
+    // Safety: clear slide state so any leftover slide doesn't affect redraws
+    s_info_slide = 0;
     int cy = ub_top + MARGIN_OUTER + s_target_h / 2;
     graphics_context_set_fill_color(ctx, shadow_col);
     draw_digits_pass(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy, SHADOW_DX, SHADOW_DY, ub_top, ub_bot);
@@ -1044,7 +1047,7 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int m_cy = ub_bot - bot_margin - dh / 2;
     int tens_x, ones_x, col_x, col_w; GTextAlignment info_align;
     prv_stacked_geom(s_layout, &tens_x, &ones_x, &col_x, &col_w, &info_align);
-    prv_draw_stacked_info(ctx, tm_now, col_x, col_w, info_align, ub_top, ub_bot);
+    prv_draw_stacked_info(ctx, tm_now, col_x, col_w, info_align, ub_top, ub_bot, ub_h);
     graphics_context_set_fill_color(ctx, shadow_col);
     draw_stacked_pass(ctx, h_tens, h_ones, m_tens, m_ones, dh, tens_x, ones_x, h_cy, m_cy, SHADOW_DX, SHADOW_DY);
     graphics_context_set_fill_color(ctx, s_fg);
@@ -1204,12 +1207,19 @@ static void prv_return_to_full(void) {
   if (s_layout == LAYOUT_STACK_L || s_layout == LAYOUT_STACK_R) {
     prv_start_merge_h();
   } else {
+    // Wide info mode → full: slide lines out, linear blink (not slow eased squish)
     prv_info_slide_out();
     s_layout = LAYOUT_FULL;
     prv_update_targets();
     s_h_min = H_MIN;
-    s_expand_no_overshoot = true;
-    prv_start_anticipate();
+    s_going_down = true;
+    s_anim_rep = 0;
+    s_overshot = false;
+    s_ease_idx = 0;
+    s_blink_single = true;   // one down+up cycle, no double blink
+    s_expand_no_overshoot = true;  // no overshoot when snapping back
+    s_phase = PHASE_BLINK;
+    schedule(ANIM_STEP_MS);
   }
   layer_mark_dirty(s_canvas_layer);
 }
@@ -1227,7 +1237,7 @@ static void timer_cb(void *data) {
     case PHASE_COUNTDOWN:
       switch (s_cd_sub) {
         case CD_SHRINK:
-          s_h -= 6; layer_mark_dirty(s_canvas_layer);
+          s_h -= BLINK_STEP; layer_mark_dirty(s_canvas_layer);
           if (s_h<=H_MIN) { s_h=H_MIN; s_cd_sub=CD_HOLD_MIN; schedule(ANIM_SNAP_MS); }
           else { schedule(ANIM_STEP_MS); } break;
         case CD_HOLD_MIN:
@@ -1240,13 +1250,26 @@ static void timer_cb(void *data) {
       } break;
     case PHASE_BLINK:
       if (s_going_down) {
-        s_h -= 6; layer_mark_dirty(s_canvas_layer);
-        if (s_h<=H_MIN) { s_h=H_MIN; s_going_down=false; s_overshot=false; }
+        s_h -= BLINK_STEP; layer_mark_dirty(s_canvas_layer);
+        if (s_h<=H_MIN) {
+          s_h=H_MIN; s_going_down=false; s_overshot=false;
+          s_ease_idx = 0;
+        }
         schedule(ANIM_STEP_MS);
       } else {
-        bool d=prv_ease_expand_step(); layer_mark_dirty(s_canvas_layer);
-        if(d) { if(++s_anim_rep<BLINK_REPS){s_going_down=true;s_overshot=false;s_ease_idx=0;schedule(ANIM_STEP_MS);}
-          else{s_phase=PHASE_DONE;layer_mark_dirty(s_canvas_layer);} }
+        bool d = s_expand_no_overshoot ? prv_ease_expand_step_clean() : prv_ease_expand_step();
+        layer_mark_dirty(s_canvas_layer);
+        if(d) {
+          int max_reps = s_blink_single ? 1 : BLINK_REPS;
+          if (++s_anim_rep < max_reps) {
+            s_going_down=true; s_overshot=false; s_ease_idx=0; schedule(ANIM_STEP_MS);
+          } else {
+            s_blink_single = false;
+            s_expand_no_overshoot = false;
+            s_phase = PHASE_DONE;
+            layer_mark_dirty(s_canvas_layer);
+          }
+        }
       } break;
     case PHASE_SQUISH: {
       bool d=prv_ease_shrink_step(); layer_mark_dirty(s_canvas_layer);
@@ -1312,9 +1335,8 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   layer_mark_dirty(s_canvas_layer);
 }
 #if defined(PBL_TOUCH)
-// touch_handler: fires on screen touch while display is ON.
-// Requires screen to already be awake — touch-to-wake is a separate
-// OS feature and is not available from watchface code.
+// Fires on screen touch while display is ON. Touch-to-wake is an OS feature,
+// not available to watchfaces. Screen must already be awake.
 static void touch_handler(const TouchEvent *event, void *context) {
   if (event->type != TouchEvent_Touchdown) return;
   vibes_enqueue_custom_pattern(TOUCH_VIBE);
@@ -1325,10 +1347,22 @@ static void touch_handler(const TouchEvent *event, void *context) {
 }
 #endif
 static void prv_noop_click(ClickRecognizerRef ref, void *ctx) { (void)ref; (void)ctx; }
+#if defined(PBL_PLATFORM_EMERY)
+// SELECT cycles corner radius — always available, unlike touch (needs screen on)
+static void prv_select_click(ClickRecognizerRef ref, void *ctx) {
+  (void)ref; (void)ctx;
+  s_radius_idx = (s_radius_idx + 1) % RADIUS_COUNT;
+  layer_mark_dirty(s_canvas_layer);
+}
+#endif
 static void prv_click_config_provider(void *context) {
-  window_single_click_subscribe(BUTTON_ID_UP,     prv_noop_click);
+  window_single_click_subscribe(BUTTON_ID_UP,   prv_noop_click);
+  window_single_click_subscribe(BUTTON_ID_DOWN, prv_noop_click);
+#if defined(PBL_PLATFORM_EMERY)
+  window_single_click_subscribe(BUTTON_ID_SELECT, prv_select_click);
+#else
   window_single_click_subscribe(BUTTON_ID_SELECT, prv_noop_click);
-  window_single_click_subscribe(BUTTON_ID_DOWN,   prv_noop_click);
+#endif
 }
 static void tick_handler(struct tm *t, TimeUnits units) {
   bool animated = (s_layout == LAYOUT_FULL || s_layout == LAYOUT_INFO);
@@ -1386,7 +1420,6 @@ static void window_load(Window *window) {
     unobstructed_area_service_subscribe(ua, NULL); }
   accel_tap_service_subscribe(accel_tap_handler);
 #if defined(PBL_TOUCH)
-  // Subscribe to touchscreen events. Fires while screen is on.
   touch_service_subscribe(touch_handler, NULL);
 #endif
   s_phase = PHASE_DONE; s_overshot = false; s_ease_idx = 0;
