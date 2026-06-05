@@ -38,6 +38,7 @@
     "CfgStack5":        20,
     "CfgStack6":        21,
     "CfgStack7":        22,
-    "CfgStack8":        23
+    "CfgStack8":        23,
+    "CfgInvert":        24
   }
 }
