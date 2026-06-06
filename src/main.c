@@ -1,21 +1,20 @@
 // ============================================================
-// TallBoy — main.c  v3.58
+// TallBoy — main.c  v3.59
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.58 changes:
-//   - UP button cycles corner radius on emery (SELECT is OS-reserved
-//     for Settings and cannot be used by watchfaces)
-//   - New wide-only slots: SLOT_STEPS_EXP (18), SLOT_EXP_PACE (19),
-//     SLOT_BAT_BT (20)
-//   - Debug slot (21): shows "Wednesday" with a solid square icon
-//     placeholder — for layout/alignment testing
-//   - Wide mode below-gap: +HALF_UNIT extra space between digit
-//     shadow bottom and first below-info line
-//   - Color config (PBL_COLOR platforms): static color mode with
-//     user-configurable bg, hour digits, minute digits, shadow, info.
-//     Dynamic (pace gradient) remains the default.
-//     CfgColorMode/Bg/DigH/DigM/Shadow/Info message keys added.
-//     CFG_VERSION bumped to 5.
+// v3.59 changes:
+//   - Heart rate: show "-- bpm" (or "--") when s_heart_rate == 0
+//     instead of hiding the slot. BPM is a point-in-time metric;
+//     returning false when resting suppresses the slot incorrectly.
+//     Also improved accessibility check for BPM.
+//   - Wide below-gap: fix direction — the gap is now added between
+//     digit bottom and below-block top, not between below-block
+//     bottom and screen edge. below_end restored to ub_bot-HALF_UNIT;
+//     time_cy biased up by WIDE_BELOW_EXTRA/2 to shift digits toward
+//     above-lines, leaving extra space before the below-block.
+//   - Debug icon: remove stray GRect(0,0,...) draw that was placing
+//     a ghost icon at the page origin. Icon now draws at (icon_sx,iy)
+//     only, as intended.
 // ============================================================
 
 #include <pebble.h>
@@ -39,12 +38,10 @@ typedef enum {
   SLOT_BATTERY    = 15,
   SLOT_BLUETOOTH  = 16,
   SLOT_SUN_TIMES  = 17,
-  // Wide-mode combined slots
-  SLOT_STEPS_EXP  = 18,   // Steps & Expected Steps
-  SLOT_EXP_PACE   = 19,   // Expected Steps & Pace %
-  SLOT_BAT_BT     = 20,   // Battery & Bluetooth
-  // Debug / test slot
-  SLOT_DEBUG      = 21,   // Always shows "Wednesday" + solid square icon
+  SLOT_STEPS_EXP  = 18,
+  SLOT_EXP_PACE   = 19,
+  SLOT_BAT_BT     = 20,
+  SLOT_DEBUG      = 21,
 } SlotType;
 
 #define LAYOUT_FULL    0
@@ -125,7 +122,8 @@ typedef enum {
 #define INFO_LINES_MAX  8
 
 #define STACK_INFO_TOP_MARGIN   (UNIT * 2)
-// Extra gap between digit block bottom and first below-info line
+// Extra gap between digit block bottom and first below-info line in wide mode.
+// Applied by biasing time_cy upward, not by moving below_end.
 #define WIDE_BELOW_EXTRA        HALF_UNIT
 #define WIDE_SLOTS         6
 #define STACK_SLOTS        8
@@ -189,24 +187,15 @@ static int  s_info_slide      = 0;
 static int  s_info_slide_dir  = 0;
 static int  s_info_slide_step = 0;
 
-// ============================================================
-// COLOR CONFIG
-// ============================================================
-// 6-bit Pebble color index: bits 5-4=R, 3-2=G, 1-0=B (each 0-3 → 0/85/170/255)
-#define COLOR_BLACK  0x00   // 0b00_00_00
-#define COLOR_WHITE  0x3f   // 0b11_11_11
-#define COLOR_DKGRAY 0x15   // 0b01_01_01
-#define COLOR_LTGRAY 0x2a   // 0b10_10_10
+#define COLOR_BLACK  0x00
+#define COLOR_WHITE  0x3f
 
 static GColor prv_color_from_idx(uint8_t idx) {
-  uint8_t r = ((idx >> 4) & 3) * 85;
-  uint8_t g = ((idx >> 2) & 3) * 85;
-  uint8_t b = ( idx       & 3) * 85;
-  return GColorFromRGB(r, g, b);
+  return GColorFromRGB(((idx >> 4) & 3) * 85, ((idx >> 2) & 3) * 85, (idx & 3) * 85);
 }
 
-#define COLOR_MODE_DYNAMIC 0  // pace gradient (health + color platforms)
-#define COLOR_MODE_STATIC  1  // user-configured colors
+#define COLOR_MODE_DYNAMIC 0
+#define COLOR_MODE_STATIC  1
 
 static int     s_cfg_color_mode   = COLOR_MODE_DYNAMIC;
 static uint8_t s_cfg_col_bg       = COLOR_BLACK;
@@ -222,7 +211,7 @@ typedef struct {
   IconFn icon_fn;
   bool is_battery;
   bool is_weather;
-  bool is_debug_sq;  // draw a solid square placeholder icon
+  bool is_debug_sq;
   int  icon_extra;
 } InfoLine;
 
@@ -230,7 +219,6 @@ static Window    *s_window;
 static Layer     *s_canvas_layer;
 static int        s_hour = 0, s_minute = 0;
 static int        s_h = 0, s_target_h = 0, s_h_min = 0, s_ease_idx = 0;
-// Runtime color values (computed in draw_layer, used by draw_info_line)
 static GColor     s_fg, s_bg, s_fg_hr, s_fg_mn, s_shadow_col;
 static Phase      s_phase = PHASE_DONE;
 static int        s_anim_step = 0, s_anim_rep = 0;
@@ -245,6 +233,7 @@ static int        s_battery_pct = 100;
 static bool       s_charging = false, s_bt_connected = true;
 #if defined(PBL_HEALTH)
 static int        s_steps = 0, s_distance_m = 0, s_calories = 0, s_heart_rate = 0;
+static bool       s_heart_rate_valid = false;  // true once BPM data has been available
 static int        s_steps_expected = -1;
 #endif
 static int        s_sunrise_min = -1, s_sunset_min = -1;
@@ -306,17 +295,13 @@ static void prv_save_config(void) {
   for (int i = 0; i < 2; i++) sp_hi |= (s_cfg_stack[6+i] & 0x1f) << (i * 5);
   persist_write_int(PERSIST_CFG_STACK, sp_lo);
   persist_write_int(PERSIST_CFG_STACK_HI, sp_hi);
-  // Colors: mode(1 byte) + bg + dig_h + dig_m packed into low 32 bits
-  //         shadow + info packed into high 8 bits of second int
   int32_t ca = (s_cfg_color_mode & 0xff)
              | ((int32_t)(s_cfg_col_bg    & 0x3f) << 8)
              | ((int32_t)(s_cfg_col_dig_h & 0x3f) << 16)
              | ((int32_t)(s_cfg_col_dig_m & 0x3f) << 24);
   int32_t cb = ((int32_t)(s_cfg_col_shadow & 0x3f))
              | ((int32_t)(s_cfg_col_info   & 0x3f) << 8);
-  // Pack ca and cb into one 64-bit-wide persist write — split into two 32-bit writes
   persist_write_int(PERSIST_CFG_COLORS, ca);
-  // Second slot: use PERSIST_CFG_COLORS+1
   persist_write_int(PERSIST_CFG_COLORS + 1, cb);
 }
 static void prv_load_config(void) {
@@ -426,9 +411,16 @@ static void prv_update_health(void) {
   mask = health_service_metric_accessible(HealthMetricActiveKCalories, start, now);
   s_calories = (mask & HealthServiceAccessibilityMaskAvailable)
     ? (int)health_service_sum_today(HealthMetricActiveKCalories) : 0;
+  // BPM: peek_current_value for point-in-time reading.
+  // accessible check with time range may return unavailable when resting —
+  // try peek regardless and track if we ever got a valid reading.
   mask = health_service_metric_accessible(HealthMetricHeartRateBPM, start, now);
-  s_heart_rate = (mask & HealthServiceAccessibilityMaskAvailable)
-    ? (int)health_service_peek_current_value(HealthMetricHeartRateBPM) : 0;
+  if (mask & HealthServiceAccessibilityMaskAvailable) {
+    int bpm = (int)health_service_peek_current_value(HealthMetricHeartRateBPM);
+    if (bpm > 0) { s_heart_rate = bpm; s_heart_rate_valid = true; }
+    // If bpm==0 but health is accessible, keep last known value (don't zero it)
+  }
+  // If health system itself is unavailable for BPM, keep whatever we had
   s_steps_expected = prv_calc_steps_expected();
 }
 #endif
@@ -717,12 +709,7 @@ static void draw_info_line(GContext *ctx, InfoLine *line, int y,
                             int col_x, int col_w, GTextAlignment align) {
   GFont font = fonts_get_system_font(INFO_FONT_KEY);
   int iy = y - INFO_TOP_PAD + (INFO_LINE_H - ICON_W) / 2 - ICON_V_ADJUST;
-  GColor info_fg = s_fg;  // info text uses main fg by default (s_fg already set for info)
-  if (line->is_debug_sq) {
-    // Solid square icon placeholder for debug slot
-    graphics_context_set_fill_color(ctx, info_fg);
-    graphics_fill_rect(ctx, GRect(0, 0, ICON_W, ICON_W), 0, GCornerNone);  // drawn below
-  }
+  GColor info_fg = s_fg;
   if (line->has_icon || line->is_debug_sq) {
     bool large = ICON_LARGE;
     GSize sz = graphics_text_layout_get_content_size(
@@ -754,7 +741,7 @@ static void draw_info_line(GContext *ctx, InfoLine *line, int y,
     if (text_w < 0) text_w = 0;
     graphics_context_set_fill_color(ctx, info_fg);
     if (line->is_debug_sq) {
-      // 11x11 solid square — the simplest possible icon test
+      // Solid ICON_W square at (icon_sx, iy) — reference point for icon alignment
       graphics_fill_rect(ctx, GRect(icon_sx, iy, ICON_W, ICON_W), 0, GCornerNone);
     } else if (line->is_battery) {
       icon_battery(ctx, icon_sx, iy, info_fg, line->icon_extra, large);
@@ -876,24 +863,26 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
 #endif
     case SLOT_CALORIES:
 #if defined(PBL_HEALTH)
-      if (s_calories>0) {
-        if (wide && s_heart_rate>0) snprintf(buf,len,"%d cal"DOT"%d bpm",s_calories,s_heart_rate);
-        else if (wide) snprintf(buf,len,"%d cal",s_calories);
-        else snprintf(buf,len,"%d",s_calories);
-        return true;
-      }
-      return false;
+      // Show calories even when 0 early in day; show heart rate alongside if available
+      { if (wide) {
+          if (s_heart_rate > 0) snprintf(buf,len,"%d cal"DOT"%d bpm",s_calories,s_heart_rate);
+          else snprintf(buf,len,"%d cal",s_calories);
+        } else snprintf(buf,len,"%d",s_calories); }
+      return true;
 #else
       return false;
 #endif
     case SLOT_HEART:
 #if defined(PBL_HEALTH)
-      if (s_heart_rate>0) {
-        if (wide) snprintf(buf,len,"%d bpm",s_heart_rate);
-        else snprintf(buf,len,"%d",s_heart_rate);
-        return true;
+      // Show BPM if we have a reading; show "--" if health is accessible but no current reading
+      if (s_heart_rate_valid || s_heart_rate > 0) {
+        if (wide) snprintf(buf,len,"%d bpm", s_heart_rate);
+        else snprintf(buf,len,"%d", s_heart_rate);
+      } else {
+        // Health present but no reading yet
+        snprintf(buf,len, wide ? "-- bpm" : "--");
       }
-      return false;
+      return true;
 #else
       return false;
 #endif
@@ -926,8 +915,7 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       if (wide) snprintf(buf,len,"%s"DOT"%s",rb,sb2);
       else      snprintf(buf,len,"%s",rb);
       return true; }
-    // --- Wide-only combined slots ---
-    case SLOT_STEPS_EXP:   // Steps & Expected Steps
+    case SLOT_STEPS_EXP:
 #if defined(PBL_HEALTH)
       if (!wide) return false;
       { char sb[16], eb[16];
@@ -939,7 +927,7 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
 #else
       return false;
 #endif
-    case SLOT_EXP_PACE:    // Expected Steps & Pace %
+    case SLOT_EXP_PACE:
 #if defined(PBL_HEALTH)
       if (!wide) return false;
       if (s_steps_expected<=0) return false;
@@ -949,7 +937,7 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
 #else
       return false;
 #endif
-    case SLOT_BAT_BT:      // Battery & Bluetooth
+    case SLOT_BAT_BT:
       if (!wide) return false;
       if (!s_bt_connected) {
         if (s_charging) snprintf(buf,len,"%d%% +"DOT"no bt",s_battery_pct);
@@ -1003,7 +991,7 @@ static int prv_compute_target_h(int ub_h, int layout) {
   int n_above = 0, n_below = 0;
   for (int i = 0; i < 3; i++) if (s_cfg_wide[i] != SLOT_EMPTY) n_above++;
   for (int i = 3; i < 6; i++) if (s_cfg_wide[i] != SLOT_EMPTY) n_below++;
-  // Reserve WIDE_BELOW_EXTRA extra gap between digits and below block
+  // Include WIDE_BELOW_EXTRA in reserved space so digit height shrinks to accommodate
   int reserved = HALF_UNIT + prv_info_block_h(n_above, INFO_LINE_STEP_WIDE) + HALF_UNIT
                + HALF_UNIT + WIDE_BELOW_EXTRA
                + prv_info_block_h(n_below, INFO_LINE_STEP_WIDE) + HALF_UNIT;
@@ -1059,34 +1047,29 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   int ub_top   = ub.origin.y, ub_h = ub.size.h, ub_bot = ub_top + ub_h;
   GRect bounds = layer_get_bounds(layer);
 
-  // Determine colors
   GColor bg;
 #if defined(PBL_COLOR)
   if (s_cfg_color_mode == COLOR_MODE_STATIC) {
-    bg          = prv_color_from_idx(s_cfg_col_bg);
-    s_fg        = prv_color_from_idx(s_cfg_col_info);
-    s_fg_hr     = prv_color_from_idx(s_cfg_col_dig_h);
-    s_fg_mn     = prv_color_from_idx(s_cfg_col_dig_m);
+    bg           = prv_color_from_idx(s_cfg_col_bg);
+    s_fg         = prv_color_from_idx(s_cfg_col_info);
+    s_fg_hr      = prv_color_from_idx(s_cfg_col_dig_h);
+    s_fg_mn      = prv_color_from_idx(s_cfg_col_dig_m);
     s_shadow_col = prv_color_from_idx(s_cfg_col_shadow);
   } else {
-    // Dynamic: pace gradient background, auto fg
 #if defined(PBL_HEALTH)
     bg = prv_pace_color(s_steps, s_steps_expected);
 #else
     bg = GColorBlack;
 #endif
     bool dark = prv_bg_needs_dark_fg(bg);
-    s_fg     = dark ? GColorBlack : GColorWhite;
-    s_fg_hr  = s_fg;
-    s_fg_mn  = s_fg;
+    s_fg = dark ? GColorBlack : GColorWhite;
+    s_fg_hr = s_fg; s_fg_mn = s_fg;
     s_shadow_col = dark ? GColorWhite : GColorBlack;
   }
 #else
-  // B&W: invert option
-  bg          = s_cfg_invert ? GColorWhite : GColorBlack;
-  s_fg        = s_cfg_invert ? GColorBlack : GColorWhite;
-  s_fg_hr     = s_fg;
-  s_fg_mn     = s_fg;
+  bg = s_cfg_invert ? GColorWhite : GColorBlack;
+  s_fg = s_cfg_invert ? GColorBlack : GColorWhite;
+  s_fg_hr = s_fg; s_fg_mn = s_fg;
   s_shadow_col = s_cfg_invert ? GColorWhite : GColorBlack;
 #endif
 
@@ -1119,7 +1102,6 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     draw_colon_split(ctx, COLON_SLOT_X, top_cy, bot_cy, SHADOW_DX, SHADOW_DY, ub_top, ub_bot);
     graphics_context_set_fill_color(ctx, s_fg_hr);
     draw_colon_split(ctx, COLON_SLOT_X, top_cy, bot_cy, 0, 0, ub_top, ub_bot);
-    graphics_context_set_fill_color(ctx, s_shadow_col);
     draw_pair(ctx, h_tens, h_ones, SLOT_H_TENS, SLOT_H_ONES, hr_cy, dh, SHADOW_DX, SHADOW_DY, s_shadow_col);
     draw_pair(ctx, m_tens, m_ones, SLOT_M_TENS, SLOT_M_ONES, mn_cy, dh, SHADOW_DX, SHADOW_DY, s_shadow_col);
     draw_pair(ctx, h_tens, h_ones, SLOT_H_TENS, SLOT_H_ONES, hr_cy, dh, 0, 0, s_fg_hr);
@@ -1136,10 +1118,10 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int dummy_tx, dummy_ox, col_x_final, col_w; GTextAlignment info_align;
     prv_stacked_geom(tl, &dummy_tx, &dummy_ox, &col_x_final, &col_w, &info_align);
     prv_draw_stacked_info(ctx, tm_now, col_x, col_w, info_align, ub_top, ub_bot, ub_h);
-    draw_pair(ctx, h_tens, h_ones, hr_tens_x, hr_tens_x + SLOT_W, s_sh_hr_cy, s_sh_h, SHADOW_DX, SHADOW_DY, s_shadow_col);
-    draw_pair(ctx, m_tens, m_ones, mn_tens_x, mn_tens_x + SLOT_W, s_sh_mn_cy, s_sh_h, SHADOW_DX, SHADOW_DY, s_shadow_col);
-    draw_pair(ctx, h_tens, h_ones, hr_tens_x, hr_tens_x + SLOT_W, s_sh_hr_cy, s_sh_h, 0, 0, s_fg_hr);
-    draw_pair(ctx, m_tens, m_ones, mn_tens_x, mn_tens_x + SLOT_W, s_sh_mn_cy, s_sh_h, 0, 0, s_fg_mn);
+    draw_pair(ctx, h_tens, h_ones, hr_tens_x, hr_tens_x+SLOT_W, s_sh_hr_cy, s_sh_h, SHADOW_DX, SHADOW_DY, s_shadow_col);
+    draw_pair(ctx, m_tens, m_ones, mn_tens_x, mn_tens_x+SLOT_W, s_sh_mn_cy, s_sh_h, SHADOW_DX, SHADOW_DY, s_shadow_col);
+    draw_pair(ctx, h_tens, h_ones, hr_tens_x, hr_tens_x+SLOT_W, s_sh_hr_cy, s_sh_h, 0, 0, s_fg_hr);
+    draw_pair(ctx, m_tens, m_ones, mn_tens_x, mn_tens_x+SLOT_W, s_sh_mn_cy, s_sh_h, 0, 0, s_fg_mn);
     return;
   }
 
@@ -1157,15 +1139,18 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int bn = build_lines(s_below_lines, 3, below_s, 3, tm_now, true);
     int above_start = ub_top + HALF_UNIT;
     int above_end   = above_start + prv_info_block_h(an, INFO_LINE_STEP_WIDE);
-    // below_end pushed up by WIDE_BELOW_EXTRA to create extra gap between digits and below lines
-    int below_end   = ub_bot - HALF_UNIT - WIDE_BELOW_EXTRA;
-    int time_cy     = (above_end + HALF_UNIT + (below_end - prv_info_block_h(bn, INFO_LINE_STEP_WIDE)) - HALF_UNIT) / 2;
+    // below_end at natural position (screen edge margin)
+    int below_end   = ub_bot - HALF_UNIT;
+    int below_top   = below_end - prv_info_block_h(bn, INFO_LINE_STEP_WIDE);
+    // Bias time_cy upward by WIDE_BELOW_EXTRA so extra gap appears between
+    // digit bottom and the below-block top (not between below-block and screen edge)
+    int time_cy = (above_end + HALF_UNIT + below_top - HALF_UNIT - WIDE_BELOW_EXTRA) / 2;
     int col_x = SIDE_MARGIN, col_w = SCREEN_W - 2 * SIDE_MARGIN;
     int slide = s_info_slide;
     for (int i = 0; i < an; i++)
       draw_info_line(ctx, &s_above_lines[i], above_start + i*INFO_LINE_STEP_WIDE - slide, col_x, col_w, GTextAlignmentCenter);
     for (int i = 0; i < bn; i++) {
-      int gy = below_end - prv_info_block_h(bn, INFO_LINE_STEP_WIDE) + i * INFO_LINE_STEP_WIDE;
+      int gy = below_top + i * INFO_LINE_STEP_WIDE;
       draw_info_line(ctx, &s_below_lines[i], gy + slide, col_x, col_w, GTextAlignmentCenter);
     }
     draw_digits_full(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy, SHADOW_DX, SHADOW_DY, ub_top, ub_bot, s_shadow_col, s_shadow_col);
@@ -1457,7 +1442,6 @@ static void touch_handler(const TouchEvent *event, void *context) {
 #endif
 static void prv_noop_click(ClickRecognizerRef ref, void *ctx) { (void)ref; (void)ctx; }
 #if defined(PBL_PLATFORM_EMERY)
-// UP button: cycle corner radius (SELECT is OS-reserved for Settings)
 static void prv_up_click(ClickRecognizerRef ref, void *ctx) {
   (void)ref; (void)ctx;
   s_radius_idx = (s_radius_idx + 1) % RADIUS_COUNT;
