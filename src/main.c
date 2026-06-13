@@ -1,9 +1,8 @@
 // ============================================================
-// TallBoy — main.c  v3.59d
+// TallBoy — main.c  v3.59e
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.59d: wide debug string "Wednesday, December 30" (no brackets)
-//         stacked debug string remains "[Debug]"
+// v3.59e: wide debug string "Wednesday, September 30" (longer than December)
 // ============================================================
 
 #include <pebble.h>
@@ -929,8 +928,9 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       }
       return true;
     case SLOT_DEBUG:
-      // Wide: longest day+date without brackets; stacked: short bracketed label
-      if (wide) snprintf(buf, len, "Wednesday, December 30");
+      // Wide: "Wednesday, September 30" — longest day+date string (September > December by 1 char)
+      // Stacked: short bracketed label
+      if (wide) snprintf(buf, len, "Wednesday, September 30");
       else       snprintf(buf, len, "[Debug]");
       return true;
     default: return false;
