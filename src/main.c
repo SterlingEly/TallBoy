@@ -2,7 +2,7 @@
 // TallBoy — main.c  v3.59f
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.59f: zero far-side margins for info text
+// v3.59f: zero far-side margins, centered text fix, debug icon spacing
 //   - Wide mode: col_x=0, col_w=SCREEN_W (full width, no margin)
 //   - Stacked mode: far-side margin reduced to 0 (digit side unchanged)
 //     STACK_R (info left): col_x=0, col_w=tens_x-UNIT
@@ -695,13 +695,20 @@ static void draw_info_line(GContext *ctx, InfoLine *line, int y,
   GFont font = fonts_get_system_font(INFO_FONT_KEY);
   int iy = y - INFO_TOP_PAD + (INFO_LINE_H - ICON_W) / 2 - ICON_V_ADJUST;
   GColor info_fg = s_fg;
-  // Debug slot uses fixed 16px icon; all others use ICON_W
-  int icon_w_eff = line->is_debug_sq ? 16 : ICON_W;
+  // Debug slot uses fixed 16px icon and UNIT gap; all others use ICON_W / ICON_TEXT_GAP
+  int icon_w_eff  = line->is_debug_sq ? 16 : ICON_W;
+  int icon_gap_eff = line->is_debug_sq ? UNIT : ICON_TEXT_GAP;
+  // Debug icon: nudge up 3px on emery to better align with text cap-height
+#if defined(PBL_PLATFORM_EMERY)
+  int iy_eff = line->is_debug_sq ? iy - 3 : iy;
+#else
+  int iy_eff = iy;
+#endif
   if (line->has_icon || line->is_debug_sq) {
     bool large = ICON_LARGE;
     GSize sz = graphics_text_layout_get_content_size(
       line->text, font, GRect(0,0,200,20), GTextOverflowModeFill, GTextAlignmentLeft);
-    int block_w = icon_w_eff + ICON_TEXT_GAP + sz.w;
+    int block_w = icon_w_eff + icon_gap_eff + sz.w;
     if (block_w > col_w) {
       graphics_context_set_text_color(ctx, info_fg);
       graphics_draw_text(ctx, line->text, font, GRect(col_x, y-INFO_TOP_PAD, col_w, INFO_LINE_H),
@@ -712,36 +719,44 @@ static void draw_info_line(GContext *ctx, InfoLine *line, int y,
     int icon_sx, text_sx, text_w;
     if (align == GTextAlignmentRight) {
       text_sx = col_x;
-      text_w  = col_w - icon_w_eff - ICON_TEXT_GAP;
+      text_w  = col_w - icon_w_eff - icon_gap_eff;
       icon_sx = col_x + col_w - icon_w_eff;
     } else if (align == GTextAlignmentLeft) {
       icon_sx = col_x;
-      text_sx = col_x + icon_w_eff + ICON_TEXT_GAP;
+      text_sx = col_x + icon_w_eff + icon_gap_eff;
       text_w  = col_x + col_w - text_sx;
     } else {
+      // Center: position icon+text block as a unit, then draw text centered
+      // over full col_w so Pebble's own renderer handles sub-pixel centering.
       int off = (col_w - block_w) / 2;
       if (off < 0) off = 0;
       icon_sx = col_x + off;
-      text_sx = icon_sx + icon_w_eff + ICON_TEXT_GAP;
-      text_w  = (col_x + col_w) - text_sx;
+      text_sx = col_x;   // unused for center — text drawn full-width below
+      text_w  = col_w;
     }
     if (text_w < 0) text_w = 0;
     graphics_context_set_fill_color(ctx, info_fg);
     if (line->is_debug_sq) {
       // 16px solid square — registration point for icon alignment testing
-      graphics_fill_rect(ctx, GRect(icon_sx, iy, 16, 16), 0, GCornerNone);
+      graphics_fill_rect(ctx, GRect(icon_sx, iy_eff, 16, 16), 0, GCornerNone);
     } else if (line->is_battery) {
-      icon_battery(ctx, icon_sx, iy, info_fg, line->icon_extra, large);
+      icon_battery(ctx, icon_sx, iy_eff, info_fg, line->icon_extra, large);
     } else if (line->is_weather) {
-      icon_weather(ctx, icon_sx, iy, info_fg, line->icon_extra, large);
+      icon_weather(ctx, icon_sx, iy_eff, info_fg, line->icon_extra, large);
     } else {
-      line->icon_fn(ctx, icon_sx, iy, info_fg, large);
+      line->icon_fn(ctx, icon_sx, iy_eff, info_fg, large);
     }
     graphics_context_set_text_color(ctx, info_fg);
     if (text_w > 0) {
-      GTextAlignment ta = (align == GTextAlignmentRight) ? GTextAlignmentRight : GTextAlignmentLeft;
-      graphics_draw_text(ctx, line->text, font, GRect(text_sx, y-INFO_TOP_PAD, text_w, INFO_LINE_H),
-        GTextOverflowModeTrailingEllipsis, ta, NULL);
+      if (align == GTextAlignmentCenter) {
+        // Let Pebble center the text over the full column; icon already placed left of center
+        graphics_draw_text(ctx, line->text, font, GRect(col_x, y-INFO_TOP_PAD, col_w, INFO_LINE_H),
+          GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+      } else {
+        GTextAlignment ta = (align == GTextAlignmentRight) ? GTextAlignmentRight : GTextAlignmentLeft;
+        graphics_draw_text(ctx, line->text, font, GRect(text_sx, y-INFO_TOP_PAD, text_w, INFO_LINE_H),
+          GTextOverflowModeTrailingEllipsis, ta, NULL);
+      }
     }
   } else {
     graphics_context_set_text_color(ctx, info_fg);
@@ -998,15 +1013,15 @@ static void prv_stacked_geom(int layout, int *tens_x, int *ones_x,
     // Digits on the right, info on the left
     *ones_x = SCREEN_W - SIDE_MARGIN - SLOT_W;
     *tens_x = *ones_x - SLOT_W;
-    *col_x  = 0;                      // far edge: flush to screen left
-    *col_w  = *tens_x - UNIT;         // gap between info and digits
+    *col_x  = 1;                      // far edge: 1px min margin from screen left
+    *col_w  = *tens_x - UNIT - 1;     // gap between info and digits
     *align  = GTextAlignmentRight;
   } else {
     // Digits on the left, info on the right
     *tens_x = SIDE_MARGIN;
     *ones_x = SIDE_MARGIN + SLOT_W;
     *col_x  = *ones_x + SLOT_W + UNIT;
-    *col_w  = SCREEN_W - *col_x;      // far edge: flush to screen right
+    *col_w  = SCREEN_W - *col_x - 1;  // far edge: 1px min margin from screen right
     *align  = GTextAlignmentLeft;
   }
 }
@@ -1129,8 +1144,8 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int below_end   = ub_bot - HALF_UNIT;
     int below_top   = below_end - prv_info_block_h(bn, INFO_LINE_STEP_WIDE);
     int time_cy = (above_end + HALF_UNIT + below_top - HALF_UNIT - WIDE_BELOW_EXTRA) / 2;
-    // Wide info lines: full screen width, no side margins
-    int col_x = 0, col_w = SCREEN_W;
+    // Wide info lines: 1px min margin each side
+    int col_x = 1, col_w = SCREEN_W - 2;
     int slide = s_info_slide;
     for (int i = 0; i < an; i++)
       draw_info_line(ctx, &s_above_lines[i], above_start + i*INFO_LINE_STEP_WIDE - slide, col_x, col_w, GTextAlignmentCenter);
