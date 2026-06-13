@@ -1,27 +1,11 @@
 // ============================================================
-// TallBoy — main.c  v3.59b
+// TallBoy — main.c  v3.59c
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.59 changes:
-//   - Heart rate: show "-- bpm" (or "--") when s_heart_rate == 0
-//     instead of hiding the slot. BPM is a point-in-time metric;
-//     returning false when resting suppresses the slot incorrectly.
-//     Also improved accessibility check for BPM.
-//   - Wide below-gap: fix direction — the gap is now added between
-//     digit bottom and below-block top, not between below-block
-//     bottom and screen edge. below_end restored to ub_bot-HALF_UNIT;
-//     time_cy biased up by WIDE_BELOW_EXTRA/2 to shift digits toward
-//     above-lines, leaving extra space before the below-block.
-//   - Debug icon: remove stray GRect(0,0,...) draw that was placing
-//     a ghost icon at the page origin. Icon now draws at (icon_sx,iy)
-//     only, as intended.
-//
-// v3.59b changes:
-//   - SLOT_DEBUG stacked text: "[Debug]"
-//   - SLOT_DEBUG wide text: "[Wednesday, December 30]"
-//   - Debug icon: fixed 16x16 solid square (not ICON_W=14)
-//   - icon_w_eff: draw_info_line uses 16 for debug slot, ICON_W for
-//     all others — applied to block_w and all 4 layout cases
+// v3.59b: [Debug]/[Wednesday, December 30], 16px icon, icon_w_eff
+// v3.59c: wide info lines use HALF_UNIT margin (4px emery) instead of
+//         SIDE_MARGIN (12px), giving full-width-minus-half-unit text area.
+//         col_x = HALF_UNIT, col_w = SCREEN_W - HALF_UNIT*2
 // ============================================================
 
 #include <pebble.h>
@@ -129,8 +113,6 @@ typedef enum {
 #define INFO_LINES_MAX  8
 
 #define STACK_INFO_TOP_MARGIN   (UNIT * 2)
-// Extra gap between digit block bottom and first below-info line in wide mode.
-// Applied by biasing time_cy upward, not by moving below_end.
 #define WIDE_BELOW_EXTRA        HALF_UNIT
 #define WIDE_SLOTS         6
 #define STACK_SLOTS        8
@@ -240,7 +222,7 @@ static int        s_battery_pct = 100;
 static bool       s_charging = false, s_bt_connected = true;
 #if defined(PBL_HEALTH)
 static int        s_steps = 0, s_distance_m = 0, s_calories = 0, s_heart_rate = 0;
-static bool       s_heart_rate_valid = false;  // true once BPM data has been available
+static bool       s_heart_rate_valid = false;
 static int        s_steps_expected = -1;
 #endif
 static int        s_sunrise_min = -1, s_sunset_min = -1;
@@ -418,16 +400,11 @@ static void prv_update_health(void) {
   mask = health_service_metric_accessible(HealthMetricActiveKCalories, start, now);
   s_calories = (mask & HealthServiceAccessibilityMaskAvailable)
     ? (int)health_service_sum_today(HealthMetricActiveKCalories) : 0;
-  // BPM: peek_current_value for point-in-time reading.
-  // accessible check with time range may return unavailable when resting —
-  // try peek regardless and track if we ever got a valid reading.
   mask = health_service_metric_accessible(HealthMetricHeartRateBPM, start, now);
   if (mask & HealthServiceAccessibilityMaskAvailable) {
     int bpm = (int)health_service_peek_current_value(HealthMetricHeartRateBPM);
     if (bpm > 0) { s_heart_rate = bpm; s_heart_rate_valid = true; }
-    // If bpm==0 but health is accessible, keep last known value (don't zero it)
   }
-  // If health system itself is unavailable for BPM, keep whatever we had
   s_steps_expected = prv_calc_steps_expected();
 }
 #endif
@@ -872,7 +849,6 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
 #endif
     case SLOT_CALORIES:
 #if defined(PBL_HEALTH)
-      // Show calories even when 0 early in day; show heart rate alongside if available
       { if (wide) {
           if (s_heart_rate > 0) snprintf(buf,len,"%d cal"DOT"%d bpm",s_calories,s_heart_rate);
           else snprintf(buf,len,"%d cal",s_calories);
@@ -883,12 +859,10 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
 #endif
     case SLOT_HEART:
 #if defined(PBL_HEALTH)
-      // Show BPM if we have a reading; show "--" if health is accessible but no current reading
       if (s_heart_rate_valid || s_heart_rate > 0) {
         if (wide) snprintf(buf,len,"%d bpm", s_heart_rate);
         else snprintf(buf,len,"%d", s_heart_rate);
       } else {
-        // Health present but no reading yet
         snprintf(buf,len, wide ? "-- bpm" : "--");
       }
       return true;
@@ -957,7 +931,6 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       }
       return true;
     case SLOT_DEBUG:
-      // Wide: long day+date for overflow testing; stacked: short bracketed label
       if (wide) snprintf(buf, len, "[Wednesday, December 30]");
       else       snprintf(buf, len, "[Debug]");
       return true;
@@ -1002,7 +975,6 @@ static int prv_compute_target_h(int ub_h, int layout) {
   int n_above = 0, n_below = 0;
   for (int i = 0; i < 3; i++) if (s_cfg_wide[i] != SLOT_EMPTY) n_above++;
   for (int i = 3; i < 6; i++) if (s_cfg_wide[i] != SLOT_EMPTY) n_below++;
-  // Include WIDE_BELOW_EXTRA in reserved space so digit height shrinks to accommodate
   int reserved = HALF_UNIT + prv_info_block_h(n_above, INFO_LINE_STEP_WIDE) + HALF_UNIT
                + HALF_UNIT + WIDE_BELOW_EXTRA
                + prv_info_block_h(n_below, INFO_LINE_STEP_WIDE) + HALF_UNIT;
@@ -1150,13 +1122,11 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int bn = build_lines(s_below_lines, 3, below_s, 3, tm_now, true);
     int above_start = ub_top + HALF_UNIT;
     int above_end   = above_start + prv_info_block_h(an, INFO_LINE_STEP_WIDE);
-    // below_end at natural position (screen edge margin)
     int below_end   = ub_bot - HALF_UNIT;
     int below_top   = below_end - prv_info_block_h(bn, INFO_LINE_STEP_WIDE);
-    // Bias time_cy upward by WIDE_BELOW_EXTRA so extra gap appears between
-    // digit bottom and the below-block top (not between below-block and screen edge)
     int time_cy = (above_end + HALF_UNIT + below_top - HALF_UNIT - WIDE_BELOW_EXTRA) / 2;
-    int col_x = SIDE_MARGIN, col_w = SCREEN_W - 2 * SIDE_MARGIN;
+    // Wide info lines: HALF_UNIT margin each side (max usable width)
+    int col_x = HALF_UNIT, col_w = SCREEN_W - HALF_UNIT * 2;
     int slide = s_info_slide;
     for (int i = 0; i < an; i++)
       draw_info_line(ctx, &s_above_lines[i], above_start + i*INFO_LINE_STEP_WIDE - slide, col_x, col_w, GTextAlignmentCenter);
