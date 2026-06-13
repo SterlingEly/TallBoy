@@ -1,8 +1,12 @@
 // ============================================================
-// TallBoy — main.c  v3.59e
+// TallBoy — main.c  v3.59f
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.59e: wide debug string "Wednesday, September 30" (longer than December)
+// v3.59f: zero far-side margins for info text
+//   - Wide mode: col_x=0, col_w=SCREEN_W (full width, no margin)
+//   - Stacked mode: far-side margin reduced to 0 (digit side unchanged)
+//     STACK_R (info left): col_x=0, col_w=tens_x-UNIT
+//     STACK_L (info right): col_w=SCREEN_W-col_x
 // ============================================================
 
 #include <pebble.h>
@@ -928,8 +932,7 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       }
       return true;
     case SLOT_DEBUG:
-      // Wide: "Wednesday, September 30" — longest day+date string (September > December by 1 char)
-      // Stacked: short bracketed label
+      // Wide: longest day+date string; stacked: short bracketed label
       if (wide) snprintf(buf, len, "Wednesday, September 30");
       else       snprintf(buf, len, "[Debug]");
       return true;
@@ -992,16 +995,18 @@ static void prv_update_targets(void) {
 static void prv_stacked_geom(int layout, int *tens_x, int *ones_x,
                                int *col_x, int *col_w, GTextAlignment *align) {
   if (layout == LAYOUT_STACK_R) {
+    // Digits on the right, info on the left
     *ones_x = SCREEN_W - SIDE_MARGIN - SLOT_W;
     *tens_x = *ones_x - SLOT_W;
-    *col_x  = SIDE_MARGIN;
-    *col_w  = *tens_x - SIDE_MARGIN - UNIT;
+    *col_x  = 0;                      // far edge: flush to screen left
+    *col_w  = *tens_x - UNIT;         // gap between info and digits
     *align  = GTextAlignmentRight;
   } else {
+    // Digits on the left, info on the right
     *tens_x = SIDE_MARGIN;
     *ones_x = SIDE_MARGIN + SLOT_W;
     *col_x  = *ones_x + SLOT_W + UNIT;
-    *col_w  = SCREEN_W - *col_x - SIDE_MARGIN;
+    *col_w  = SCREEN_W - *col_x;      // far edge: flush to screen right
     *align  = GTextAlignmentLeft;
   }
 }
@@ -1124,8 +1129,8 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int below_end   = ub_bot - HALF_UNIT;
     int below_top   = below_end - prv_info_block_h(bn, INFO_LINE_STEP_WIDE);
     int time_cy = (above_end + HALF_UNIT + below_top - HALF_UNIT - WIDE_BELOW_EXTRA) / 2;
-    // Wide info lines: HALF_UNIT margin each side for maximum usable width
-    int col_x = HALF_UNIT, col_w = SCREEN_W - HALF_UNIT * 2;
+    // Wide info lines: full screen width, no side margins
+    int col_x = 0, col_w = SCREEN_W;
     int slide = s_info_slide;
     for (int i = 0; i < an; i++)
       draw_info_line(ctx, &s_above_lines[i], above_start + i*INFO_LINE_STEP_WIDE - slide, col_x, col_w, GTextAlignmentCenter);
@@ -1241,7 +1246,7 @@ static void prv_start_split_h(void) {
   s_sh_hr_cy = h_cy_final; s_sh_mn_cy = m_cy_final; s_sh_h = dh_final;
   s_sh_hr_tx_s = SLOT_H_TENS;  s_sh_hr_tx_e = stk_tens_x;
   s_sh_mn_tx_s = SLOT_M_TENS;  s_sh_mn_tx_e = stk_tens_x;
-  int info_start = (tl == LAYOUT_STACK_L) ? SCREEN_W : (SIDE_MARGIN - col_w - UNIT);
+  int info_start = (tl == LAYOUT_STACK_L) ? SCREEN_W : (0 - col_w - UNIT);
   s_sh_col_s = info_start;  s_sh_col_e = col_x_final;
   s_anim_step = 0; s_phase = PHASE_SPLIT_H; schedule(SPLIT_MS);
 }
@@ -1259,7 +1264,7 @@ static void prv_start_merge_h(void) {
   s_sh_hr_cy = h_cy_final; s_sh_mn_cy = m_cy_final; s_sh_h = dh_final;
   s_sh_hr_tx_s = stk_tens_x;  s_sh_hr_tx_e = SLOT_H_TENS;
   s_sh_mn_tx_s = stk_tens_x;  s_sh_mn_tx_e = SLOT_M_TENS;
-  int info_end = (tl == LAYOUT_STACK_L) ? SCREEN_W : (SIDE_MARGIN - col_w - UNIT);
+  int info_end = (tl == LAYOUT_STACK_L) ? SCREEN_W : (0 - col_w - UNIT);
   s_sh_col_s = col_x_final;  s_sh_col_e = info_end;
   s_split_target_layout = tl;
   s_anim_step = 0; s_phase = PHASE_MERGE_H; schedule(SPLIT_MS);
