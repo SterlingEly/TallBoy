@@ -1,11 +1,9 @@
 // ============================================================
-// TallBoy — main.c  v3.59c
+// TallBoy — main.c  v3.59d
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.59b: [Debug]/[Wednesday, December 30], 16px icon, icon_w_eff
-// v3.59c: wide info lines use HALF_UNIT margin (4px emery) instead of
-//         SIDE_MARGIN (12px), giving full-width-minus-half-unit text area.
-//         col_x = HALF_UNIT, col_w = SCREEN_W - HALF_UNIT*2
+// v3.59d: wide debug string "Wednesday, December 30" (no brackets)
+//         stacked debug string remains "[Debug]"
 // ============================================================
 
 #include <pebble.h>
@@ -931,7 +929,8 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       }
       return true;
     case SLOT_DEBUG:
-      if (wide) snprintf(buf, len, "[Wednesday, December 30]");
+      // Wide: longest day+date without brackets; stacked: short bracketed label
+      if (wide) snprintf(buf, len, "Wednesday, December 30");
       else       snprintf(buf, len, "[Debug]");
       return true;
     default: return false;
@@ -1125,7 +1124,7 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int below_end   = ub_bot - HALF_UNIT;
     int below_top   = below_end - prv_info_block_h(bn, INFO_LINE_STEP_WIDE);
     int time_cy = (above_end + HALF_UNIT + below_top - HALF_UNIT - WIDE_BELOW_EXTRA) / 2;
-    // Wide info lines: HALF_UNIT margin each side (max usable width)
+    // Wide info lines: HALF_UNIT margin each side for maximum usable width
     int col_x = HALF_UNIT, col_w = SCREEN_W - HALF_UNIT * 2;
     int slide = s_info_slide;
     for (int i = 0; i < an; i++)
