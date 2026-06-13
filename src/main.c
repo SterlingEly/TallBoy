@@ -1,5 +1,5 @@
 // ============================================================
-// TallBoy — main.c  v3.59
+// TallBoy — main.c  v3.59b
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
 // v3.59 changes:
@@ -15,6 +15,13 @@
 //   - Debug icon: remove stray GRect(0,0,...) draw that was placing
 //     a ghost icon at the page origin. Icon now draws at (icon_sx,iy)
 //     only, as intended.
+//
+// v3.59b changes:
+//   - SLOT_DEBUG stacked text: "[Debug]"
+//   - SLOT_DEBUG wide text: "[Wednesday, December 30]"
+//   - Debug icon: fixed 16x16 solid square (not ICON_W=14)
+//   - icon_w_eff: draw_info_line uses 16 for debug slot, ICON_W for
+//     all others — applied to block_w and all 4 layout cases
 // ============================================================
 
 #include <pebble.h>
@@ -710,11 +717,13 @@ static void draw_info_line(GContext *ctx, InfoLine *line, int y,
   GFont font = fonts_get_system_font(INFO_FONT_KEY);
   int iy = y - INFO_TOP_PAD + (INFO_LINE_H - ICON_W) / 2 - ICON_V_ADJUST;
   GColor info_fg = s_fg;
+  // Debug slot uses fixed 16px icon; all others use ICON_W
+  int icon_w_eff = line->is_debug_sq ? 16 : ICON_W;
   if (line->has_icon || line->is_debug_sq) {
     bool large = ICON_LARGE;
     GSize sz = graphics_text_layout_get_content_size(
       line->text, font, GRect(0,0,200,20), GTextOverflowModeFill, GTextAlignmentLeft);
-    int block_w = ICON_W + ICON_TEXT_GAP + sz.w;
+    int block_w = icon_w_eff + ICON_TEXT_GAP + sz.w;
     if (block_w > col_w) {
       graphics_context_set_text_color(ctx, info_fg);
       graphics_draw_text(ctx, line->text, font, GRect(col_x, y-INFO_TOP_PAD, col_w, INFO_LINE_H),
@@ -725,24 +734,24 @@ static void draw_info_line(GContext *ctx, InfoLine *line, int y,
     int icon_sx, text_sx, text_w;
     if (align == GTextAlignmentRight) {
       text_sx = col_x;
-      text_w  = col_w - ICON_W - ICON_TEXT_GAP;
-      icon_sx = col_x + col_w - ICON_W;
+      text_w  = col_w - icon_w_eff - ICON_TEXT_GAP;
+      icon_sx = col_x + col_w - icon_w_eff;
     } else if (align == GTextAlignmentLeft) {
       icon_sx = col_x;
-      text_sx = col_x + ICON_W + ICON_TEXT_GAP;
+      text_sx = col_x + icon_w_eff + ICON_TEXT_GAP;
       text_w  = col_x + col_w - text_sx;
     } else {
       int off = (col_w - block_w) / 2;
       if (off < 0) off = 0;
       icon_sx = col_x + off;
-      text_sx = icon_sx + ICON_W + ICON_TEXT_GAP;
+      text_sx = icon_sx + icon_w_eff + ICON_TEXT_GAP;
       text_w  = (col_x + col_w) - text_sx;
     }
     if (text_w < 0) text_w = 0;
     graphics_context_set_fill_color(ctx, info_fg);
     if (line->is_debug_sq) {
-      // Solid ICON_W square at (icon_sx, iy) — reference point for icon alignment
-      graphics_fill_rect(ctx, GRect(icon_sx, iy, ICON_W, ICON_W), 0, GCornerNone);
+      // 16px solid square — registration point for icon alignment testing
+      graphics_fill_rect(ctx, GRect(icon_sx, iy, 16, 16), 0, GCornerNone);
     } else if (line->is_battery) {
       icon_battery(ctx, icon_sx, iy, info_fg, line->icon_extra, large);
     } else if (line->is_weather) {
@@ -948,7 +957,9 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       }
       return true;
     case SLOT_DEBUG:
-      snprintf(buf, len, "Wednesday");
+      // Wide: long day+date for overflow testing; stacked: short bracketed label
+      if (wide) snprintf(buf, len, "[Wednesday, December 30]");
+      else       snprintf(buf, len, "[Debug]");
       return true;
     default: return false;
   }
