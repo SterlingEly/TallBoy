@@ -45,6 +45,8 @@
     "CfgColorDigH":      27,
     "CfgColorDigM":      28,
     "CfgColorShadow":    29,
-    "CfgColorInfo":      30
+    "CfgColorInfo":      30,
+    "UvIndex":           31,
+    "SunriseTomorrow":   32
   }
 }
