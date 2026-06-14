@@ -22,7 +22,9 @@ var SLOT_NAMES_STACK = [
   { v: 14, n: 'Daylight' },
   { v: 15, n: 'Battery' },
   { v: 16, n: 'Bluetooth' },
-  { v: 21, n: '[ Debug ]' }
+  { v: 21, n: '[ Debug ]' },
+  { v: 22, n: 'UV Index' },
+  { v: 23, n: 'Light Remaining' }
 ];
 
 var SLOT_NAMES_WIDE = [
@@ -37,7 +39,10 @@ var SLOT_NAMES_WIDE = [
   { v: 17, n: 'Sunrise & Sunset' },
   { v: 14, n: 'Daylight' },
   { v: 20, n: 'Battery & Bluetooth' },
-  { v: 21, n: '[ Debug ]' }
+  { v: 21, n: '[ Debug ]' },
+  { v: 22, n: 'UV Index' },
+  { v: 23, n: 'Light Remaining' },
+  { v: 24, n: 'UV & Light Remaining' }
 ];
 
 function pblColorToCss(idx) {
@@ -111,7 +116,7 @@ function fetchWeather() {
     var lat = pos.coords.latitude, lon = pos.coords.longitude;
     var url = 'https://api.open-meteo.com/v1/forecast'
       + '?latitude=' + lat + '&longitude=' + lon
-      + '&current=temperature_2m,weather_code'
+      + '&current=temperature_2m,weather_code,uv_index'
       + '&daily=sunrise,sunset&temperature_unit=celsius'
       + '&timezone=auto&forecast_days=2';
     var xhr = new XMLHttpRequest();
@@ -126,8 +131,13 @@ function fetchWeather() {
           rise = Math.round(new Date(d.daily.sunrise[0]).getTime() / 1000);
           set  = Math.round(new Date(d.daily.sunset[0]).getTime()  / 1000);
         }
-        var msg = { WeatherTempF: tempF, WeatherTempC: tempC, WeatherCode: code };
+        var uv = d.current.uv_index !== undefined ? Math.round(d.current.uv_index) : 0;
+        var riseTom = 0;
+        if (d.daily && d.daily.sunrise && d.daily.sunrise[1])
+          riseTom = Math.round(new Date(d.daily.sunrise[1]).getTime() / 1000);
+        var msg = { WeatherTempF: tempF, WeatherTempC: tempC, WeatherCode: code, UvIndex: uv };
         if (rise > 0) { msg.SunriseTime = rise; msg.SunsetTime = set; }
+        if (riseTom > 0) msg.SunriseTomorrow = riseTom;
         Pebble.sendAppMessage(msg,
           function() { console.log('Weather sent: ' + tempF + 'F'); },
           function(e) { console.log('Weather error: ' + e.error.message); });
