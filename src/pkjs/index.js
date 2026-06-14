@@ -13,7 +13,7 @@ var SLOT_NAMES_STACK = [
   { v:  5, n: 'Weather' },
   { v:  6, n: 'Steps' },
   { v:  7, n: 'Distance' },
-  { v:  8, n: 'Expected Steps' },
+  { v:  8, n: 'Typical Steps' },
   { v:  9, n: 'Step Pace %' },
   { v: 10, n: 'Active Calories' },
   { v: 11, n: 'Heart Rate' },
@@ -22,7 +22,7 @@ var SLOT_NAMES_STACK = [
   { v: 14, n: 'Daylight' },
   { v: 15, n: 'Battery' },
   { v: 16, n: 'Bluetooth' },
-  { v: 21, n: '[Debug]' }
+  { v: 21, n: '[ Debug ]' }
 ];
 
 var SLOT_NAMES_WIDE = [
@@ -30,14 +30,14 @@ var SLOT_NAMES_WIDE = [
   { v:  3, n: 'Day & Date' },
   { v:  5, n: 'Weather' },
   { v:  6, n: 'Steps & Distance' },
-  { v: 18, n: 'Steps & Expected Steps' },
+  { v: 18, n: 'Steps & Typical Steps' },
   { v:  9, n: 'Steps & Pace %' },
-  { v: 19, n: 'Expected Steps & Pace %' },
+  { v: 19, n: 'Typical Steps & Pace %' },
   { v: 10, n: 'Active Calories & Heart Rate' },
   { v: 17, n: 'Sunrise & Sunset' },
   { v: 14, n: 'Daylight' },
   { v: 20, n: 'Battery & Bluetooth' },
-  { v: 21, n: '[Debug]' }
+  { v: 21, n: '[ Debug ]' }
 ];
 
 function pblColorToCss(idx) {
@@ -186,7 +186,7 @@ function colorPicker(fieldId, currentIdx) {
     + grid;
 }
 
-function buildConfigPage(s) {
+function buildConfigPage(s, isColor) {
   var wideRows = '', stackRows = '';
   var wideLabels = ['Above 1','Above 2','Above 3','Below 1','Below 2','Below 3'];
   for (var i = 0; i < 6; i++)
@@ -207,6 +207,24 @@ function buildConfigPage(s) {
       + '<\/div>';
   }
 
+  // Color section only shown on color Pebbles (basalt/chalk/emery)
+  // Invert section only shown on b&w Pebbles (aplite/diorite/flint/gabbro)
+  var colorSection = isColor
+    ? '<div class="section"><h3>Colors<\/h3>'
+      + '<label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">Color mode<\/label>'
+      + radioGroup('cm',['Step Pace Progression','Static'],[0,1],s.colorMode)
+      + '<div id="static-colors" style="display:none;margin-top:12px">'
+      + colorRows
+      + '<\/div><\/div>'
+    : '';
+
+  var invertSection = !isColor
+    ? '<div class="section"><h3>Display<\/h3>'
+      + '<label style="color:#aaa;font-size:12px;display:block;margin-bottom:4px">Theme<\/label>'
+      + radioGroup('inv',['Black on white','White on black'],[1,0],s.invert)
+      + '<\/div>'
+    : '';
+
   var html = '<!DOCTYPE html><html><head>'
     + '<meta name="viewport" content="width=device-width,initial-scale=1">'
     + '<style>'
@@ -224,20 +242,17 @@ function buildConfigPage(s) {
     + '.toggle label:first-of-type{border-radius:6px 0 0 6px}'
     + '.toggle label:last-of-type{border-radius:0 6px 6px 0}'
     + '.pair{display:flex;gap:10px}.pair>div{flex:1}'
-    // Color picker styles
     + '.color-row{display:flex;align-items:flex-start;gap:8px;padding:6px 6px;background:#1a1a1a;border:1px solid #2a2a2a;border-radius:6px;margin-bottom:4px}'
     + '.cp-trigger{flex:1;height:32px;border-radius:4px;cursor:pointer;display:flex;align-items:center;padding:0 10px;font-size:12px;font-weight:bold;border:2px solid #555;user-select:none}'
     + '.cp-grid{display:flex;flex-wrap:wrap;gap:3px;padding:8px;background:#222;border:1px solid #444;border-radius:6px;margin-top:6px;flex:1}'
     + '.cp-sw{width:20px;height:20px;border-radius:3px;cursor:pointer;border:2px solid transparent;flex-shrink:0;transition:transform .1s}'
     + '.cp-sw:hover{transform:scale(1.2);z-index:1}'
     + '.cp-sel{border-color:#fff!important;transform:scale(1.15)}'
-    + '#static-colors{display:none}'
     + '#save{width:100%;padding:14px;background:#4a9;border:none;color:#fff;font-size:16px;font-weight:bold;border-radius:8px;cursor:pointer;margin-top:4px}'
     + '#save:active{background:#3a8}'
     + '.note{color:#555;font-size:11px;margin:6px 0 0}'
     + '<\/style><\/head><body>'
     + '<h2>TallBoy<\/h2>'
-
     + '<div class="section"><h3>Info Display Mode<\/h3>'
     + radioGroup('im',['Always On','Always Off','Shake','Shake - 1 min','Debug'],[2,1,3,4,0],s.infoMode)
     + '<\/div>'
@@ -258,54 +273,41 @@ function buildConfigPage(s) {
     + radioGroup('du',['mi','km'],[0,1],s.distUnit) + '<\/div><\/div>'
     + '<p class="note">Clock format uses your Pebble system setting.<\/p>'
     + '<\/div>'
-    + '<div class="section"><h3>Colors<\/h3>'
-    + '<label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">Color mode (color Pebbles)<\/label>'
-    + radioGroup('cm',['Step Pace Gradient','Static'],[0,1],s.colorMode)
-    + '<div id="static-colors" style="margin-top:12px">'
-    + colorRows
-    + '<\/div><\/div>'
-    + '<div class="section"><h3>Display<\/h3>'
-    + '<label style="color:#aaa;font-size:12px;display:block;margin-bottom:4px">Theme (black & white Pebbles only)<\/label>'
-    + radioGroup('inv',['Black on white','White on black'],[1,0],s.invert)
-    + '<\/div>'
+    + colorSection
+    + invertSection
     + '<button id="save" onclick="doSave()">Save<\/button>'
-    + '<script>'
+    + '<script>';
 
-    // Color mode show/hide
-    + '(function(){'
-    + '  function upd(){var c=document.querySelector("input[name=cm]:checked");'
-    + '    document.getElementById("static-colors").style.display=(c&&+c.value===1)?"block":"none";}'
-    + '  document.querySelectorAll("input[name=cm]").forEach(function(r){r.addEventListener("change",upd);});'
-    + '  upd();'
-    + '})();'
+  if (isColor) {
+    html +=
+      '(function(){'
+      + '  function upd(){var c=document.querySelector("input[name=cm]:checked");'
+      + '    document.getElementById("static-colors").style.display=(c&&+c.value===1)?"block":"none";}'
+      + '  document.querySelectorAll("input[name=cm]").forEach(function(r){r.addEventListener("change",upd);});'
+      + '  upd();'
+      + '})();'
+      + 'function cpToggle(fid){'
+      + '  var g=document.getElementById(fid+"_grid");'
+      + '  var open=g.style.display==="none";'
+      + '  document.querySelectorAll(".cp-grid").forEach(function(el){el.style.display="none";});'
+      + '  if(open) g.style.display="flex";'
+      + '}'
+      + 'function cpPick(fid,idx){'
+      + '  document.getElementById(fid).value=idx;'
+      + '  var r=((idx>>4)&3)*85,g2=((idx>>2)&3)*85,b=(idx&3)*85;'
+      + '  var tr=document.getElementById(fid+"_tr");'
+      + '  tr.style.background="rgb("+r+","+g2+","+b+")";'
+      + '  var lum=((idx>>4)&3)*2+((idx>>2)&3)*4+(idx&3);'
+      + '  tr.style.color=lum>=5?"#000":"#fff";'
+      + '  document.getElementById(fid+"_lbl").textContent=idx;'
+      + '  var sw=document.getElementById(fid+"_grid");'
+      + '  sw.querySelectorAll(".cp-sw").forEach(function(el,i){el.classList.toggle("cp-sel",i===idx);});'
+      + '  document.getElementById(fid+"_grid").style.display="none";'
+      + '}';
+  }
 
-    // Color picker logic
-    // cpToggle: open/close the grid for one picker, close all others
-    + 'function cpToggle(fid){'
-    + '  var g=document.getElementById(fid+"_grid");'
-    + '  var open=g.style.display==="none";'
-    // close all grids first
-    + '  document.querySelectorAll(".cp-grid").forEach(function(el){el.style.display="none";});'
-    + '  if(open) g.style.display="flex";'
-    + '}'
-    // cpPick: select color, update trigger bar, close grid
-    + 'function cpPick(fid,idx){'
-    + '  document.getElementById(fid).value=idx;'
-    // update trigger bar color + label
-    + '  var r=((idx>>4)&3)*85,g2=((idx>>2)&3)*85,b=(idx&3)*85;'
-    + '  var tr=document.getElementById(fid+"_tr");'
-    + '  tr.style.background="rgb("+r+","+g2+","+b+")";'
-    + '  var lum=((idx>>4)&3)*2+((idx>>2)&3)*4+(idx&3);'
-    + '  tr.style.color=lum>=5?"#000":"#fff";'
-    + '  document.getElementById(fid+"_lbl").textContent=idx;'
-    // highlight selected swatch
-    + '  var sw=document.getElementById(fid+"_grid");'
-    + '  sw.querySelectorAll(".cp-sw").forEach(function(el,i){el.classList.toggle("cp-sel",i===idx);});'
-    // close grid
-    + '  document.getElementById(fid+"_grid").style.display="none";'
-    + '}'
-
-    + 'function doSave(){'
+  html +=
+    'function doSave(){'
     + '  var im=document.querySelector("input[name=im]:checked");'
     + '  var il=document.querySelector("input[name=il]:checked");'
     + '  var tu=document.querySelector("input[name=tu]:checked");'
@@ -315,7 +317,7 @@ function buildConfigPage(s) {
     + '  var wide=[],stack=[];'
     + '  for(var i=0;i<6;i++) wide.push(+document.getElementById("w"+i).value);'
     + '  for(var i=0;i<8;i++) stack.push(+document.getElementById("s"+i).value);'
-    + '  function ci(id){return +document.getElementById(id).value;}'
+    + '  function ci(id){var el=document.getElementById(id);return el?+el.value:0;}'
     + '  var s={'
     + '    infoMode:im?+im.value:0,infoLayout:il?+il.value:1,'
     + '    wide:wide,stack:stack,'
@@ -342,7 +344,15 @@ Pebble.addEventListener('ready', function() {
 });
 
 Pebble.addEventListener('showConfiguration', function() {
-  Pebble.openURL('data:text/html,' + encodeURIComponent(buildConfigPage(loadSettings())));
+  var isColor = false;
+  try {
+    var info = Pebble.getActiveWatchInfo();
+    var p = info.platform;
+    // Color platforms: basalt (Pebble Time), chalk (Time Round), emery (Time 2)
+    // B&W platforms: aplite (OG/Steel), diorite (Pebble 2), flint (2 SE), gabbro
+    isColor = (p === 'basalt' || p === 'chalk' || p === 'emery');
+  } catch(e) {}
+  Pebble.openURL('data:text/html,' + encodeURIComponent(buildConfigPage(loadSettings(), isColor)));
 });
 
 Pebble.addEventListener('webviewclosed', function(e) {
