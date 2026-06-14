@@ -695,9 +695,9 @@ static void draw_info_line(GContext *ctx, InfoLine *line, int y,
   GFont font = fonts_get_system_font(INFO_FONT_KEY);
   int iy = y - INFO_TOP_PAD + (INFO_LINE_H - ICON_W) / 2 - ICON_V_ADJUST;
   GColor info_fg = s_fg;
-  // Debug slot uses fixed 16px icon and UNIT gap; all others use ICON_W / ICON_TEXT_GAP
+  // Debug slot uses fixed 16px icon and UNIT-1 gap; all others use ICON_W / ICON_TEXT_GAP
   int icon_w_eff  = line->is_debug_sq ? 16 : ICON_W;
-  int icon_gap_eff = line->is_debug_sq ? UNIT : ICON_TEXT_GAP;
+  int icon_gap_eff = line->is_debug_sq ? UNIT - 1 : ICON_TEXT_GAP;
   // Debug icon: nudge up 3px on emery to better align with text cap-height
 #if defined(PBL_PLATFORM_EMERY)
   int iy_eff = line->is_debug_sq ? iy - 3 : iy;
@@ -947,9 +947,9 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       }
       return true;
     case SLOT_DEBUG:
-      // Wide: longest day+date string; stacked: short bracketed label
+      // Wide: longest day+date string; stacked: bracketed label with spaces
       if (wide) snprintf(buf, len, "Wednesday, September 30");
-      else       snprintf(buf, len, "[Debug]");
+      else       snprintf(buf, len, "[ Debug ]");
       return true;
     default: return false;
   }
