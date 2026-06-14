@@ -1,12 +1,13 @@
 // ============================================================
-// TallBoy — main.c  v3.59f
+// TallBoy — main.c  v3.59g
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.59f: zero far-side margins, centered text fix, debug icon spacing
-//   - Wide mode: col_x=0, col_w=SCREEN_W (full width, no margin)
-//   - Stacked mode: far-side margin reduced to 0 (digit side unchanged)
-//     STACK_R (info left): col_x=0, col_w=tens_x-UNIT
-//     STACK_L (info right): col_w=SCREEN_W-col_x
+// v3.59g: UV index + light remaining slots, debug text, day+date comma
+//   - SLOT_UV (22): stacked "UV 7", wide "UV index 7"
+//   - SLOT_LIGHT_REM (23): stacked "Xh Ymm light/dark", wide "Xh Ymm daylight left/til sunrise"
+//   - SLOT_UV_LIGHT (24): wide only: "UV 7 · Xh Ymm light/dark"
+//   - Wide debug text: "[ Tallboy Debug Text ]"
+//   - Stacked day+date: "Wed, Jan 1" (comma added)
 // ============================================================
 
 #include <pebble.h>
@@ -34,6 +35,9 @@ typedef enum {
   SLOT_EXP_PACE   = 19,
   SLOT_BAT_BT     = 20,
   SLOT_DEBUG      = 21,
+  SLOT_UV         = 22,
+  SLOT_LIGHT_REM  = 23,
+  SLOT_UV_LIGHT   = 24,
 } SlotType;
 
 #define LAYOUT_FULL    0
@@ -229,6 +233,8 @@ static int        s_steps_expected = -1;
 static int        s_sunrise_min = -1, s_sunset_min = -1;
 static int        s_weather_temp_f = -999, s_weather_temp_c = -999;
 static int        s_weather_code = 0;
+static int        s_uv_index = 0;
+static int        s_sunrise_tom_min = -1;
 static int        s_layout = LAYOUT_FULL;
 
 static InfoLine s_above_lines[INFO_LINES_MAX];
@@ -803,7 +809,7 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       if (t) {
         if (wide) snprintf(buf,len,"%s, %s %d",
                            s_day_names[t->tm_wday], s_month_names_long[t->tm_mon], t->tm_mday);
-        else      snprintf(buf,len,"%s %s %d",
+        else      snprintf(buf,len,"%s, %s %d",
                            s_day_short[t->tm_wday], s_month_names[t->tm_mon], t->tm_mday);
         return true;
       }
@@ -946,9 +952,49 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
         else            snprintf(buf,len,"%d%%",s_battery_pct);
       }
       return true;
+    case SLOT_UV:
+      { if (wide) snprintf(buf,len,"UV index %d",s_uv_index);
+        else      snprintf(buf,len,"UV %d",s_uv_index); }
+      return true;
+    case SLOT_LIGHT_REM: {
+      time_t now_ts = time(NULL); struct tm *tn = localtime(&now_ts);
+      int now_min = tn->tm_hour * 60 + tn->tm_min;
+      int rem = -1; bool is_day = false;
+      if (s_sunrise_min >= 0 && s_sunset_min >= 0) {
+        if (now_min < s_sunrise_min)     { rem = s_sunrise_min - now_min; }
+        else if (now_min < s_sunset_min) { rem = s_sunset_min - now_min; is_day = true; }
+        else if (s_sunrise_tom_min >= 0) { rem = (24*60 - now_min) + s_sunrise_tom_min; }
+        else                             { rem = (24*60 - now_min) + s_sunrise_min; }
+      }
+      if (rem < 0) return false;
+      int rh = rem / 60, rm = rem % 60;
+      if (wide) {
+        if (is_day) snprintf(buf,len,"%dh %02dm daylight left",rh,rm);
+        else        snprintf(buf,len,"%dh %02dm til sunrise",rh,rm);
+      } else {
+        if (is_day) snprintf(buf,len,"%dh %02dm light",rh,rm);
+        else        snprintf(buf,len,"%dh %02dm dark",rh,rm);
+      }
+      return true; }
+    case SLOT_UV_LIGHT: {
+      if (!wide) return false;
+      time_t now_ts = time(NULL); struct tm *tn = localtime(&now_ts);
+      int now_min = tn->tm_hour * 60 + tn->tm_min;
+      int rem = -1; bool is_day = false;
+      if (s_sunrise_min >= 0 && s_sunset_min >= 0) {
+        if (now_min < s_sunrise_min)     { rem = s_sunrise_min - now_min; }
+        else if (now_min < s_sunset_min) { rem = s_sunset_min - now_min; is_day = true; }
+        else if (s_sunrise_tom_min >= 0) { rem = (24*60 - now_min) + s_sunrise_tom_min; }
+        else                             { rem = (24*60 - now_min) + s_sunrise_min; }
+      }
+      if (rem < 0) { snprintf(buf,len,"UV index %d",s_uv_index); return true; }
+      int rh = rem / 60, rm2 = rem % 60;
+      if (is_day) snprintf(buf,len,"UV %d"DOT"%dh %02dm light",s_uv_index,rh,rm2);
+      else        snprintf(buf,len,"UV %d"DOT"%dh %02dm dark",s_uv_index,rh,rm2);
+      return true; }
     case SLOT_DEBUG:
-      // Wide: longest day+date string; stacked: bracketed label with spaces
-      if (wide) snprintf(buf, len, "Wednesday, September 30");
+      // Wide: stress-test string; stacked: bracketed label with spaces
+      if (wide) snprintf(buf, len, "[ Tallboy Debug Text ]");
       else       snprintf(buf, len, "[ Debug ]");
       return true;
     default: return false;
@@ -965,6 +1011,8 @@ static IconFn prv_slot_icon(SlotType slot, bool *is_battery, bool *is_weather, b
     case SLOT_BATTERY: case SLOT_BAT_BT: *is_battery=true; *extra=s_battery_pct; return NULL;
     case SLOT_BLUETOOTH: return icon_bt;
     case SLOT_TEMP: case SLOT_WEATHER: *is_weather=true; *extra=s_weather_code; return NULL;
+    case SLOT_UV: case SLOT_UV_LIGHT: *is_weather=true; *extra=s_weather_code; return NULL;
+    case SLOT_LIGHT_REM: return icon_sun;
     case SLOT_DEBUG: *is_debug_sq=true; return NULL;
     default: return NULL;
   }
@@ -1486,6 +1534,10 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
   if(t){time_t ts=(time_t)(uint32_t)t->value->uint32;struct tm*lt=localtime(&ts);if(lt)s_sunrise_min=lt->tm_hour*60+lt->tm_min;}
   t = dict_find(iter, MESSAGE_KEY_SunsetTime);
   if(t){time_t ts=(time_t)(uint32_t)t->value->uint32;struct tm*lt=localtime(&ts);if(lt)s_sunset_min=lt->tm_hour*60+lt->tm_min;}
+  t = dict_find(iter, MESSAGE_KEY_UvIndex);
+  if(t) s_uv_index = (int)t->value->int32;
+  t = dict_find(iter, MESSAGE_KEY_SunriseTomorrow);
+  if(t){time_t ts=(time_t)(uint32_t)t->value->uint32;struct tm*lt=localtime(&ts);if(lt)s_sunrise_tom_min=lt->tm_hour*60+lt->tm_min;}
   t = dict_find(iter, MESSAGE_KEY_CfgInfoMode);
   if(t) s_cfg_info_mode = (InfoMode)(t->value->int32 & 0x7);
   t = dict_find(iter, MESSAGE_KEY_CfgInfoLayout);
