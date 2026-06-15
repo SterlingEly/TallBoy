@@ -1,13 +1,12 @@
 // ============================================================
-// TallBoy — main.c  v3.59h
+// TallBoy — main.c  v3.59i
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.59h: All icons unified to 16x16px, fixed centering, SLOT_WEATHER_UV
-//   - All icons draw into a 16x16 box; centered within that space
-//   - ICON_W=16 on all platforms; ICON_V_ADJUST tuned per-platform
-//   - draw_info_line: uniform ICW=16, ICG=UNIT gap for all icons (incl debug)
-//   - Wide center alignment: proper block centering, left-aligned text
-//   - SLOT_WEATHER_UV (25): wide only: "72F, partly cloudy · UV 5"
+// v3.59i: 12px icons on low-res platforms, WEATHER_UV simplified
+//   - Emery: ICON_W=16 (2×UNIT), others: ICON_W=12 (2×UNIT)
+//   - All icons have large (16px) and small (12px) variants
+//   - ICON_LARGE = (ICON_W==16); draw_info_line uses ICON_W dynamically
+//   - SLOT_WEATHER_UV (25): "72F · UV 5" (temp + UV, conditions icon)
 // ============================================================
 
 #include <pebble.h>
@@ -102,10 +101,11 @@ typedef enum {
   #define INFO_LINE_STEP_WIDE 17
   #define INFO_FONT_KEY    FONT_KEY_GOTHIC_18_BOLD
   #define UNIT                 6
-  #define ICON_W              16
-  #define ICON_V_ADJUST        5
+  #define ICON_W              12
+  #define ICON_V_ADJUST        0
 #endif
 
+#define ICON_LARGE       (ICON_W == 16)
 #define ICON_TEXT_GAP    HALF_UNIT
 #define MARGIN_CANVAS   UNIT
 #define MARGIN_DIGIT    UNIT
@@ -417,117 +417,203 @@ static void prv_update_health(void) {
 #endif
 
 // ============================================================
-// ICONS — all draw into a 16x16 box at (ox,oy)
+// ICONS
+// Icons draw into a box at (ox,oy):
+//   large=true  → 16x16 box (emery, ICON_W=16)
+//   large=false → 12x12 box (others, ICON_W=12)
 // ============================================================
-static void icon_footprint(GContext *ctx, int fx, int fy, GColor col) {
-  // 5x11 footprint shape
+static void icon_footprint(GContext *ctx, int fx, int fy, GColor col, bool large) {
   graphics_context_set_fill_color(ctx, col);
-  graphics_fill_rect(ctx, GRect(fx,   fy,   5, 7), 2, GCornersAll);
-  graphics_fill_rect(ctx, GRect(fx+1, fy+6, 3, 4), 1, GCornersAll);
+  if (large) {
+    // 5x11 centered in 16x16
+    graphics_fill_rect(ctx, GRect(fx,   fy,   5, 7), 2, GCornersAll);
+    graphics_fill_rect(ctx, GRect(fx+1, fy+6, 3, 4), 1, GCornersAll);
+  } else {
+    // 4x8 centered in 12x12
+    graphics_fill_rect(ctx, GRect(fx,   fy,   4, 5), 2, GCornersAll);
+    graphics_fill_rect(ctx, GRect(fx+1, fy+4, 2, 4), 1, GCornersAll);
+  }
 }
 static void icon_steps(GContext *ctx, int ox, int oy, GColor col, bool large) {
-  // Two footprints (~12x14) centered in 16x16: offset (2,1)
-  icon_footprint(ctx, ox+2+7, oy+1, col);    // right footprint
-  icon_footprint(ctx, ox+2,   oy+4, col);    // left footprint lower
+  if (large) {
+    icon_footprint(ctx, ox+9, oy+1, col, true);   // right footprint
+    icon_footprint(ctx, ox+2, oy+4, col, true);   // left footprint
+  } else {
+    icon_footprint(ctx, ox+7, oy+1, col, false);
+    icon_footprint(ctx, ox+1, oy+3, col, false);
+  }
 }
 static void icon_battery(GContext *ctx, int ox, int oy, GColor col, int pct, bool large) {
-  // 16x16: body 14x10 at (1,3), nub at right
   graphics_context_set_fill_color(ctx, col);
   if (s_charging) {
-    // Lightning bolt centered in 16x16
-    graphics_fill_rect(ctx, GRect(ox+7,oy+0,5,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+6,oy+1,5,1),0,GCornerNone);
-    graphics_fill_rect(ctx, GRect(ox+5,oy+2,5,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+4,oy+3,5,1),0,GCornerNone);
-    graphics_fill_rect(ctx, GRect(ox+3,oy+4,5,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+1,oy+5,11,2),0,GCornerNone);
-    graphics_fill_rect(ctx, GRect(ox+5,oy+7,5,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+4,oy+8,5,1),0,GCornerNone);
-    graphics_fill_rect(ctx, GRect(ox+3,oy+9,5,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+2,oy+10,5,1),0,GCornerNone);
-    graphics_fill_rect(ctx, GRect(ox+1,oy+11,5,1),0,GCornerNone);
+    if (large) {
+      // Lightning bolt in 16x16
+      graphics_fill_rect(ctx, GRect(ox+7,oy+0,5,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+6,oy+1,5,1),0,GCornerNone);
+      graphics_fill_rect(ctx, GRect(ox+5,oy+2,5,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+4,oy+3,5,1),0,GCornerNone);
+      graphics_fill_rect(ctx, GRect(ox+3,oy+4,5,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+1,oy+5,11,2),0,GCornerNone);
+      graphics_fill_rect(ctx, GRect(ox+5,oy+7,5,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+4,oy+8,5,1),0,GCornerNone);
+      graphics_fill_rect(ctx, GRect(ox+3,oy+9,5,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+2,oy+10,5,1),0,GCornerNone);
+      graphics_fill_rect(ctx, GRect(ox+1,oy+11,5,1),0,GCornerNone);
+    } else {
+      // Lightning bolt in 12x12
+      graphics_fill_rect(ctx, GRect(ox+5,oy+0,4,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+4,oy+1,4,1),0,GCornerNone);
+      graphics_fill_rect(ctx, GRect(ox+3,oy+2,4,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+1,oy+3,8,2),0,GCornerNone);
+      graphics_fill_rect(ctx, GRect(ox+3,oy+5,4,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+2,oy+6,4,1),0,GCornerNone);
+      graphics_fill_rect(ctx, GRect(ox+1,oy+7,4,1),0,GCornerNone);
+    }
   } else {
     graphics_context_set_stroke_color(ctx, col); graphics_context_set_stroke_width(ctx, 1);
-    graphics_draw_rect(ctx, GRect(ox+1,oy+3,12,10));
-    graphics_fill_rect(ctx, GRect(ox+13,oy+6,2,4),0,GCornerNone);
-    int fw = (10*pct)/100; if (fw<1&&pct>0) fw=1;
-    if (fw>0) graphics_fill_rect(ctx, GRect(ox+2,oy+4,fw,8),0,GCornerNone);
+    if (large) {
+      // Body 12x10 at (1,3) in 16x16
+      graphics_draw_rect(ctx, GRect(ox+1,oy+3,12,10));
+      graphics_fill_rect(ctx, GRect(ox+13,oy+6,2,4),0,GCornerNone);
+      int fw = (10*pct)/100; if (fw<1&&pct>0) fw=1;
+      if (fw>0) graphics_fill_rect(ctx, GRect(ox+2,oy+4,fw,8),0,GCornerNone);
+    } else {
+      // Body 9x7 at (1,2) in 12x12
+      graphics_draw_rect(ctx, GRect(ox+1,oy+2,9,7));
+      graphics_fill_rect(ctx, GRect(ox+10,oy+4,2,3),0,GCornerNone);
+      int fw = (7*pct)/100; if (fw<1&&pct>0) fw=1;
+      if (fw>0) graphics_fill_rect(ctx, GRect(ox+2,oy+3,fw,5),0,GCornerNone);
+    }
   }
 }
 static void icon_bt(GContext *ctx, int ox, int oy, GColor col, bool large) {
-  // BT symbol: spine at ox+5, ~12x15, offset (2,1) in 16x16
   graphics_context_set_stroke_color(ctx, col); graphics_context_set_stroke_width(ctx, 1);
-  graphics_draw_line(ctx, GPoint(ox+5,oy+1),  GPoint(ox+5,oy+14));
-  graphics_draw_pixel(ctx, GPoint(ox+4,oy+5)); graphics_draw_pixel(ctx, GPoint(ox+3,oy+4)); graphics_draw_pixel(ctx, GPoint(ox+2,oy+3));
-  graphics_draw_pixel(ctx, GPoint(ox+4,oy+10)); graphics_draw_pixel(ctx, GPoint(ox+3,oy+11)); graphics_draw_pixel(ctx, GPoint(ox+2,oy+12));
-  graphics_draw_pixel(ctx, GPoint(ox+6,oy+2)); graphics_draw_pixel(ctx, GPoint(ox+7,oy+3)); graphics_draw_pixel(ctx, GPoint(ox+8,oy+4));
-  graphics_draw_pixel(ctx, GPoint(ox+9,oy+5)); graphics_draw_pixel(ctx, GPoint(ox+8,oy+6)); graphics_draw_pixel(ctx, GPoint(ox+7,oy+7)); graphics_draw_pixel(ctx, GPoint(ox+6,oy+8));
-  graphics_draw_pixel(ctx, GPoint(ox+6,oy+9)); graphics_draw_pixel(ctx, GPoint(ox+7,oy+10)); graphics_draw_pixel(ctx, GPoint(ox+8,oy+11));
-  graphics_draw_pixel(ctx, GPoint(ox+9,oy+12)); graphics_draw_pixel(ctx, GPoint(ox+8,oy+13)); graphics_draw_pixel(ctx, GPoint(ox+7,oy+14));
+  if (large) {
+    // BT in 16x16: spine at ox+5
+    graphics_draw_line(ctx, GPoint(ox+5,oy+1),  GPoint(ox+5,oy+14));
+    graphics_draw_pixel(ctx, GPoint(ox+4,oy+5)); graphics_draw_pixel(ctx, GPoint(ox+3,oy+4)); graphics_draw_pixel(ctx, GPoint(ox+2,oy+3));
+    graphics_draw_pixel(ctx, GPoint(ox+4,oy+10)); graphics_draw_pixel(ctx, GPoint(ox+3,oy+11)); graphics_draw_pixel(ctx, GPoint(ox+2,oy+12));
+    graphics_draw_pixel(ctx, GPoint(ox+6,oy+2)); graphics_draw_pixel(ctx, GPoint(ox+7,oy+3)); graphics_draw_pixel(ctx, GPoint(ox+8,oy+4));
+    graphics_draw_pixel(ctx, GPoint(ox+9,oy+5)); graphics_draw_pixel(ctx, GPoint(ox+8,oy+6)); graphics_draw_pixel(ctx, GPoint(ox+7,oy+7)); graphics_draw_pixel(ctx, GPoint(ox+6,oy+8));
+    graphics_draw_pixel(ctx, GPoint(ox+6,oy+9)); graphics_draw_pixel(ctx, GPoint(ox+7,oy+10)); graphics_draw_pixel(ctx, GPoint(ox+8,oy+11));
+    graphics_draw_pixel(ctx, GPoint(ox+9,oy+12)); graphics_draw_pixel(ctx, GPoint(ox+8,oy+13)); graphics_draw_pixel(ctx, GPoint(ox+7,oy+14));
+  } else {
+    // BT in 12x12: spine at ox+3
+    graphics_draw_line(ctx, GPoint(ox+3,oy+0),  GPoint(ox+3,oy+10));
+    graphics_draw_pixel(ctx, GPoint(ox+2,oy+3)); graphics_draw_pixel(ctx, GPoint(ox+1,oy+2));
+    graphics_draw_pixel(ctx, GPoint(ox+2,oy+7)); graphics_draw_pixel(ctx, GPoint(ox+1,oy+8));
+    graphics_draw_pixel(ctx, GPoint(ox+4,oy+1)); graphics_draw_pixel(ctx, GPoint(ox+5,oy+2)); graphics_draw_pixel(ctx, GPoint(ox+6,oy+3));
+    graphics_draw_pixel(ctx, GPoint(ox+7,oy+4)); graphics_draw_pixel(ctx, GPoint(ox+6,oy+5)); graphics_draw_pixel(ctx, GPoint(ox+5,oy+6)); graphics_draw_pixel(ctx, GPoint(ox+4,oy+7));
+    graphics_draw_pixel(ctx, GPoint(ox+5,oy+8)); graphics_draw_pixel(ctx, GPoint(ox+6,oy+9));
+    graphics_draw_pixel(ctx, GPoint(ox+7,oy+10)); graphics_draw_pixel(ctx, GPoint(ox+6,oy+11));
+  }
 }
 static void icon_heart(GContext *ctx, int ox, int oy, GColor col, bool large) {
-  // 14x11 heart centered in 16x16: offset (1,3)
   graphics_context_set_fill_color(ctx, col);
-  int y = oy + 3;
-  graphics_fill_rect(ctx,GRect(ox+1,y+0,4,2),1,GCornersTop); graphics_fill_rect(ctx,GRect(ox+9,y+0,4,2),1,GCornersTop);
-  graphics_fill_rect(ctx,GRect(ox+0,y+1,5,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+9,y+1,4,1),0,GCornerNone);
-  graphics_fill_rect(ctx,GRect(ox+0,y+2,6,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+8,y+2,5,1),0,GCornerNone);
-  graphics_fill_rect(ctx,GRect(ox+0,y+3,13,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+1,y+4,11,1),0,GCornerNone);
-  graphics_fill_rect(ctx,GRect(ox+2,y+5,9,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+3,y+6,7,1),0,GCornerNone);
-  graphics_fill_rect(ctx,GRect(ox+4,y+7,5,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+5,y+8,3,1),0,GCornerNone);
-  graphics_fill_rect(ctx,GRect(ox+6,y+9,1,1),0,GCornerNone);
+  if (large) {
+    // 14x11 heart centered in 16x16: offset (1,3)
+    int y = oy + 3;
+    graphics_fill_rect(ctx,GRect(ox+1,y+0,4,2),1,GCornersTop); graphics_fill_rect(ctx,GRect(ox+9,y+0,4,2),1,GCornersTop);
+    graphics_fill_rect(ctx,GRect(ox+0,y+1,5,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+9,y+1,4,1),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+0,y+2,6,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+8,y+2,5,1),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+0,y+3,13,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+1,y+4,11,1),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+2,y+5,9,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+3,y+6,7,1),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+4,y+7,5,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+5,y+8,3,1),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+6,y+9,1,1),0,GCornerNone);
+  } else {
+    // 10x8 heart centered in 12x12: offset (1,2)
+    int y = oy + 2;
+    graphics_fill_rect(ctx,GRect(ox+1,y+0,3,2),1,GCornersTop); graphics_fill_rect(ctx,GRect(ox+7,y+0,3,2),1,GCornersTop);
+    graphics_fill_rect(ctx,GRect(ox+0,y+1,4,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+7,y+1,3,1),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+0,y+2,10,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+1,y+3,8,1),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+2,y+4,6,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+3,y+5,4,1),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+4,y+6,2,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+5,y+7,1,1),0,GCornerNone);
+  }
 }
 static void icon_calories(GContext *ctx, int ox, int oy, GColor col, bool large) {
-  // Flame ~10x15 centered in 16x16: offset (3,1)
   graphics_context_set_fill_color(ctx, col);
-  graphics_fill_rect(ctx,GRect(ox+3,oy+10,10,5),2,GCornersBottom);
-  graphics_fill_rect(ctx,GRect(ox+4,oy+6,8,5),0,GCornerNone);
-  graphics_fill_rect(ctx,GRect(ox+5,oy+3,4,4),0,GCornerNone);
-  graphics_fill_rect(ctx,GRect(ox+6,oy+1,2,3),0,GCornerNone);
+  if (large) {
+    // Flame ~10x15 in 16x16: offset (3,1)
+    graphics_fill_rect(ctx,GRect(ox+3,oy+10,10,5),2,GCornersBottom);
+    graphics_fill_rect(ctx,GRect(ox+4,oy+6,8,5),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+5,oy+3,4,4),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+6,oy+1,2,3),0,GCornerNone);
+  } else {
+    // Flame ~8x11 in 12x12: offset (2,1)
+    graphics_fill_rect(ctx,GRect(ox+2,oy+7,8,4),2,GCornersBottom);
+    graphics_fill_rect(ctx,GRect(ox+3,oy+4,6,4),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+4,oy+2,3,3),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+5,oy+1,1,2),0,GCornerNone);
+  }
 }
 static void icon_sun(GContext *ctx, int ox, int oy, GColor col, bool large) {
-  // Sun with rays filling 16x16: center at (8,8), rays to edges
   graphics_context_set_stroke_color(ctx, col); graphics_context_set_stroke_width(ctx, 1);
-  int icx = ox+8, icy = oy+8;
-  graphics_draw_circle(ctx, GPoint(icx,icy), 3);
-  graphics_draw_pixel(ctx,GPoint(icx,oy));    graphics_draw_pixel(ctx,GPoint(icx,oy+1));
-  graphics_draw_pixel(ctx,GPoint(icx,oy+15)); graphics_draw_pixel(ctx,GPoint(icx,oy+14));
-  graphics_draw_pixel(ctx,GPoint(ox,icy));    graphics_draw_pixel(ctx,GPoint(ox+1,icy));
-  graphics_draw_pixel(ctx,GPoint(ox+15,icy)); graphics_draw_pixel(ctx,GPoint(ox+14,icy));
+  int sz = large ? 16 : 12;
+  int icx = ox + sz/2, icy = oy + sz/2;
+  graphics_draw_circle(ctx, GPoint(icx,icy), large ? 3 : 2);
+  graphics_draw_pixel(ctx,GPoint(icx,oy));      graphics_draw_pixel(ctx,GPoint(icx,oy+1));
+  graphics_draw_pixel(ctx,GPoint(icx,oy+sz-1)); graphics_draw_pixel(ctx,GPoint(icx,oy+sz-2));
+  graphics_draw_pixel(ctx,GPoint(ox,icy));       graphics_draw_pixel(ctx,GPoint(ox+1,icy));
+  graphics_draw_pixel(ctx,GPoint(ox+sz-1,icy));  graphics_draw_pixel(ctx,GPoint(ox+sz-2,icy));
 }
 static void icon_cloud(GContext *ctx, int ox, int oy, GColor col, bool large) {
-  // Cloud body 14x7 at (1,7) with bumps above, filling 16x16
   graphics_context_set_fill_color(ctx, col);
-  graphics_fill_rect(ctx,GRect(ox+3,oy+4,5,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+4,oy+2,4,3),0,GCornerNone);
-  graphics_fill_rect(ctx,GRect(ox+8,oy+3,5,2),0,GCornerNone);
-  graphics_fill_rect(ctx,GRect(ox+1,oy+5,14,7),0,GCornerNone);
+  if (large) {
+    // Cloud in 16x16: body 14x7 at (1,5), bumps above
+    graphics_fill_rect(ctx,GRect(ox+3,oy+4,5,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+4,oy+2,4,3),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+8,oy+3,5,2),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+1,oy+5,14,7),0,GCornerNone);
+  } else {
+    // Cloud in 12x12: body 10x5 at (1,4), bumps above
+    graphics_fill_rect(ctx,GRect(ox+2,oy+3,4,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+3,oy+2,3,2),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+6,oy+2,4,2),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+1,oy+4,10,5),0,GCornerNone);
+  }
 }
 static void icon_partly_cloudy(GContext *ctx, int ox, int oy, GColor col, bool large) {
-  // Sun top-right, cloud bottom-left, both in 16x16
   graphics_context_set_stroke_color(ctx, col); graphics_context_set_stroke_width(ctx, 1);
-  graphics_draw_circle(ctx, GPoint(ox+11,oy+4), 3);
-  graphics_draw_pixel(ctx,GPoint(ox+11,oy+0)); graphics_draw_pixel(ctx,GPoint(ox+15,oy+4)); graphics_draw_pixel(ctx,GPoint(ox+11,oy+8));
-  graphics_context_set_fill_color(ctx, col);
-  graphics_fill_rect(ctx,GRect(ox+2,oy+6,4,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+6,oy+6,3,1),0,GCornerNone);
-  graphics_fill_rect(ctx,GRect(ox+1,oy+7,10,6),0,GCornerNone);
+  if (large) {
+    // Sun top-right at (11,4), cloud bottom-left in 16x16
+    graphics_draw_circle(ctx, GPoint(ox+11,oy+4), 3);
+    graphics_draw_pixel(ctx,GPoint(ox+11,oy+0)); graphics_draw_pixel(ctx,GPoint(ox+15,oy+4)); graphics_draw_pixel(ctx,GPoint(ox+11,oy+8));
+    graphics_context_set_fill_color(ctx, col);
+    graphics_fill_rect(ctx,GRect(ox+2,oy+6,4,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+6,oy+6,3,1),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+1,oy+7,10,6),0,GCornerNone);
+  } else {
+    // Sun top-right at (8,3), cloud bottom-left in 12x12
+    graphics_draw_circle(ctx, GPoint(ox+8,oy+3), 2);
+    graphics_draw_pixel(ctx,GPoint(ox+8,oy+0)); graphics_draw_pixel(ctx,GPoint(ox+11,oy+3)); graphics_draw_pixel(ctx,GPoint(ox+8,oy+6));
+    graphics_context_set_fill_color(ctx, col);
+    graphics_fill_rect(ctx,GRect(ox+1,oy+5,3,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+4,oy+5,2,1),0,GCornerNone);
+    graphics_fill_rect(ctx,GRect(ox+0,oy+6,7,4),0,GCornerNone);
+  }
 }
 static void icon_rain(GContext *ctx, int ox, int oy, GColor col, bool large) {
   icon_cloud(ctx,ox,oy,col,large);
   graphics_context_set_stroke_color(ctx,col); graphics_context_set_stroke_width(ctx,1);
-  graphics_draw_pixel(ctx,GPoint(ox+3,oy+13)); graphics_draw_pixel(ctx,GPoint(ox+3,oy+15));
-  graphics_draw_pixel(ctx,GPoint(ox+8,oy+13)); graphics_draw_pixel(ctx,GPoint(ox+8,oy+15));
-  graphics_draw_pixel(ctx,GPoint(ox+13,oy+13)); graphics_draw_pixel(ctx,GPoint(ox+13,oy+15));
+  if (large) {
+    graphics_draw_pixel(ctx,GPoint(ox+3,oy+13)); graphics_draw_pixel(ctx,GPoint(ox+3,oy+15));
+    graphics_draw_pixel(ctx,GPoint(ox+8,oy+13)); graphics_draw_pixel(ctx,GPoint(ox+8,oy+15));
+    graphics_draw_pixel(ctx,GPoint(ox+13,oy+13)); graphics_draw_pixel(ctx,GPoint(ox+13,oy+15));
+  } else {
+    graphics_draw_pixel(ctx,GPoint(ox+2,oy+10)); graphics_draw_pixel(ctx,GPoint(ox+2,oy+12));
+    graphics_draw_pixel(ctx,GPoint(ox+6,oy+10)); graphics_draw_pixel(ctx,GPoint(ox+6,oy+12));
+    graphics_draw_pixel(ctx,GPoint(ox+10,oy+10)); graphics_draw_pixel(ctx,GPoint(ox+10,oy+12));
+  }
 }
 static void icon_snow(GContext *ctx, int ox, int oy, GColor col, bool large) {
-  // Snowflake: crosshairs + diagonals in 16x16
   graphics_context_set_stroke_color(ctx,col); graphics_context_set_stroke_width(ctx,1);
-  graphics_draw_line(ctx,GPoint(ox+1,oy+8),GPoint(ox+14,oy+8));
-  graphics_draw_line(ctx,GPoint(ox+8,oy+1),GPoint(ox+8,oy+14));
-  graphics_draw_line(ctx,GPoint(ox+2,oy+2),GPoint(ox+13,oy+13));
-  graphics_draw_line(ctx,GPoint(ox+13,oy+2),GPoint(ox+2,oy+13));
+  int sz = large ? 16 : 12, c = sz/2;
+  graphics_draw_line(ctx,GPoint(ox+1,oy+c),GPoint(ox+sz-2,oy+c));
+  graphics_draw_line(ctx,GPoint(ox+c,oy+1),GPoint(ox+c,oy+sz-2));
+  graphics_draw_line(ctx,GPoint(ox+2,oy+2),GPoint(ox+sz-3,oy+sz-3));
+  graphics_draw_line(ctx,GPoint(ox+sz-3,oy+2),GPoint(ox+2,oy+sz-3));
 }
 static void icon_storm(GContext *ctx, int ox, int oy, GColor col, bool large) {
   icon_cloud(ctx,ox,oy,col,large);
   graphics_context_set_stroke_color(ctx,col); graphics_context_set_stroke_width(ctx,1);
-  graphics_draw_pixel(ctx,GPoint(ox+8,oy+12)); graphics_draw_pixel(ctx,GPoint(ox+8,oy+13));
-  graphics_draw_pixel(ctx,GPoint(ox+7,oy+13)); graphics_draw_pixel(ctx,GPoint(ox+7,oy+14));
-  graphics_draw_pixel(ctx,GPoint(ox+9,oy+14)); graphics_draw_pixel(ctx,GPoint(ox+9,oy+15));
-  graphics_draw_pixel(ctx,GPoint(ox+8,oy+15));
+  if (large) {
+    graphics_draw_pixel(ctx,GPoint(ox+8,oy+12)); graphics_draw_pixel(ctx,GPoint(ox+8,oy+13));
+    graphics_draw_pixel(ctx,GPoint(ox+7,oy+13)); graphics_draw_pixel(ctx,GPoint(ox+7,oy+14));
+    graphics_draw_pixel(ctx,GPoint(ox+9,oy+14)); graphics_draw_pixel(ctx,GPoint(ox+9,oy+15));
+    graphics_draw_pixel(ctx,GPoint(ox+8,oy+15));
+  } else {
+    graphics_draw_pixel(ctx,GPoint(ox+6,oy+9));  graphics_draw_pixel(ctx,GPoint(ox+6,oy+10));
+    graphics_draw_pixel(ctx,GPoint(ox+5,oy+10)); graphics_draw_pixel(ctx,GPoint(ox+5,oy+11));
+    graphics_draw_pixel(ctx,GPoint(ox+7,oy+11));
+  }
 }
 static void icon_weather(GContext *ctx, int ox, int oy, GColor col, int code, bool large) {
   if      (code == 0)                                  icon_sun(ctx,ox,oy,col,large);
@@ -630,11 +716,11 @@ static void draw_stacked_pass(GContext *ctx, int h_tens, int h_ones, int m_tens,
 static void draw_info_line(GContext *ctx, InfoLine *line, int y,
                             int col_x, int col_w, GTextAlignment align) {
   GFont font = fonts_get_system_font(INFO_FONT_KEY);
-  // All icons are 16x16. iy places the icon top so it aligns with the debug square.
+  // iy places icon top: vertically centered in INFO_LINE_H, adjusted per-platform
   int iy = y - INFO_TOP_PAD + (INFO_LINE_H - ICON_W) / 2 - ICON_V_ADJUST;
   GColor info_fg = s_fg;
-  // Uniform 16px icon width and UNIT gap for all slot types (including debug square)
-  const int ICW = 16;
+  // Icon width from ICON_W (16px on emery, 12px on others); uniform UNIT gap
+  const int ICW = ICON_W;
   const int ICG = UNIT;
   if (line->has_icon || line->is_debug_sq) {
     GSize sz = graphics_text_layout_get_content_size(
@@ -650,17 +736,15 @@ static void draw_info_line(GContext *ctx, InfoLine *line, int y,
     }
     int icon_sx, text_sx, text_w;
     if (align == GTextAlignmentRight) {
-      // Icon at far right, text to its left
       icon_sx = col_x + col_w - ICW;
       text_sx = col_x;
       text_w  = col_w - ICW - ICG;
     } else if (align == GTextAlignmentLeft) {
-      // Icon at far left, text to its right
       icon_sx = col_x;
       text_sx = col_x + ICW + ICG;
       text_w  = col_w - ICW - ICG;
     } else {
-      // Center: place icon+text block as a unit centered in col_w; text left-aligned after icon
+      // Center: block centered in col_w, text left-aligned after icon
       int off = (col_w - block_w) / 2;
       if (off < 0) off = 0;
       icon_sx = col_x + off;
@@ -670,14 +754,13 @@ static void draw_info_line(GContext *ctx, InfoLine *line, int y,
     if (text_w < 0) text_w = 0;
     graphics_context_set_fill_color(ctx, info_fg);
     if (line->is_debug_sq) {
-      // 16px solid square — registration point for icon alignment testing
       graphics_fill_rect(ctx, GRect(icon_sx, iy, ICW, ICW), 0, GCornerNone);
     } else if (line->is_battery) {
-      icon_battery(ctx, icon_sx, iy, info_fg, line->icon_extra, true);
+      icon_battery(ctx, icon_sx, iy, info_fg, line->icon_extra, ICON_LARGE);
     } else if (line->is_weather) {
-      icon_weather(ctx, icon_sx, iy, info_fg, line->icon_extra, true);
+      icon_weather(ctx, icon_sx, iy, info_fg, line->icon_extra, ICON_LARGE);
     } else {
-      line->icon_fn(ctx, icon_sx, iy, info_fg, true);
+      line->icon_fn(ctx, icon_sx, iy, info_fg, ICON_LARGE);
     }
     graphics_context_set_text_color(ctx, info_fg);
     if (text_w > 0) {
@@ -914,17 +997,14 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       else        snprintf(buf,len,"UV %d"DOT"%dh %02dm dark",s_uv_index,rh,rm2);
       return true; }
     case SLOT_WEATHER_UV: {
+      // Wide only: temp · UV index (conditions icon shows weather code)
       if (!wide) return false;
       if (s_weather_temp_f <= -900) return false;
-      const char *desc = (s_weather_code==0)?"clear":(s_weather_code<=3)?"partly cloudy":
-        (s_weather_code<=48)?"foggy":(s_weather_code<=69)?"rainy":
-        (s_weather_code<=79)?"snowy":(s_weather_code<=99)?"stormy":"--";
       int t2 = s_cfg_temp_f ? s_weather_temp_f : s_weather_temp_c;
       char u = s_cfg_temp_f ? 'F' : 'C';
-      snprintf(buf,len,"%d%c, %s"DOT"UV %d",t2,u,desc,s_uv_index);
+      snprintf(buf,len,"%d%c"DOT"UV %d",t2,u,s_uv_index);
       return true; }
     case SLOT_DEBUG:
-      // Wide: stress-test long string; stacked: bracketed label with spaces
       if (wide) snprintf(buf, len, "[ Tallboy Debug Text ]");
       else       snprintf(buf, len, "[ Debug ]");
       return true;
