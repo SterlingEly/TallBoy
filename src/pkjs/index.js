@@ -43,7 +43,7 @@ var SLOT_NAMES_WIDE = [
   { v: 22, n: 'UV Index' },
   { v: 23, n: 'Light Remaining' },
   { v: 24, n: 'UV & Light Remaining' },
-  { v: 25, n: 'Weather & UV Index' }
+  { v: 25, n: 'Temp & UV Index' }
 ];
 
 function pblColorToCss(idx) {
