@@ -42,7 +42,8 @@ var SLOT_NAMES_WIDE = [
   { v: 21, n: '[ Debug ]' },
   { v: 22, n: 'UV Index' },
   { v: 23, n: 'Light Remaining' },
-  { v: 24, n: 'UV & Light Remaining' }
+  { v: 24, n: 'UV & Light Remaining' },
+  { v: 25, n: 'Weather & UV Index' }
 ];
 
 function pblColorToCss(idx) {
@@ -169,14 +170,10 @@ function radioGroup(name, labels, values, currentVal) {
   return out + '<\/div>';
 }
 
-// Collapsed color picker: shows a single clickable color bar.
-// Clicking opens a popover grid; clicking a swatch selects and closes.
 function colorPicker(fieldId, currentIdx) {
   var bg = pblColorToCss(currentIdx);
   var lum = pblLuminance(currentIdx);
   var fg = lum >= 5 ? '#000' : '#fff';
-
-  // Swatch grid (hidden by default)
   var grid = '<div class="cp-grid" id="' + fieldId + '_grid" style="display:none">';
   for (var idx = 0; idx < 64; idx++) {
     var css = pblColorToCss(idx);
@@ -186,7 +183,6 @@ function colorPicker(fieldId, currentIdx) {
           + '<\/div>';
   }
   grid += '<\/div>';
-
   return '<input type="hidden" id="' + fieldId + '" value="' + currentIdx + '">'
     + '<div class="cp-trigger" id="' + fieldId + '_tr"'
     + ' style="background:' + bg + ';color:' + fg + '"'
@@ -217,8 +213,6 @@ function buildConfigPage(s, isColor) {
       + '<\/div>';
   }
 
-  // Color section only shown on color Pebbles (basalt/chalk/emery)
-  // Invert section only shown on b&w Pebbles (aplite/diorite/flint/gabbro)
   var colorSection = isColor
     ? '<div class="section"><h3>Colors<\/h3>'
       + '<label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">Color mode<\/label>'
