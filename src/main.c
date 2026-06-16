@@ -1,9 +1,12 @@
 // ============================================================
-// TallBoy — main.c  v3.59k
+// TallBoy — main.c  v3.59l
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
 // v3.59j: data caching philosophy — hide > mislead; UV sentinel -1; 3h weather timeout
 // v3.59k: remove PBL_TOUCH code — non-functional on emery firmware (see README)
+// v3.59l: icon-text gap HALF_UNIT; sun icon thick+diagonals; steps fill bounds;
+//         temp unit spacing; stacked light short format; typical steps via SDK;
+//         SLOT_TYPICAL_DAY (26): full-day step goal
 // ============================================================
 
 #include <pebble.h>
@@ -35,6 +38,7 @@ typedef enum {
   SLOT_LIGHT_REM  = 23,
   SLOT_UV_LIGHT   = 24,
   SLOT_WEATHER_UV = 25,
+  SLOT_TYPICAL_DAY = 26,   // typical full-day step goal (midnight-to-midnight average)
 } SlotType;
 
 #define LAYOUT_FULL    0
@@ -150,10 +154,9 @@ static const int EASE[10] = { 4, 6, 8, 10, 12, 12, 10, 8, 6, 4 };
 #define COUNTDOWN_HOLD_MS 120
 #define BLINK_REPS        2
 #define BLINK_STEP        6
-#define STEPS_AVG_MAX_MIN 120
 #define DOT               " \xc2\xb7 "
 #define SHAKE1_TIMEOUT_MS 60000
-#define WEATHER_MAX_AGE   (3 * 3600)
+#define WEATHER_MAX_AGE   (3 * 3600)   // hide weather/UV after 3h without update
 
 #define COLON_OFFSCREEN  (SCREEN_H)
 
@@ -221,14 +224,15 @@ static bool       s_charging = false, s_bt_connected = true;
 #if defined(PBL_HEALTH)
 static int        s_steps = 0, s_distance_m = 0, s_calories = 0, s_heart_rate = 0;
 static bool       s_heart_rate_valid = false;
-static int        s_steps_expected = -1;
+static int        s_steps_expected = -1;   // typical steps at current time of day
+static int        s_steps_typical_day = -1; // typical full-day step total
 #endif
 static int        s_sunrise_min = -1, s_sunset_min = -1;
 static int        s_weather_temp_f = -999, s_weather_temp_c = -999;
 static int        s_weather_code = 0;
-static int        s_uv_index = -1;
+static int        s_uv_index = -1;          // -1 = never received; 0+ = valid (0 is real UV 0)
 static int        s_sunrise_tom_min = -1;
-static time_t     s_weather_ts = 0;
+static time_t     s_weather_ts = 0;         // unix time of last weather receipt; 0 = never
 static int        s_layout = LAYOUT_FULL;
 
 static InfoLine s_above_lines[INFO_LINES_MAX];
@@ -349,6 +353,7 @@ static int prv_info_layout_for_shake(void) {
 }
 
 #if defined(PBL_COLOR)
+// Background color reflects step pace vs. typical (7-day average via SDK)
 static GColor prv_pace_color(int steps_today, int steps_expected) {
   if (steps_expected <= 0 || steps_today <= 0) return GColorBlack;
   int pct = (steps_today * 100) / steps_expected;
@@ -368,77 +373,96 @@ static bool prv_bg_needs_dark_fg(GColor bg) {
 #endif
 
 #if defined(PBL_HEALTH)
-static HealthMinuteData s_minute_buf[STEPS_AVG_MAX_MIN];
-static int prv_calc_steps_expected(void) {
-  time_t now = time(NULL); struct tm *t = localtime(&now);
-  int elapsed_min = t->tm_hour * 60 + t->tm_min;
-  if (elapsed_min < 2) return -1;
-  int window = elapsed_min < STEPS_AVG_MAX_MIN ? elapsed_min : STEPS_AVG_MAX_MIN;
-  int total = 0, day_count = 0;
-  for (int day = 1; day <= 7; day++) {
-    time_t day_start = time_start_of_today() - (time_t)day * SECONDS_PER_DAY;
-    uint32_t n = health_service_get_minute_history(s_minute_buf, (uint32_t)window, &day_start, NULL);
-    if (n == 0) continue;
-    int day_steps = 0;
-    for (uint32_t i = 0; i < n; i++)
-      if (!s_minute_buf[i].is_invalid) day_steps += s_minute_buf[i].steps;
-    if (day_steps > 0) {
-      if (elapsed_min > window) day_steps = (day_steps * elapsed_min) / window;
-      total += day_steps; day_count++;
-    }
-  }
-  return day_count > 0 ? total / day_count : -1;
-}
+// Use health_service_sum_averaged (HealthServiceTimeScopeDaily) for typical steps.
+// This is the correct SDK approach — it averages across all past days automatically,
+// excluding days with no data. Much simpler and more accurate than our previous
+// manual minute-by-minute loop across 7 days.
 static void prv_update_health(void) {
   HealthServiceAccessibilityMask mask;
-  time_t start = time_start_of_today(), now = time(NULL);
-  mask = health_service_metric_accessible(HealthMetricStepCount, start, now);
+  time_t today_start = time_start_of_today();
+  time_t now_t = time(NULL);
+
+  // Actual steps today
+  mask = health_service_metric_accessible(HealthMetricStepCount, today_start, now_t);
   s_steps = (mask & HealthServiceAccessibilityMaskAvailable)
     ? (int)health_service_sum_today(HealthMetricStepCount) : 0;
-  mask = health_service_metric_accessible(HealthMetricWalkedDistanceMeters, start, now);
+
+  // Distance today
+  mask = health_service_metric_accessible(HealthMetricWalkedDistanceMeters, today_start, now_t);
   s_distance_m = (mask & HealthServiceAccessibilityMaskAvailable)
     ? (int)health_service_sum_today(HealthMetricWalkedDistanceMeters) : 0;
-  mask = health_service_metric_accessible(HealthMetricActiveKCalories, start, now);
+
+  // Calories today
+  mask = health_service_metric_accessible(HealthMetricActiveKCalories, today_start, now_t);
   s_calories = (mask & HealthServiceAccessibilityMaskAvailable)
     ? (int)health_service_sum_today(HealthMetricActiveKCalories) : 0;
-  mask = health_service_metric_accessible(HealthMetricHeartRateBPM, start, now);
+
+  // Heart rate (instantaneous)
+  mask = health_service_metric_accessible(HealthMetricHeartRateBPM, today_start, now_t);
   if (mask & HealthServiceAccessibilityMaskAvailable) {
     int bpm = (int)health_service_peek_current_value(HealthMetricHeartRateBPM);
     if (bpm > 0) { s_heart_rate = bpm; s_heart_rate_valid = true; }
   }
-  s_steps_expected = prv_calc_steps_expected();
+
+  // Typical steps at current time of day (averaged across all past days by the SDK)
+  // Example: at 10am, returns the average number of steps taken by 10am on past days
+  mask = health_service_metric_averaged_accessible(HealthMetricStepCount, today_start, now_t,
+                                                    HealthServiceTimeScopeDaily);
+  s_steps_expected = (mask & HealthServiceAccessibilityMaskAvailable)
+    ? (int)health_service_sum_averaged(HealthMetricStepCount, today_start, now_t,
+                                        HealthServiceTimeScopeDaily)
+    : -1;
+
+  // Typical full-day step goal (midnight to midnight, averaged across all past days)
+  // This is the number to aim for by end of day — the "goal" total
+  time_t tomorrow_start = today_start + SECONDS_PER_DAY;
+  mask = health_service_metric_averaged_accessible(HealthMetricStepCount, today_start, tomorrow_start,
+                                                    HealthServiceTimeScopeDaily);
+  s_steps_typical_day = (mask & HealthServiceAccessibilityMaskAvailable)
+    ? (int)health_service_sum_averaged(HealthMetricStepCount, today_start, tomorrow_start,
+                                        HealthServiceTimeScopeDaily)
+    : -1;
 }
 #endif
 
 // ============================================================
 // ICONS
-// Icons draw into a box at (ox,oy):
-//   large=true  → 16x16 box (emery, ICON_W=16)
-//   large=false → 12x12 box (others, ICON_W=12)
+// Each icon draws into a fixed box at (ox,oy):
+//   large=true  → 16x16 px box (emery, ICON_W=16 = 2×UNIT)
+//   large=false → 12x12 px box (other platforms, ICON_W=12 = 2×UNIT)
 // ============================================================
+
 static void icon_footprint(GContext *ctx, int fx, int fy, GColor col, bool large) {
+  // Single footprint: rounded ball + narrower heel
   graphics_context_set_fill_color(ctx, col);
   if (large) {
-    graphics_fill_rect(ctx, GRect(fx,   fy,   5, 7), 2, GCornersAll);
-    graphics_fill_rect(ctx, GRect(fx+1, fy+6, 3, 4), 1, GCornersAll);
+    // 5x8 ball + 3x5 heel; total height 13px (feet reach full 16px box via icon_steps offsets)
+    graphics_fill_rect(ctx, GRect(fx,   fy,   5, 8), 2, GCornersAll);
+    graphics_fill_rect(ctx, GRect(fx+1, fy+7, 3, 5), 1, GCornersAll);
   } else {
-    graphics_fill_rect(ctx, GRect(fx,   fy,   4, 5), 2, GCornersAll);
-    graphics_fill_rect(ctx, GRect(fx+1, fy+4, 2, 4), 1, GCornersAll);
+    // 4x6 ball + 2x4 heel for 12px box
+    graphics_fill_rect(ctx, GRect(fx,   fy,   4, 6), 2, GCornersAll);
+    graphics_fill_rect(ctx, GRect(fx+1, fy+5, 2, 4), 1, GCornersAll);
   }
 }
 static void icon_steps(GContext *ctx, int ox, int oy, GColor col, bool large) {
+  // Two footprints: forward foot top-right, back foot bottom-left
+  // Positioned to fill the full 16x16 (or 12x12) bounding box
   if (large) {
-    icon_footprint(ctx, ox+9, oy+1, col, true);
-    icon_footprint(ctx, ox+2, oy+4, col, true);
+    // 2px more separation than before; feet span ox+0..ox+15, oy+0..oy+15
+    icon_footprint(ctx, ox+10, oy+0, col, true);   // forward foot, top
+    icon_footprint(ctx, ox+0,  oy+3, col, true);   // back foot, lower
   } else {
-    icon_footprint(ctx, ox+7, oy+1, col, false);
-    icon_footprint(ctx, ox+1, oy+3, col, false);
+    icon_footprint(ctx, ox+7, oy+0, col, false);
+    icon_footprint(ctx, ox+0, oy+3, col, false);
   }
 }
 static void icon_battery(GContext *ctx, int ox, int oy, GColor col, int pct, bool large) {
+  // Battery outline + fill level; charging = lightning bolt instead
   graphics_context_set_fill_color(ctx, col);
   if (s_charging) {
     if (large) {
+      // Lightning bolt centered in 16x16
       graphics_fill_rect(ctx, GRect(ox+7,oy+0,5,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+6,oy+1,5,1),0,GCornerNone);
       graphics_fill_rect(ctx, GRect(ox+5,oy+2,5,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+4,oy+3,5,1),0,GCornerNone);
       graphics_fill_rect(ctx, GRect(ox+3,oy+4,5,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+1,oy+5,11,2),0,GCornerNone);
@@ -446,6 +470,7 @@ static void icon_battery(GContext *ctx, int ox, int oy, GColor col, int pct, boo
       graphics_fill_rect(ctx, GRect(ox+3,oy+9,5,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+2,oy+10,5,1),0,GCornerNone);
       graphics_fill_rect(ctx, GRect(ox+1,oy+11,5,1),0,GCornerNone);
     } else {
+      // Lightning bolt in 12x12
       graphics_fill_rect(ctx, GRect(ox+5,oy+0,4,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+4,oy+1,4,1),0,GCornerNone);
       graphics_fill_rect(ctx, GRect(ox+3,oy+2,4,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+1,oy+3,8,2),0,GCornerNone);
       graphics_fill_rect(ctx, GRect(ox+3,oy+5,4,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+2,oy+6,4,1),0,GCornerNone);
@@ -454,11 +479,13 @@ static void icon_battery(GContext *ctx, int ox, int oy, GColor col, int pct, boo
   } else {
     graphics_context_set_stroke_color(ctx, col); graphics_context_set_stroke_width(ctx, 1);
     if (large) {
+      // Body 12x10 at (1,3) in 16x16; nub at right
       graphics_draw_rect(ctx, GRect(ox+1,oy+3,12,10));
       graphics_fill_rect(ctx, GRect(ox+13,oy+6,2,4),0,GCornerNone);
       int fw = (10*pct)/100; if (fw<1&&pct>0) fw=1;
       if (fw>0) graphics_fill_rect(ctx, GRect(ox+2,oy+4,fw,8),0,GCornerNone);
     } else {
+      // Body 9x7 at (1,2) in 12x12
       graphics_draw_rect(ctx, GRect(ox+1,oy+2,9,7));
       graphics_fill_rect(ctx, GRect(ox+10,oy+4,2,3),0,GCornerNone);
       int fw = (7*pct)/100; if (fw<1&&pct>0) fw=1;
@@ -467,8 +494,10 @@ static void icon_battery(GContext *ctx, int ox, int oy, GColor col, int pct, boo
   }
 }
 static void icon_bt(GContext *ctx, int ox, int oy, GColor col, bool large) {
+  // Bluetooth symbol: vertical spine with diamond-shaped upper/lower lobes
   graphics_context_set_stroke_color(ctx, col); graphics_context_set_stroke_width(ctx, 1);
   if (large) {
+    // Spine at ox+5 in 16x16
     graphics_draw_line(ctx, GPoint(ox+5,oy+1),  GPoint(ox+5,oy+14));
     graphics_draw_pixel(ctx, GPoint(ox+4,oy+5)); graphics_draw_pixel(ctx, GPoint(ox+3,oy+4)); graphics_draw_pixel(ctx, GPoint(ox+2,oy+3));
     graphics_draw_pixel(ctx, GPoint(ox+4,oy+10)); graphics_draw_pixel(ctx, GPoint(ox+3,oy+11)); graphics_draw_pixel(ctx, GPoint(ox+2,oy+12));
@@ -477,6 +506,7 @@ static void icon_bt(GContext *ctx, int ox, int oy, GColor col, bool large) {
     graphics_draw_pixel(ctx, GPoint(ox+6,oy+9)); graphics_draw_pixel(ctx, GPoint(ox+7,oy+10)); graphics_draw_pixel(ctx, GPoint(ox+8,oy+11));
     graphics_draw_pixel(ctx, GPoint(ox+9,oy+12)); graphics_draw_pixel(ctx, GPoint(ox+8,oy+13)); graphics_draw_pixel(ctx, GPoint(ox+7,oy+14));
   } else {
+    // Spine at ox+3 in 12x12
     graphics_draw_line(ctx, GPoint(ox+3,oy+0),  GPoint(ox+3,oy+10));
     graphics_draw_pixel(ctx, GPoint(ox+2,oy+3)); graphics_draw_pixel(ctx, GPoint(ox+1,oy+2));
     graphics_draw_pixel(ctx, GPoint(ox+2,oy+7)); graphics_draw_pixel(ctx, GPoint(ox+1,oy+8));
@@ -487,8 +517,10 @@ static void icon_bt(GContext *ctx, int ox, int oy, GColor col, bool large) {
   }
 }
 static void icon_heart(GContext *ctx, int ox, int oy, GColor col, bool large) {
+  // Heart shape: two rounded bumps at top, tapers to a point at bottom
   graphics_context_set_fill_color(ctx, col);
   if (large) {
+    // 14x11 in 16x16: offset (1,3)
     int y = oy + 3;
     graphics_fill_rect(ctx,GRect(ox+1,y+0,4,2),1,GCornersTop); graphics_fill_rect(ctx,GRect(ox+9,y+0,4,2),1,GCornersTop);
     graphics_fill_rect(ctx,GRect(ox+0,y+1,5,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+9,y+1,4,1),0,GCornerNone);
@@ -498,6 +530,7 @@ static void icon_heart(GContext *ctx, int ox, int oy, GColor col, bool large) {
     graphics_fill_rect(ctx,GRect(ox+4,y+7,5,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+5,y+8,3,1),0,GCornerNone);
     graphics_fill_rect(ctx,GRect(ox+6,y+9,1,1),0,GCornerNone);
   } else {
+    // 10x8 in 12x12: offset (1,2)
     int y = oy + 2;
     graphics_fill_rect(ctx,GRect(ox+1,y+0,3,2),1,GCornersTop); graphics_fill_rect(ctx,GRect(ox+7,y+0,3,2),1,GCornersTop);
     graphics_fill_rect(ctx,GRect(ox+0,y+1,4,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+7,y+1,3,1),0,GCornerNone);
@@ -507,13 +540,16 @@ static void icon_heart(GContext *ctx, int ox, int oy, GColor col, bool large) {
   }
 }
 static void icon_calories(GContext *ctx, int ox, int oy, GColor col, bool large) {
+  // Flame shape: tapers up from a rounded base
   graphics_context_set_fill_color(ctx, col);
   if (large) {
+    // ~10x15 in 16x16: offset (3,1)
     graphics_fill_rect(ctx,GRect(ox+3,oy+10,10,5),2,GCornersBottom);
     graphics_fill_rect(ctx,GRect(ox+4,oy+6,8,5),0,GCornerNone);
     graphics_fill_rect(ctx,GRect(ox+5,oy+3,4,4),0,GCornerNone);
     graphics_fill_rect(ctx,GRect(ox+6,oy+1,2,3),0,GCornerNone);
   } else {
+    // ~8x11 in 12x12: offset (2,1)
     graphics_fill_rect(ctx,GRect(ox+2,oy+7,8,4),2,GCornersBottom);
     graphics_fill_rect(ctx,GRect(ox+3,oy+4,6,4),0,GCornerNone);
     graphics_fill_rect(ctx,GRect(ox+4,oy+2,3,3),0,GCornerNone);
@@ -521,36 +557,59 @@ static void icon_calories(GContext *ctx, int ox, int oy, GColor col, bool large)
   }
 }
 static void icon_sun(GContext *ctx, int ox, int oy, GColor col, bool large) {
+  // Sun: thick circle (drawn at radius and radius+1) + 4 cardinal rays + 4 diagonal rays
   graphics_context_set_stroke_color(ctx, col); graphics_context_set_stroke_width(ctx, 1);
-  int sz = large ? 16 : 12;
+  int sz  = large ? 16 : 12;
   int icx = ox + sz/2, icy = oy + sz/2;
-  graphics_draw_circle(ctx, GPoint(icx,icy), large ? 3 : 2);
+  int cr  = large ? 3 : 2;  // circle radius
+  // Thick circle: two concentric circles for better visibility at small size
+  graphics_draw_circle(ctx, GPoint(icx,icy), cr);
+  graphics_draw_circle(ctx, GPoint(icx,icy), cr + 1);
+  // Cardinal rays (2px long each direction)
   graphics_draw_pixel(ctx,GPoint(icx,oy));      graphics_draw_pixel(ctx,GPoint(icx,oy+1));
   graphics_draw_pixel(ctx,GPoint(icx,oy+sz-1)); graphics_draw_pixel(ctx,GPoint(icx,oy+sz-2));
   graphics_draw_pixel(ctx,GPoint(ox,icy));       graphics_draw_pixel(ctx,GPoint(ox+1,icy));
   graphics_draw_pixel(ctx,GPoint(ox+sz-1,icy));  graphics_draw_pixel(ctx,GPoint(ox+sz-2,icy));
+  // Diagonal rays (2px each, at 45° from corners inward)
+  if (large) {
+    graphics_draw_pixel(ctx,GPoint(ox+2, oy+2));  graphics_draw_pixel(ctx,GPoint(ox+3, oy+3));
+    graphics_draw_pixel(ctx,GPoint(ox+13,oy+2));  graphics_draw_pixel(ctx,GPoint(ox+12,oy+3));
+    graphics_draw_pixel(ctx,GPoint(ox+2, oy+13)); graphics_draw_pixel(ctx,GPoint(ox+3, oy+12));
+    graphics_draw_pixel(ctx,GPoint(ox+13,oy+13)); graphics_draw_pixel(ctx,GPoint(ox+12,oy+12));
+  } else {
+    graphics_draw_pixel(ctx,GPoint(ox+1, oy+1)); graphics_draw_pixel(ctx,GPoint(ox+2, oy+2));
+    graphics_draw_pixel(ctx,GPoint(ox+10,oy+1)); graphics_draw_pixel(ctx,GPoint(ox+9, oy+2));
+    graphics_draw_pixel(ctx,GPoint(ox+1, oy+10)); graphics_draw_pixel(ctx,GPoint(ox+2, oy+9));
+    graphics_draw_pixel(ctx,GPoint(ox+10,oy+10)); graphics_draw_pixel(ctx,GPoint(ox+9, oy+9));
+  }
 }
 static void icon_cloud(GContext *ctx, int ox, int oy, GColor col, bool large) {
+  // Cloud: flat base + two bumps on top
   graphics_context_set_fill_color(ctx, col);
   if (large) {
+    // Body 14x7 at (1,5), bumps above; fills 16x16
     graphics_fill_rect(ctx,GRect(ox+3,oy+4,5,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+4,oy+2,4,3),0,GCornerNone);
     graphics_fill_rect(ctx,GRect(ox+8,oy+3,5,2),0,GCornerNone);
     graphics_fill_rect(ctx,GRect(ox+1,oy+5,14,7),0,GCornerNone);
   } else {
+    // Body 10x5 at (1,4) for 12x12
     graphics_fill_rect(ctx,GRect(ox+2,oy+3,4,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+3,oy+2,3,2),0,GCornerNone);
     graphics_fill_rect(ctx,GRect(ox+6,oy+2,4,2),0,GCornerNone);
     graphics_fill_rect(ctx,GRect(ox+1,oy+4,10,5),0,GCornerNone);
   }
 }
 static void icon_partly_cloudy(GContext *ctx, int ox, int oy, GColor col, bool large) {
+  // Small sun in top-right corner, cloud in bottom-left
   graphics_context_set_stroke_color(ctx, col); graphics_context_set_stroke_width(ctx, 1);
   if (large) {
+    // Sun center at (11,4) with 3 rays; cloud fills lower-left
     graphics_draw_circle(ctx, GPoint(ox+11,oy+4), 3);
     graphics_draw_pixel(ctx,GPoint(ox+11,oy+0)); graphics_draw_pixel(ctx,GPoint(ox+15,oy+4)); graphics_draw_pixel(ctx,GPoint(ox+11,oy+8));
     graphics_context_set_fill_color(ctx, col);
     graphics_fill_rect(ctx,GRect(ox+2,oy+6,4,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+6,oy+6,3,1),0,GCornerNone);
     graphics_fill_rect(ctx,GRect(ox+1,oy+7,10,6),0,GCornerNone);
   } else {
+    // Sun center at (8,3) with 3 rays
     graphics_draw_circle(ctx, GPoint(ox+8,oy+3), 2);
     graphics_draw_pixel(ctx,GPoint(ox+8,oy+0)); graphics_draw_pixel(ctx,GPoint(ox+11,oy+3)); graphics_draw_pixel(ctx,GPoint(ox+8,oy+6));
     graphics_context_set_fill_color(ctx, col);
@@ -560,6 +619,7 @@ static void icon_partly_cloudy(GContext *ctx, int ox, int oy, GColor col, bool l
 }
 static void icon_rain(GContext *ctx, int ox, int oy, GColor col, bool large) {
   icon_cloud(ctx,ox,oy,col,large);
+  // Rain drops: two pixels each, spaced across the cloud width
   graphics_context_set_stroke_color(ctx,col); graphics_context_set_stroke_width(ctx,1);
   if (large) {
     graphics_draw_pixel(ctx,GPoint(ox+3,oy+13)); graphics_draw_pixel(ctx,GPoint(ox+3,oy+15));
@@ -572,6 +632,7 @@ static void icon_rain(GContext *ctx, int ox, int oy, GColor col, bool large) {
   }
 }
 static void icon_snow(GContext *ctx, int ox, int oy, GColor col, bool large) {
+  // Snowflake: 4-axis symmetry (crosshairs + diagonals), scaled to box size
   graphics_context_set_stroke_color(ctx,col); graphics_context_set_stroke_width(ctx,1);
   int sz = large ? 16 : 12, c = sz/2;
   graphics_draw_line(ctx,GPoint(ox+1,oy+c),GPoint(ox+sz-2,oy+c));
@@ -580,9 +641,11 @@ static void icon_snow(GContext *ctx, int ox, int oy, GColor col, bool large) {
   graphics_draw_line(ctx,GPoint(ox+sz-3,oy+2),GPoint(ox+2,oy+sz-3));
 }
 static void icon_storm(GContext *ctx, int ox, int oy, GColor col, bool large) {
+  // Cloud + small lightning bolt below
   icon_cloud(ctx,ox,oy,col,large);
   graphics_context_set_stroke_color(ctx,col); graphics_context_set_stroke_width(ctx,1);
   if (large) {
+    // Zigzag lightning centered under cloud
     graphics_draw_pixel(ctx,GPoint(ox+8,oy+12)); graphics_draw_pixel(ctx,GPoint(ox+8,oy+13));
     graphics_draw_pixel(ctx,GPoint(ox+7,oy+13)); graphics_draw_pixel(ctx,GPoint(ox+7,oy+14));
     graphics_draw_pixel(ctx,GPoint(ox+9,oy+14)); graphics_draw_pixel(ctx,GPoint(ox+9,oy+15));
@@ -594,6 +657,7 @@ static void icon_storm(GContext *ctx, int ox, int oy, GColor col, bool large) {
   }
 }
 static void icon_weather(GContext *ctx, int ox, int oy, GColor col, int code, bool large) {
+  // Dispatch to weather condition icon based on WMO weather code
   if      (code == 0)                                  icon_sun(ctx,ox,oy,col,large);
   else if (code <= 3)                                  icon_partly_cloudy(ctx,ox,oy,col,large);
   else if (code <= 48)                                 icon_cloud(ctx,ox,oy,col,large);
@@ -605,6 +669,8 @@ static void icon_weather(GContext *ctx, int ox, int oy, GColor col, int code, bo
 
 // ============================================================
 // DIGIT DRAWING
+// Digits use a UNIT-based grid. All strokes and arcs are fixed
+// size (arc radius = 2u/1u, stroke = 1u); only vertical bars scale.
 // ============================================================
 static void fill_arc(GContext *ctx, int cx, int cy, int ro, int ri, int a0, int a1) {
   GRect b = GRect(cx - ro, cy - ro, ro * 2, ro * 2);
@@ -690,19 +756,28 @@ static void draw_stacked_pass(GContext *ctx, int h_tens, int h_ones, int m_tens,
 
 // ============================================================
 // INFO LINE RENDERING
+//
+// Layout rules:
+//   ICW = ICON_W (16 emery, 12 others)
+//   ICG = HALF_UNIT (4 emery, 3 others) — gap between icon and text
+//   Stacked text budget with icon: col_w (~99px) - ICW - ICG = ~75px
+//   Stacked text budget no icon:   col_w (~99px) = ~99px
+//   Wide text budget (center-aligned): SCREEN_W - 2px = 198px
 // ============================================================
 static void draw_info_line(GContext *ctx, InfoLine *line, int y,
                             int col_x, int col_w, GTextAlignment align) {
   GFont font = fonts_get_system_font(INFO_FONT_KEY);
+  // iy places the icon top so it is vertically centered in the info line cell
   int iy = y - INFO_TOP_PAD + (INFO_LINE_H - ICON_W) / 2 - ICON_V_ADJUST;
   GColor info_fg = s_fg;
   const int ICW = ICON_W;
-  const int ICG = UNIT;
+  const int ICG = HALF_UNIT;  // 4px on emery, 3px on others (halved from previous UNIT)
   if (line->has_icon || line->is_debug_sq) {
     GSize sz = graphics_text_layout_get_content_size(
       line->text, font, GRect(0,0,200,20), GTextOverflowModeFill, GTextAlignmentLeft);
     int block_w = ICW + ICG + sz.w;
     if (block_w > col_w) {
+      // Overflow: drop icon, show text only (no ellipsis on the icon side)
       graphics_context_set_text_color(ctx, info_fg);
       graphics_draw_text(ctx, line->text, font, GRect(col_x, y-INFO_TOP_PAD, col_w, INFO_LINE_H),
         GTextOverflowModeTrailingEllipsis,
@@ -711,14 +786,19 @@ static void draw_info_line(GContext *ctx, InfoLine *line, int y,
     }
     int icon_sx, text_sx, text_w;
     if (align == GTextAlignmentRight) {
+      // Digits on left: icon at far right, text to its left
       icon_sx = col_x + col_w - ICW;
       text_sx = col_x;
       text_w  = col_w - ICW - ICG;
     } else if (align == GTextAlignmentLeft) {
+      // Digits on right: icon at far left, text to its right
       icon_sx = col_x;
       text_sx = col_x + ICW + ICG;
       text_w  = col_w - ICW - ICG;
     } else {
+      // Wide mode: center the icon+text block as a unit; text left-aligned after icon
+      // Note: when block_w > col_w the icon is dropped (handled above), so centering
+      // only applies when the full block fits — alignment math is correct in that case.
       int off = (col_w - block_w) / 2;
       if (off < 0) off = 0;
       icon_sx = col_x + off;
@@ -728,6 +808,7 @@ static void draw_info_line(GContext *ctx, InfoLine *line, int y,
     if (text_w < 0) text_w = 0;
     graphics_context_set_fill_color(ctx, info_fg);
     if (line->is_debug_sq) {
+      // Solid square registration mark — used to calibrate icon alignment
       graphics_fill_rect(ctx, GRect(icon_sx, iy, ICW, ICW), 0, GCornerNone);
     } else if (line->is_battery) {
       icon_battery(ctx, icon_sx, iy, info_fg, line->icon_extra, ICON_LARGE);
@@ -759,23 +840,32 @@ static void prv_fmt_steps(char *buf, int len, int steps) {
   else snprintf(buf,len,"%d",steps);
 }
 #endif
+
 static void prv_fmt_time_min(char *buf, int len, int m) {
   if (m<0) { snprintf(buf,len,"--"); return; }
   int h=(m/60)%12; if(!h)h=12;
   snprintf(buf,len,"%d:%02d%s",h,m%60,m<720?"am":"pm");
 }
+
 static const char *s_day_names[]        = {"Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"};
 static const char *s_day_short[]        = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
 static const char *s_month_names[]      = {"Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
 static const char *s_month_names_long[] = {"January","February","March","April","May","June",
                                            "July","August","September","October","November","December"};
 
+// ============================================================
+// SLOT TEXT GENERATION
+// Returns true if text was written to buf; false = hide this slot.
+// Philosophy: hide > mislead. Never show zeros or stale defaults.
+// ============================================================
 static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool wide) {
   switch (slot) {
     case SLOT_EMPTY: return false;
+
     case SLOT_DAY:
       snprintf(buf,len,"%s", t ? s_day_names[t->tm_wday] : "");
       return t != NULL;
+
     case SLOT_DATE:
       if (t) {
         const char *mon = wide ? s_month_names_long[t->tm_mon] : s_month_names[t->tm_mon];
@@ -783,8 +873,10 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
         return true;
       }
       return false;
+
     case SLOT_DAY_DATE:
       if (t) {
+        // No icon on this slot — full col_w available in stacked mode (~99px); fits fine
         if (wide) snprintf(buf,len,"%s, %s %d",
                            s_day_names[t->tm_wday], s_month_names_long[t->tm_mon], t->tm_mday);
         else      snprintf(buf,len,"%s, %s %d",
@@ -792,13 +884,16 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
         return true;
       }
       return false;
+
     case SLOT_TEMP:
+      // Space between number and unit letter matches UV "UV 5" style
       if (s_weather_temp_f > -900) {
-        if (s_cfg_temp_f) snprintf(buf,len,"%dF",s_weather_temp_f);
-        else snprintf(buf,len,"%dC",s_weather_temp_c);
+        if (s_cfg_temp_f) snprintf(buf,len,"%d F",s_weather_temp_f);
+        else snprintf(buf,len,"%d C",s_weather_temp_c);
         return true;
       }
       return false;
+
     case SLOT_WEATHER: {
       if (s_weather_temp_f <= -900) return false;
       const char *desc = (s_weather_code==0)?"clear":(s_weather_code<=3)?"partly cloudy":
@@ -806,9 +901,10 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
         (s_weather_code<=79)?"snowy":(s_weather_code<=99)?"stormy":"--";
       int t2 = s_cfg_temp_f ? s_weather_temp_f : s_weather_temp_c;
       char u = s_cfg_temp_f ? 'F' : 'C';
-      if (wide) snprintf(buf,len,"%d%c, %s",t2,u,desc);
-      else      snprintf(buf,len,"%d%c",t2,u);
+      if (wide) snprintf(buf,len,"%d %c, %s",t2,u,desc);
+      else      snprintf(buf,len,"%d %c",t2,u);
       return true; }
+
     case SLOT_STEPS:
 #if defined(PBL_HEALTH)
       { char sb[16]; prv_fmt_steps(sb,sizeof(sb),s_steps);
@@ -821,6 +917,7 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
 #else
       return false;
 #endif
+
     case SLOT_DISTANCE:
 #if defined(PBL_HEALTH)
       { char db[16]; prv_fmt_dist(db,sizeof(db)); snprintf(buf,len,"%s",db); }
@@ -828,13 +925,16 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
 #else
       return false;
 #endif
+
     case SLOT_EXP_STEPS:
 #if defined(PBL_HEALTH)
+      // "Typical Steps" = SDK average of steps at this time of day across past days
       if (s_steps_expected>0) { char eb[16]; prv_fmt_steps(eb,sizeof(eb),s_steps_expected); snprintf(buf,len,"exp %s",eb); return true; }
       return false;
 #else
       return false;
 #endif
+
     case SLOT_PACE:
 #if defined(PBL_HEALTH)
       if (s_steps_expected>0) {
@@ -847,6 +947,7 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
 #else
       return false;
 #endif
+
     case SLOT_CALORIES:
 #if defined(PBL_HEALTH)
       { if (wide) {
@@ -857,39 +958,48 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
 #else
       return false;
 #endif
+
     case SLOT_HEART:
 #if defined(PBL_HEALTH)
       if (s_heart_rate_valid || s_heart_rate > 0) {
         if (wide) snprintf(buf,len,"%d bpm", s_heart_rate);
         else snprintf(buf,len,"%d", s_heart_rate);
       } else {
+        // Show "--" rather than hiding: sensor exists, just no reading yet
         snprintf(buf,len, wide ? "-- bpm" : "--");
       }
       return true;
 #else
       return false;
 #endif
+
     case SLOT_SUNRISE:
       if (s_sunrise_min < 0) return false;
       { char rb[12]; prv_fmt_time_min(rb,sizeof(rb),s_sunrise_min); snprintf(buf,len,"%s",rb); }
       return true;
+
     case SLOT_SUNSET:
       if (s_sunset_min < 0) return false;
       { char sb2[12]; prv_fmt_time_min(sb2,sizeof(sb2),s_sunset_min); snprintf(buf,len,"%s",sb2); }
       return true;
+
     case SLOT_DAYLIGHT:
       if (s_sunrise_min<0 || s_sunset_min<0) return false;
       { int mins=s_sunset_min-s_sunrise_min; if(mins<0)mins=0;
         snprintf(buf,len,"%dh%02dm",mins/60,mins%60); }
       return true;
+
     case SLOT_BATTERY:
       if (s_charging) snprintf(buf,len,"%d%% +",s_battery_pct);
       else            snprintf(buf,len,"%d%%",s_battery_pct);
       return true;
+
     case SLOT_BLUETOOTH:
+      // Only show when disconnected — no icon on connected state
       if (s_bt_connected) return false;
       snprintf(buf,len,"no bt");
       return true;
+
     case SLOT_SUN_TIMES: {
       if (s_sunrise_min < 0 || s_sunset_min < 0) return false;
       char rb[12], sb2[12];
@@ -898,10 +1008,11 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       if (wide) snprintf(buf,len,"%s"DOT"%s",rb,sb2);
       else      snprintf(buf,len,"%s",rb);
       return true; }
+
     case SLOT_STEPS_EXP:
 #if defined(PBL_HEALTH)
       if (!wide) return false;
-      if (s_steps_expected<=0) return false;
+      if (s_steps_expected<=0) return false;  // hide if typical unavailable (not "exp --")
       { char sb[16], eb[16];
         prv_fmt_steps(sb,sizeof(sb),s_steps);
         prv_fmt_steps(eb,sizeof(eb),s_steps_expected);
@@ -910,6 +1021,7 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
 #else
       return false;
 #endif
+
     case SLOT_EXP_PACE:
 #if defined(PBL_HEALTH)
       if (!wide) return false;
@@ -920,6 +1032,7 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
 #else
       return false;
 #endif
+
     case SLOT_BAT_BT:
       if (!wide) return false;
       if (!s_bt_connected) {
@@ -930,12 +1043,16 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
         else            snprintf(buf,len,"%d%%",s_battery_pct);
       }
       return true;
+
     case SLOT_UV:
+      // UV 0 is a valid real value (night/indoors) so we use -1 as "never received" sentinel
       if (s_uv_index < 0) return false;
       { if (wide) snprintf(buf,len,"UV index %d",s_uv_index);
         else      snprintf(buf,len,"UV %d",s_uv_index); }
       return true;
+
     case SLOT_LIGHT_REM: {
+      // Time remaining until next solar event (sunrise or sunset)
       if (s_sunrise_min < 0 || s_sunset_min < 0) return false;
       time_t now_ts = time(NULL); struct tm *tn = localtime(&now_ts);
       int now_min = tn->tm_hour * 60 + tn->tm_min;
@@ -950,12 +1067,14 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
         if (is_day) snprintf(buf,len,"%dh %02dm daylight left",rh,rm);
         else        snprintf(buf,len,"%dh %02dm til sunrise",rh,rm);
       } else {
-        // Note: stacked budget ~75px with icon; "%dh%02dm" fits, label text does not
-        if (is_day) snprintf(buf,len,"%dh %02dm light",rh,rm);
-        else        snprintf(buf,len,"%dh %02dm dark",rh,rm);
+        // Stacked budget: ~75px with icon. "%dh%02dm" (~71px) fits; label text does not.
+        // Sun icon already signals day vs night, so label is redundant here.
+        snprintf(buf,len,"%dh%02dm",rh,rm);
       }
       return true; }
+
     case SLOT_UV_LIGHT: {
+      // Wide only: UV index + light/dark remaining in one line
       if (!wide) return false;
       if (s_uv_index < 0) return false;
       if (s_sunrise_min < 0 || s_sunset_min < 0) return false;
@@ -971,38 +1090,59 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       if (is_day) snprintf(buf,len,"UV %d"DOT"%dh %02dm light",s_uv_index,rh,rm2);
       else        snprintf(buf,len,"UV %d"DOT"%dh %02dm dark",s_uv_index,rh,rm2);
       return true; }
+
     case SLOT_WEATHER_UV: {
+      // Wide only: temp + UV index with conditions icon; space before unit letter
       if (!wide) return false;
       if (s_weather_temp_f <= -900) return false;
       if (s_uv_index < 0) return false;
       int t2 = s_cfg_temp_f ? s_weather_temp_f : s_weather_temp_c;
       char u = s_cfg_temp_f ? 'F' : 'C';
-      snprintf(buf,len,"%d%c"DOT"UV %d",t2,u,s_uv_index);
+      snprintf(buf,len,"%d %c"DOT"UV %d",t2,u,s_uv_index);
       return true; }
+
+    case SLOT_TYPICAL_DAY:
+#if defined(PBL_HEALTH)
+      // Full-day typical step goal — what a normal day looks like at midnight
+      // Sourced from health_service_sum_averaged(midnight to midnight, HealthServiceTimeScopeDaily)
+      if (s_steps_typical_day <= 0) return false;
+      { char gb[16]; prv_fmt_steps(gb, sizeof(gb), s_steps_typical_day);
+        if (wide) snprintf(buf,len,"goal %s steps",gb);
+        else      snprintf(buf,len,"goal %s",gb); }
+      return true;
+#else
+      return false;
+#endif
+
     case SLOT_DEBUG:
+      // Wide: stress-test string for max icon+text layout; stacked: short label
       if (wide) snprintf(buf, len, "[ Tallboy Debug Text ]");
       else       snprintf(buf, len, "[ Debug ]");
       return true;
+
     default: return false;
   }
 }
+
 static IconFn prv_slot_icon(SlotType slot, bool *is_battery, bool *is_weather, bool *is_debug_sq, int *extra) {
   *is_battery=false; *is_weather=false; *is_debug_sq=false; *extra=0;
   switch(slot) {
     case SLOT_STEPS: case SLOT_DISTANCE: case SLOT_EXP_STEPS: case SLOT_PACE:
-    case SLOT_STEPS_EXP: case SLOT_EXP_PACE: return icon_steps;
+    case SLOT_STEPS_EXP: case SLOT_EXP_PACE: case SLOT_TYPICAL_DAY: return icon_steps;
     case SLOT_CALORIES: return icon_calories;
     case SLOT_HEART: return icon_heart;
-    case SLOT_SUNRISE: case SLOT_SUNSET: case SLOT_DAYLIGHT: case SLOT_SUN_TIMES: return icon_sun;
+    case SLOT_SUNRISE: case SLOT_SUNSET: case SLOT_DAYLIGHT: case SLOT_SUN_TIMES:
+    case SLOT_LIGHT_REM: return icon_sun;
     case SLOT_BATTERY: case SLOT_BAT_BT: *is_battery=true; *extra=s_battery_pct; return NULL;
     case SLOT_BLUETOOTH: return icon_bt;
-    case SLOT_TEMP: case SLOT_WEATHER: *is_weather=true; *extra=s_weather_code; return NULL;
-    case SLOT_UV: case SLOT_UV_LIGHT: case SLOT_WEATHER_UV: *is_weather=true; *extra=s_weather_code; return NULL;
-    case SLOT_LIGHT_REM: return icon_sun;
+    case SLOT_TEMP: case SLOT_WEATHER:
+    case SLOT_UV: case SLOT_UV_LIGHT: case SLOT_WEATHER_UV:
+      *is_weather=true; *extra=s_weather_code; return NULL;
     case SLOT_DEBUG: *is_debug_sq=true; return NULL;
     default: return NULL;
   }
 }
+
 static int build_lines(InfoLine *lines, int max, int *slots, int n_slots, struct tm *t, bool wide) {
   int count = 0;
   for (int i = 0; i < n_slots && count < max; i++) {
@@ -1020,9 +1160,12 @@ static int build_lines(InfoLine *lines, int max, int *slots, int n_slots, struct
   }
   return count;
 }
+
 static int prv_info_block_h(int n, int step) { return n <= 0 ? 0 : INFO_GLYPH_H + (n-1) * step; }
+
 static int prv_compute_target_h(int ub_h, int layout) {
   if (layout != LAYOUT_INFO) return ub_h - MARGIN_OUTER - BOTTOM_MARGIN(ub_h);
+  // Wide layout: reserve space for info lines above and below; time fills the middle
   int n_above = 0, n_below = 0;
   for (int i = 0; i < 3; i++) if (s_cfg_wide[i] != SLOT_EMPTY) n_above++;
   for (int i = 3; i < 6; i++) if (s_cfg_wide[i] != SLOT_EMPTY) n_below++;
@@ -1032,37 +1175,44 @@ static int prv_compute_target_h(int ub_h, int layout) {
   int h = ub_h - reserved;
   return h < H_MIN ? H_MIN : h;
 }
+
 static int prv_compute_stacked_h(int ub_h) {
   int h = (ub_h - MARGIN_OUTER - BOTTOM_MARGIN(ub_h) - UNIT) / 2;
   return h < H_ABSOLUTE_MIN ? H_ABSOLUTE_MIN : h;
 }
+
 static void prv_update_targets(void) {
   Layer *root = window_get_root_layer(s_window);
   GRect ub = layer_get_unobstructed_bounds(root);
   s_target_h = prv_compute_target_h(ub.size.h, s_layout);
 }
+
 static void prv_stacked_geom(int layout, int *tens_x, int *ones_x,
                                int *col_x, int *col_w, GTextAlignment *align) {
   if (layout == LAYOUT_STACK_R) {
+    // Digits on the right, info column on the left (right-aligned text)
     *ones_x = SCREEN_W - SIDE_MARGIN - SLOT_W;
     *tens_x = *ones_x - SLOT_W;
-    *col_x  = 1;
+    *col_x  = 1;                     // 1px min margin from screen left
     *col_w  = *tens_x - UNIT - 1;
     *align  = GTextAlignmentRight;
   } else {
+    // Digits on the left, info column on the right (left-aligned text)
     *tens_x = SIDE_MARGIN;
     *ones_x = SIDE_MARGIN + SLOT_W;
     *col_x  = *ones_x + SLOT_W + UNIT;
-    *col_w  = SCREEN_W - *col_x - 1;
+    *col_w  = SCREEN_W - *col_x - 1; // 1px min margin from screen right
     *align  = GTextAlignmentLeft;
   }
 }
+
 static void prv_draw_stacked_info(GContext *ctx, struct tm *tm_now,
                                    int col_x, int col_w, GTextAlignment align,
                                    int ub_top, int ub_bot, int ub_h) {
   if (!tm_now || col_w <= 20) return;
   int cn = build_lines(s_col_lines, INFO_LINES_MAX, s_cfg_stack, STACK_SLOTS, tm_now, false);
   if (cn <= 0) return;
+  // Distribute lines evenly between top margin and bottom margin
   int draw_top = ub_top + STACK_INFO_TOP_MARGIN;
   int draw_bot = ub_bot - BOTTOM_MARGIN(ub_h);
   int avail_h  = draw_bot - draw_top - INFO_GLYPH_H;
@@ -1073,7 +1223,7 @@ static void prv_draw_stacked_info(GContext *ctx, struct tm *tm_now,
 }
 
 // ============================================================
-// DRAW LAYER
+// DRAW LAYER — main render function called every frame
 // ============================================================
 static void draw_layer(Layer *layer, GContext *ctx) {
   Layer *root  = window_get_root_layer(s_window);
@@ -1090,6 +1240,7 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     s_fg_mn      = prv_color_from_idx(s_cfg_col_dig_m);
     s_shadow_col = prv_color_from_idx(s_cfg_col_shadow);
   } else {
+    // Dynamic: background color = step pace vs typical
 #if defined(PBL_HEALTH)
     bg = prv_pace_color(s_steps, s_steps_expected);
 #else
@@ -1107,6 +1258,7 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   s_shadow_col = s_cfg_invert ? GColorWhite : GColorBlack;
 #endif
 
+  // Draw background (black border + rounded rect on emery)
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 #if defined(PBL_PLATFORM_EMERY)
@@ -1121,10 +1273,10 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   if (!clock_is_24h_style()) { hr_disp = s_hour % 12; if (!hr_disp) hr_disp = 12; }
   int h_tens=hr_disp/10, h_ones=hr_disp%10, m_tens=s_minute/10, m_ones=s_minute%10;
   int bot_margin = BOTTOM_MARGIN(ub_h);
-
   time_t now_t = time(NULL);
   struct tm *tm_now = localtime(&now_t);
 
+  // ── Split/merge animation frames ──
   if (s_phase == PHASE_SPLIT_V || s_phase == PHASE_MERGE_V) {
     int step   = s_anim_step;
     int hr_cy  = prv_lerp_v(s_sv_hr_cy_s,   s_sv_hr_cy_e,   step);
@@ -1159,6 +1311,7 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     return;
   }
 
+  // ── Normal layouts ──
   if (s_layout == LAYOUT_FULL) {
     s_info_slide = 0;
     int cy = ub_top + MARGIN_OUTER + s_target_h / 2;
@@ -1166,6 +1319,7 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     draw_digits_full(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy, 0, 0, ub_top, ub_bot, s_fg_hr, s_fg_mn);
 
   } else if (s_layout == LAYOUT_INFO) {
+    // Wide: info lines above + below; time scales to fill remaining space
     int above_s[3], below_s[3];
     for (int i = 0; i < 3; i++) above_s[i] = s_cfg_wide[i];
     for (int i = 0; i < 3; i++) below_s[i] = s_cfg_wide[3+i];
@@ -1176,7 +1330,7 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int below_end   = ub_bot - HALF_UNIT;
     int below_top   = below_end - prv_info_block_h(bn, INFO_LINE_STEP_WIDE);
     int time_cy = (above_end + HALF_UNIT + below_top - HALF_UNIT - WIDE_BELOW_EXTRA) / 2;
-    int col_x = 1, col_w = SCREEN_W - 2;
+    int col_x = 1, col_w = SCREEN_W - 2;   // 1px min margin each side
     int slide = s_info_slide;
     for (int i = 0; i < an; i++)
       draw_info_line(ctx, &s_above_lines[i], above_start + i*INFO_LINE_STEP_WIDE - slide, col_x, col_w, GTextAlignmentCenter);
@@ -1188,6 +1342,7 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     draw_digits_full(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy, 0, 0, ub_top, ub_bot, s_fg_hr, s_fg_mn);
 
   } else {
+    // Stacked: digits on one side, info column on the other
     int dh = prv_compute_stacked_h(ub_h);
     int h_cy = ub_top + MARGIN_OUTER + dh / 2;
     int m_cy = ub_bot - bot_margin - dh / 2;
@@ -1200,7 +1355,11 @@ static void draw_layer(Layer *layer, GContext *ctx) {
 }
 
 // ============================================================
-// ANIMATION
+// ANIMATION — AppTimer-driven at 16ms (~60fps)
+// Phases: ANTICIPATE → SQUISH → EXPAND (minute change, full/wide)
+//         SPLIT_V → SPLIT_H (transition to stacked)
+//         MERGE_H → MERGE_V (transition back to full)
+//         BLINK (layout change in wide mode)
 // ============================================================
 static void timer_cb(void *data);
 static void schedule(uint32_t ms) {
@@ -1217,6 +1376,7 @@ static bool prv_ease_expand_step(void) {
   schedule(ANIM_STEP_MS); return false;
 }
 static bool prv_ease_expand_step_clean(void) {
+  // No overshoot variant — used for fast blink in info mode
   int step = (s_ease_idx < EASE_LEN) ? EASE[s_ease_idx] : EASE[EASE_LEN-1]; s_ease_idx++;
   s_h += step;
   if (s_h >= s_target_h) { s_h = s_target_h; return true; }
@@ -1259,6 +1419,7 @@ static void prv_start_fast_blink(void) {
 }
 
 static void prv_start_split_v(int target_layout) {
+  // Digits separate vertically, colon flies off screen — transition to stacked
   if (s_h > s_target_h) s_h = s_target_h;
   Layer *root = window_get_root_layer(s_window);
   GRect ub = layer_get_unobstructed_bounds(root);
@@ -1279,6 +1440,7 @@ static void prv_start_split_v(int target_layout) {
   s_anim_step = 0; s_phase = PHASE_SPLIT_V; schedule(SPLIT_MS);
 }
 static void prv_start_split_h(void) {
+  // Digits slide sideways to stacked positions; info column slides in
   Layer *root = window_get_root_layer(s_window);
   GRect ub = layer_get_unobstructed_bounds(root);
   int ub_h = ub.size.h, ub_top = ub.origin.y, ub_bot = ub_top + ub_h;
@@ -1297,6 +1459,7 @@ static void prv_start_split_h(void) {
   s_anim_step = 0; s_phase = PHASE_SPLIT_H; schedule(SPLIT_MS);
 }
 static void prv_start_merge_h(void) {
+  // Reverse of split_h: digits slide back to center, info column slides out
   Layer *root = window_get_root_layer(s_window);
   GRect ub = layer_get_unobstructed_bounds(root);
   int ub_h = ub.size.h, ub_top = ub.origin.y, ub_bot = ub_top + ub_h;
@@ -1316,6 +1479,7 @@ static void prv_start_merge_h(void) {
   s_anim_step = 0; s_phase = PHASE_MERGE_H; schedule(SPLIT_MS);
 }
 static void prv_start_merge_v(void) {
+  // Reverse of split_v: digits merge back to center, colon returns
   Layer *root = window_get_root_layer(s_window);
   GRect ub = layer_get_unobstructed_bounds(root);
   int ub_h = ub.size.h, ub_top = ub.origin.y, ub_bot = ub_top + ub_h;
@@ -1336,6 +1500,7 @@ static void prv_start_merge_v(void) {
 
 static void prv_return_to_full(void);
 static void shake1_timer_cb(void *data) {
+  // SHAKE1 mode: auto-return to full layout after 60s
   s_shake1_timer = NULL;
   if (s_layout != LAYOUT_FULL && s_phase == PHASE_DONE) prv_return_to_full();
 }
@@ -1349,7 +1514,7 @@ static void prv_cancel_shake1(void) {
 static void prv_return_to_full(void) {
   prv_cancel_shake1();
   if (s_layout == LAYOUT_STACK_L || s_layout == LAYOUT_STACK_R) {
-    prv_start_merge_h();
+    prv_start_merge_h();  // animate back via slide
   } else {
     prv_info_slide_out();
     s_layout = LAYOUT_FULL;
@@ -1464,6 +1629,7 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
 static void prv_noop_click(ClickRecognizerRef ref, void *ctx) { (void)ref; (void)ctx; }
 #if defined(PBL_PLATFORM_EMERY)
 static void prv_up_click(ClickRecognizerRef ref, void *ctx) {
+  // UP button cycles background corner radius on emery
   (void)ref; (void)ctx;
   s_radius_idx = (s_radius_idx + 1) % RADIUS_COUNT;
   layer_mark_dirty(s_canvas_layer);
@@ -1475,10 +1641,11 @@ static void prv_click_config_provider(void *context) {
 #else
   window_single_click_subscribe(BUTTON_ID_UP, prv_noop_click);
 #endif
-  window_single_click_subscribe(BUTTON_ID_SELECT, prv_noop_click);
-  window_single_click_subscribe(BUTTON_ID_DOWN,   prv_noop_click);
+  window_single_click_subscribe(BUTTON_ID_SELECT, prv_noop_click);  // OS-reserved on emery; noop elsewhere
+  window_single_click_subscribe(BUTTON_ID_DOWN,   prv_noop_click);  // suppress default OS behavior
 }
 static void tick_handler(struct tm *t, TimeUnits units) {
+  // Called every minute. Update time display and health/weather state.
   bool animated = (s_layout == LAYOUT_FULL || s_layout == LAYOUT_INFO);
   if (s_phase == PHASE_DONE && animated) {
     s_pending_hour=t->tm_hour; s_pending_minute=t->tm_min; s_digit_pending=true;
@@ -1491,8 +1658,8 @@ static void tick_handler(struct tm *t, TimeUnits units) {
 #if defined(PBL_HEALTH)
   prv_update_health();
 #endif
-  // Age out weather/UV after 3 hours — hide rather than show stale data
-  // Sunrise/sunset are NOT aged out (astronomical, valid all day)
+  // Age out weather/UV after 3 hours without a phone update
+  // Sunrise/sunset are NOT aged out — they're astronomical and stay valid all day
   if (s_weather_ts > 0 && (time(NULL) - s_weather_ts) > WEATHER_MAX_AGE) {
     s_weather_temp_f = -999;
     s_weather_temp_c = -999;
@@ -1507,9 +1674,11 @@ static void bt_handler(bool connected) {
 }
 static void inbox_received(DictionaryIterator *iter, void *context) {
   Tuple *t;
+  // Weather data — stamp s_weather_ts on receipt to track age
   t = dict_find(iter, MESSAGE_KEY_WeatherTempF); if(t) { s_weather_temp_f=(int)t->value->int32; s_weather_ts = time(NULL); }
   t = dict_find(iter, MESSAGE_KEY_WeatherTempC); if(t) s_weather_temp_c=(int)t->value->int32;
   t = dict_find(iter, MESSAGE_KEY_WeatherCode);  if(t) s_weather_code=(int)t->value->int32;
+  // Solar times — not aged out; recalculated every fetch
   t = dict_find(iter, MESSAGE_KEY_SunriseTime);
   if(t){time_t ts=(time_t)(uint32_t)t->value->uint32;struct tm*lt=localtime(&ts);if(lt)s_sunrise_min=lt->tm_hour*60+lt->tm_min;}
   t = dict_find(iter, MESSAGE_KEY_SunsetTime);
@@ -1518,6 +1687,7 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
   if(t) { s_uv_index = (int)t->value->int32; s_weather_ts = time(NULL); }
   t = dict_find(iter, MESSAGE_KEY_SunriseTomorrow);
   if(t){time_t ts=(time_t)(uint32_t)t->value->uint32;struct tm*lt=localtime(&ts);if(lt)s_sunrise_tom_min=lt->tm_hour*60+lt->tm_min;}
+  // Config messages
   t = dict_find(iter, MESSAGE_KEY_CfgInfoMode);
   if(t) s_cfg_info_mode = (InfoMode)(t->value->int32 & 0x7);
   t = dict_find(iter, MESSAGE_KEY_CfgInfoLayout);
@@ -1574,6 +1744,7 @@ static void init(void) {
   s_fg = GColorWhite; s_fg_hr = GColorWhite; s_fg_mn = GColorWhite;
   s_bg = GColorBlack; s_shadow_col = GColorBlack;
   prv_load_config();
+  // Apply "always on" layout from saved config
   if (s_cfg_info_mode == INFO_MODE_ALWAYS) {
     switch (s_cfg_info_layout) {
       case INFO_LAYOUT_WIDE:    s_layout = LAYOUT_INFO; break;
