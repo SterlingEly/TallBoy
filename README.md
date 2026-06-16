@@ -4,30 +4,28 @@ A Pebble watchface built around oversized vector-drawn digits that scale dynamic
 
 **Design:** Sterling Ely  
 **Implementation:** Sterling Ely + Claude  
-**Primary device:** Pebble Time 2 (emery, 200×228, color, touch)
+**Primary device:** Pebble Time 2 (emery, 200×228, color)
 
 ---
 
-## Architecture
+## Structure
+
+```
+src/main.c          — entire watchface (digits, layout, animation, health, info lines)
+src/pkjs/index.js   — PebbleKit JS: weather fetch, UV index, solar times, config page
+appinfo.json        — app metadata, message keys
+```
 
 Everything lives in `src/main.c`. Digits are drawn entirely from geometric primitives (`fill_arc` + `graphics_fill_rect`) — no bitmaps, no system fonts for digit rendering.
-
-```
-src/main.c      — entire watchface (digits, layout, animation, health, info lines)
-appinfo.json    — app metadata, message keys
-resources/      — unused legacy image resources (to be pruned)
-```
-
-> **Note:** `src/digit.c`, `src/digit.h`, `src/case8_patch.txt`, and `src/main_digit1_fix.txt` are legacy files that should be deleted. `digit.c` is still compiled by the build system and produces a harmless `hstroke` warning on every build.
 
 ---
 
 ## Digit geometry
 
-Each digit is drawn with a UNIT-based grid (8px on emery, 6px on flint):
+Each digit is drawn with a UNIT-based grid (8px on emery, 6px on others):
 
-- **Stroke width:** 1u (UNIT = 8px emery)
-- **Arc caps:** outer radius 2u, inner radius 1u — invariant, never change with height
+- **Stroke width:** 1u
+- **Arc caps:** outer radius 2u, inner radius 1u — invariant, don't scale with height
 - **Vertical bars:** stretch with digit height `h`
 - **Minimum height** `H_MIN = 11u` — at this size, arcs just touch, bars disappear
 - **Digit slot:** 5u wide (GLYPH_W = 4u content + 0.5u padding each side)
@@ -36,36 +34,64 @@ The digit `1` uses a diagonal chamfer serif at top-left. Digits `1`, `2`, `7` us
 
 ---
 
-## Layout system
+## Layouts
 
-Shake wrist to cycle through 6 layouts:
+Three display modes, triggered by shake (or always-on via config):
 
-| # | Name | Description |
-|---|------|-------------|
-| 0 | Full | Full-screen time, squish animation on minute change |
-| 1 | Info 1+1 | 1 info line above + 1 below, time fills middle |
-| 2 | Info 2+2 | 2 above + 2 below |
-| 3 | Info 3+3 | 3 above + 3 below |
-| 4 | Stack R | Stacked digits right, info column left |
-| 5 | Stack L | Stacked digits left, info column right |
+| Layout | Description |
+|--------|-------------|
+| Full | Full-screen time, squish animation on every minute change |
+| Wide | Up to 3 info lines above + 3 below the time; time scales to fill remaining space |
+| Stacked Left/Right | Stacked hour/minute digits on one side, 8 info lines in a column on the other |
 
-Touch the screen (emery only) to cycle the background corner radius: 2u → 3u → 4u → 2u.
+The UP button (emery only) cycles the background corner radius: 16px → 24px → 32px.
 
 ---
 
-## Info lines
+## Info line slots
 
-**Wide layouts (Info 1–3):** lines anchor to screen edges (top/bottom), time digits fill remaining space and scale dynamically down to H_MIN.
+Info lines display health, weather, solar, and status data. Each slot has wide and stacked variants. The stacked column on emery has ~99px available (no icon) or ~75px (with 16px icon + 8px gap).
 
-**Stacked layouts:** 8 lines distributed evenly in a fixed column beside the digits.
+**Data caching philosophy: hide > mislead.** If data is unavailable or stale, the slot returns nothing and the line disappears entirely rather than showing zeros or stale values. Weather and UV data ages out after 3 hours without a phone update; sunrise/sunset never ages out (astronomical, valid all day).
 
-Content (in order): weather · sunrise/sunset · steps · expected steps/pace · HR & calories · battery
+Slot IDs and their display strings:
+
+| ID | Name | Stacked | Wide |
+|----|------|---------|------|
+| 0 | Empty | — | — |
+| 1 | Day | "Wednesday" | "Wednesday" |
+| 2 | Date | "Jun 16" | "June 16" |
+| 3 | Day & Date | "Wed, Jun 16" | "Wednesday, June 16" |
+| 4 | Temp | "72F" | "72F" |
+| 5 | Weather | "72F" | "72F, partly cloudy" |
+| 6 | Steps | "1,234" | "1,234 steps · 0.8mi" |
+| 7 | Distance | "0.8mi" | "0.8mi" |
+| 8 | Typical Steps | "exp 8,000" | "exp 8,000" |
+| 9 | Step Pace % | "85%" | "exp 8,000 · 85%" |
+| 10 | Calories | "312" | "312 cal · 72 bpm" |
+| 11 | Heart Rate | "72" | "72 bpm" |
+| 12 | Sunrise | "6:15am" | "6:15am" |
+| 13 | Sunset | "8:22pm" | "8:22pm" |
+| 14 | Daylight | "14h07m" | "14h07m" |
+| 15 | Battery | "84%" | "84%" |
+| 16 | Bluetooth | "no bt" (only when disconnected) | — |
+| 17 | Sunrise & Sunset | "6:15am" | "6:15am · 8:22pm" |
+| 18 | Steps & Typical | — | "1,234 steps · exp 8,000" |
+| 19 | Typical & Pace | — | "exp 8,000 · 85%" |
+| 20 | Battery & BT | — | "84% · no bt" |
+| 21 | Debug | "[ Debug ]" | "[ Tallboy Debug Text ]" |
+| 22 | UV Index | "UV 5" | "UV index 5" |
+| 23 | Light Remaining | "3h 20m light/dark" | "3h 20m daylight left / til sunrise" |
+| 24 | UV & Light | — (wide only) | "UV 5 · 3h 20m light" |
+| 25 | Temp & UV Index | — (wide only) | "72F · UV 5" |
+
+**Note:** Stacked `Light Remaining` text currently runs long (~130px estimated vs ~75px budget with icon). To fix: use `"%dh%02dm"` format (icon conveys day/night context). Tracked for a future update.
 
 ---
 
 ## Step pace background color
 
-On emery with health data, the background reflects today's step pace vs. a 7-day expected average:
+On color Pebbles with health data, the background reflects today's step pace vs. 7-day expected average:
 
 | % of expected | Color |
 |---------------|-------|
@@ -77,41 +103,67 @@ On emery with health data, the background reflects today's step pace vs. a 7-day
 | 201–400% | Blue |
 | 401–700% | Indigo |
 | 701–1000% | Vivid Violet |
-| 1001%+ | Black (easter egg) |
+| 1001%+ | Black |
 
 ---
 
 ## Animation
 
-All animation uses `AppTimer` at 16ms (~60fps), 8px per step.
+All animation uses `AppTimer` at 16ms (~60fps):
 
-- **Launch countdown:** 9→0, digits squish and re-expand between each digit
-- **Minute change:** squish to H_MIN, swap digits, re-expand with 1u overshoot snap
-- **Layout change:** squish transition to new layout
-- **Shake to Full:** 9-point pulse wave animation
+- **Minute change (full/wide):** anticipation nudge → squish to H_MIN → digit swap → re-expand with 1u overshoot snap
+- **Stacked layouts:** no squish animation; digits update in place
+- **Layout transitions:** split-V (digits separate vertically, colon exits) → split-H (digits slide to stacked positions, info column slides in) → reverse on return
+- **Shake to full:** digits pulse with a 7-step sinusoidal wave
 
 ---
 
-## Font metrics (emery, Gothic 24 Bold — measured on device)
+## Font metrics (emery, Gothic 24 Bold)
 
-| Constant | Value | Description |
-|----------|-------|-------------|
+| Constant | Value | Notes |
+|----------|-------|-------|
 | `INFO_LINE_H` | 28px | Full font cell height |
-| `INFO_TOP_PAD` | 10px | Dead space above glyph top |
+| `INFO_TOP_PAD` | 10px | Dead space above cap height |
 | `INFO_GLYPH_H` | 18px | Cap-top to descender-bottom |
-| `INFO_DESCENDER` | 4px | Descender depth (g, y, comma) |
-| `INFO_CAP_OFFSET` | 3px | Cap height above x-height |
-| `INFO_LINE_STEP` | 26px | Rect-top spacing for 1u glyph gap |
+| `INFO_LINE_STEP` | 26px | Line spacing (1px gap between glyphs) |
+| `ICON_W` | 16px on emery, 12px on others | Icon box size (2 × UNIT) |
 
-Text is positioned using `draw_text_at_glyph_y()` which shifts each rect up by `INFO_TOP_PAD` so the visual glyph lands at the intended pixel.
+Approximate character widths for pixel budget estimation (Gothic 24 Bold, emery):
+digits ~14px, `h` ~12px, `m` ~17px, lowercase avg ~12px, space ~5px, colon ~7px.
 
 ---
 
-## Pending
+## Platform notes
 
-- Weather/solar JS fetch (port from Radium2 `src/pkjs/`)
-- `MESSAGE_KEY_SunriseMin` / `MESSAGE_KEY_SunsetMin` inbox handling (stub present)
-- Config page (Clay vs custom HTML)
-- Touch easter egg: per-digit squish using touch x/y coordinates
-- Prune legacy resource images from `resources/`
-- Delete dead source files: `digit.c`, `digit.h`, patch `.txt` files
+### Button mapping (emery)
+- **UP:** cycles background corner radius (16 → 24 → 32 → 16px)
+- **SELECT:** OS-reserved, cannot be intercepted by watchfaces
+- **DOWN:** no-op (subscribed to suppress default OS behavior)
+
+### Touch API (emery) — non-functional
+The emery (Pebble Time 2) SDK headers expose `touch_service_subscribe` / `touch_service_unsubscribe` and `TouchEvent`, suggesting touchscreen support. We implemented and tested a touch handler that was intended as a debug shortcut to cycle the corner radius.
+
+**Finding:** `touch_service_subscribe` compiled and ran without errors, but the touch handler was never called during any device testing. Touch events appear to be non-functional at the firmware level on shipping emery hardware — the API exists in the SDK but is not wired up. All `PBL_TOUCH` code has been removed from this project.
+
+This is consistent with the Pebble community's general understanding that the Time 2's touchscreen was not exposed to third-party apps before Pebble's shutdown.
+
+---
+
+## Weather & solar data
+
+Fetched by PebbleKit JS (`src/pkjs/index.js`) on watch connect and every 30 minutes thereafter, using the [Open-Meteo API](https://open-meteo.com/). Sends to watch:
+
+- `WeatherTempF` / `WeatherTempC` / `WeatherCode` — current conditions
+- `UvIndex` — current UV index (0 is a valid value; -1 sentinel used on watch before first receipt)
+- `SunriseTime` / `SunsetTime` — today's solar times
+- `SunriseTomorrow` — for overnight "time until sunrise" calculation
+
+Weather code mapping follows WMO standards (0 = clear, 1–3 = partly cloudy, 45–48 = fog, 51–69 / 80–82 = rain, 71–77 / 85–86 = snow, 95–99 = storm).
+
+---
+
+## Known issues / future work
+
+- Stacked `Light Remaining` text too wide with icon (~130px, budget ~75px) — shorten to `"%dh%02dm"` format
+- Legacy source files present but unused: `src/digit.c`, `src/digit.h`, patch `.txt` files — can be deleted
+- Legacy resource images in `resources/` — can be pruned
