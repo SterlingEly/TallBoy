@@ -24,7 +24,8 @@ var SLOT_NAMES_STACK = [
   { v: 16, n: 'Bluetooth' },
   { v: 21, n: '[ Debug ]' },
   { v: 22, n: 'UV Index' },
-  { v: 23, n: 'Light Remaining' }
+  { v: 23, n: 'Light Remaining' },
+  { v: 26, n: 'Daily Step Goal' }
 ];
 
 var SLOT_NAMES_WIDE = [
@@ -43,7 +44,8 @@ var SLOT_NAMES_WIDE = [
   { v: 22, n: 'UV Index' },
   { v: 23, n: 'Light Remaining' },
   { v: 24, n: 'UV & Light Remaining' },
-  { v: 25, n: 'Temp & UV Index' }
+  { v: 25, n: 'Temp & UV Index' },
+  { v: 26, n: 'Daily Step Goal' }
 ];
 
 function pblColorToCss(idx) {
@@ -111,6 +113,9 @@ function sendSettings(s) {
 
 // ============================================================
 // WEATHER + SOLAR
+// Fetches from Open-Meteo on connect and every 30 minutes.
+// Sends: WeatherTempF, WeatherTempC, WeatherCode, UvIndex,
+//        SunriseTime, SunsetTime, SunriseTomorrow
 // ============================================================
 function fetchWeather() {
   navigator.geolocation.getCurrentPosition(function(pos) {
