@@ -1,12 +1,14 @@
 // ============================================================
-// TallBoy — main.c  v3.59i
+// TallBoy — main.c  v3.59j
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.59i: 12px icons on low-res platforms, WEATHER_UV simplified
-//   - Emery: ICON_W=16 (2×UNIT), others: ICON_W=12 (2×UNIT)
-//   - All icons have large (16px) and small (12px) variants
-//   - ICON_LARGE = (ICON_W==16); draw_info_line uses ICON_W dynamically
-//   - SLOT_WEATHER_UV (25): "72F · UV 5" (temp + UV, conditions icon)
+// v3.59j: data caching philosophy — hide > mislead
+//   - s_uv_index: init -1 (sentinel), gated on >= 0 before display
+//   - s_weather_ts: timestamp of last weather receipt
+//   - Weather ages out after 3h: temp and UV reset to sentinel → slots hide
+//   - Sunrise/sunset NOT aged out (astronomical, stays valid all day)
+//   - SLOT_STEPS_EXP wide combo: return false if typical steps unavailable
+//   - SLOT_UV_LIGHT, SLOT_WEATHER_UV: also gated on s_uv_index >= 0
 // ============================================================
 
 #include <pebble.h>
@@ -156,6 +158,7 @@ static const int EASE[10] = { 4, 6, 8, 10, 12, 12, 10, 8, 6, 4 };
 #define STEPS_AVG_MAX_MIN 120
 #define DOT               " \xc2\xb7 "
 #define SHAKE1_TIMEOUT_MS 60000
+#define WEATHER_MAX_AGE   (3 * 3600)   // hide weather after 3 hours without update
 
 #define COLON_OFFSCREEN  (SCREEN_H)
 
@@ -233,8 +236,9 @@ static int        s_steps_expected = -1;
 static int        s_sunrise_min = -1, s_sunset_min = -1;
 static int        s_weather_temp_f = -999, s_weather_temp_c = -999;
 static int        s_weather_code = 0;
-static int        s_uv_index = 0;
+static int        s_uv_index = -1;          // -1 = never received; 0+ = valid
 static int        s_sunrise_tom_min = -1;
+static time_t     s_weather_ts = 0;         // unix time of last weather receipt; 0 = never
 static int        s_layout = LAYOUT_FULL;
 
 static InfoLine s_above_lines[INFO_LINES_MAX];
@@ -425,19 +429,17 @@ static void prv_update_health(void) {
 static void icon_footprint(GContext *ctx, int fx, int fy, GColor col, bool large) {
   graphics_context_set_fill_color(ctx, col);
   if (large) {
-    // 5x11 centered in 16x16
     graphics_fill_rect(ctx, GRect(fx,   fy,   5, 7), 2, GCornersAll);
     graphics_fill_rect(ctx, GRect(fx+1, fy+6, 3, 4), 1, GCornersAll);
   } else {
-    // 4x8 centered in 12x12
     graphics_fill_rect(ctx, GRect(fx,   fy,   4, 5), 2, GCornersAll);
     graphics_fill_rect(ctx, GRect(fx+1, fy+4, 2, 4), 1, GCornersAll);
   }
 }
 static void icon_steps(GContext *ctx, int ox, int oy, GColor col, bool large) {
   if (large) {
-    icon_footprint(ctx, ox+9, oy+1, col, true);   // right footprint
-    icon_footprint(ctx, ox+2, oy+4, col, true);   // left footprint
+    icon_footprint(ctx, ox+9, oy+1, col, true);
+    icon_footprint(ctx, ox+2, oy+4, col, true);
   } else {
     icon_footprint(ctx, ox+7, oy+1, col, false);
     icon_footprint(ctx, ox+1, oy+3, col, false);
@@ -447,7 +449,6 @@ static void icon_battery(GContext *ctx, int ox, int oy, GColor col, int pct, boo
   graphics_context_set_fill_color(ctx, col);
   if (s_charging) {
     if (large) {
-      // Lightning bolt in 16x16
       graphics_fill_rect(ctx, GRect(ox+7,oy+0,5,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+6,oy+1,5,1),0,GCornerNone);
       graphics_fill_rect(ctx, GRect(ox+5,oy+2,5,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+4,oy+3,5,1),0,GCornerNone);
       graphics_fill_rect(ctx, GRect(ox+3,oy+4,5,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+1,oy+5,11,2),0,GCornerNone);
@@ -455,7 +456,6 @@ static void icon_battery(GContext *ctx, int ox, int oy, GColor col, int pct, boo
       graphics_fill_rect(ctx, GRect(ox+3,oy+9,5,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+2,oy+10,5,1),0,GCornerNone);
       graphics_fill_rect(ctx, GRect(ox+1,oy+11,5,1),0,GCornerNone);
     } else {
-      // Lightning bolt in 12x12
       graphics_fill_rect(ctx, GRect(ox+5,oy+0,4,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+4,oy+1,4,1),0,GCornerNone);
       graphics_fill_rect(ctx, GRect(ox+3,oy+2,4,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+1,oy+3,8,2),0,GCornerNone);
       graphics_fill_rect(ctx, GRect(ox+3,oy+5,4,1),0,GCornerNone); graphics_fill_rect(ctx, GRect(ox+2,oy+6,4,1),0,GCornerNone);
@@ -464,13 +464,11 @@ static void icon_battery(GContext *ctx, int ox, int oy, GColor col, int pct, boo
   } else {
     graphics_context_set_stroke_color(ctx, col); graphics_context_set_stroke_width(ctx, 1);
     if (large) {
-      // Body 12x10 at (1,3) in 16x16
       graphics_draw_rect(ctx, GRect(ox+1,oy+3,12,10));
       graphics_fill_rect(ctx, GRect(ox+13,oy+6,2,4),0,GCornerNone);
       int fw = (10*pct)/100; if (fw<1&&pct>0) fw=1;
       if (fw>0) graphics_fill_rect(ctx, GRect(ox+2,oy+4,fw,8),0,GCornerNone);
     } else {
-      // Body 9x7 at (1,2) in 12x12
       graphics_draw_rect(ctx, GRect(ox+1,oy+2,9,7));
       graphics_fill_rect(ctx, GRect(ox+10,oy+4,2,3),0,GCornerNone);
       int fw = (7*pct)/100; if (fw<1&&pct>0) fw=1;
@@ -481,7 +479,6 @@ static void icon_battery(GContext *ctx, int ox, int oy, GColor col, int pct, boo
 static void icon_bt(GContext *ctx, int ox, int oy, GColor col, bool large) {
   graphics_context_set_stroke_color(ctx, col); graphics_context_set_stroke_width(ctx, 1);
   if (large) {
-    // BT in 16x16: spine at ox+5
     graphics_draw_line(ctx, GPoint(ox+5,oy+1),  GPoint(ox+5,oy+14));
     graphics_draw_pixel(ctx, GPoint(ox+4,oy+5)); graphics_draw_pixel(ctx, GPoint(ox+3,oy+4)); graphics_draw_pixel(ctx, GPoint(ox+2,oy+3));
     graphics_draw_pixel(ctx, GPoint(ox+4,oy+10)); graphics_draw_pixel(ctx, GPoint(ox+3,oy+11)); graphics_draw_pixel(ctx, GPoint(ox+2,oy+12));
@@ -490,7 +487,6 @@ static void icon_bt(GContext *ctx, int ox, int oy, GColor col, bool large) {
     graphics_draw_pixel(ctx, GPoint(ox+6,oy+9)); graphics_draw_pixel(ctx, GPoint(ox+7,oy+10)); graphics_draw_pixel(ctx, GPoint(ox+8,oy+11));
     graphics_draw_pixel(ctx, GPoint(ox+9,oy+12)); graphics_draw_pixel(ctx, GPoint(ox+8,oy+13)); graphics_draw_pixel(ctx, GPoint(ox+7,oy+14));
   } else {
-    // BT in 12x12: spine at ox+3
     graphics_draw_line(ctx, GPoint(ox+3,oy+0),  GPoint(ox+3,oy+10));
     graphics_draw_pixel(ctx, GPoint(ox+2,oy+3)); graphics_draw_pixel(ctx, GPoint(ox+1,oy+2));
     graphics_draw_pixel(ctx, GPoint(ox+2,oy+7)); graphics_draw_pixel(ctx, GPoint(ox+1,oy+8));
@@ -503,7 +499,6 @@ static void icon_bt(GContext *ctx, int ox, int oy, GColor col, bool large) {
 static void icon_heart(GContext *ctx, int ox, int oy, GColor col, bool large) {
   graphics_context_set_fill_color(ctx, col);
   if (large) {
-    // 14x11 heart centered in 16x16: offset (1,3)
     int y = oy + 3;
     graphics_fill_rect(ctx,GRect(ox+1,y+0,4,2),1,GCornersTop); graphics_fill_rect(ctx,GRect(ox+9,y+0,4,2),1,GCornersTop);
     graphics_fill_rect(ctx,GRect(ox+0,y+1,5,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+9,y+1,4,1),0,GCornerNone);
@@ -513,7 +508,6 @@ static void icon_heart(GContext *ctx, int ox, int oy, GColor col, bool large) {
     graphics_fill_rect(ctx,GRect(ox+4,y+7,5,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+5,y+8,3,1),0,GCornerNone);
     graphics_fill_rect(ctx,GRect(ox+6,y+9,1,1),0,GCornerNone);
   } else {
-    // 10x8 heart centered in 12x12: offset (1,2)
     int y = oy + 2;
     graphics_fill_rect(ctx,GRect(ox+1,y+0,3,2),1,GCornersTop); graphics_fill_rect(ctx,GRect(ox+7,y+0,3,2),1,GCornersTop);
     graphics_fill_rect(ctx,GRect(ox+0,y+1,4,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+7,y+1,3,1),0,GCornerNone);
@@ -525,13 +519,11 @@ static void icon_heart(GContext *ctx, int ox, int oy, GColor col, bool large) {
 static void icon_calories(GContext *ctx, int ox, int oy, GColor col, bool large) {
   graphics_context_set_fill_color(ctx, col);
   if (large) {
-    // Flame ~10x15 in 16x16: offset (3,1)
     graphics_fill_rect(ctx,GRect(ox+3,oy+10,10,5),2,GCornersBottom);
     graphics_fill_rect(ctx,GRect(ox+4,oy+6,8,5),0,GCornerNone);
     graphics_fill_rect(ctx,GRect(ox+5,oy+3,4,4),0,GCornerNone);
     graphics_fill_rect(ctx,GRect(ox+6,oy+1,2,3),0,GCornerNone);
   } else {
-    // Flame ~8x11 in 12x12: offset (2,1)
     graphics_fill_rect(ctx,GRect(ox+2,oy+7,8,4),2,GCornersBottom);
     graphics_fill_rect(ctx,GRect(ox+3,oy+4,6,4),0,GCornerNone);
     graphics_fill_rect(ctx,GRect(ox+4,oy+2,3,3),0,GCornerNone);
@@ -551,12 +543,10 @@ static void icon_sun(GContext *ctx, int ox, int oy, GColor col, bool large) {
 static void icon_cloud(GContext *ctx, int ox, int oy, GColor col, bool large) {
   graphics_context_set_fill_color(ctx, col);
   if (large) {
-    // Cloud in 16x16: body 14x7 at (1,5), bumps above
     graphics_fill_rect(ctx,GRect(ox+3,oy+4,5,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+4,oy+2,4,3),0,GCornerNone);
     graphics_fill_rect(ctx,GRect(ox+8,oy+3,5,2),0,GCornerNone);
     graphics_fill_rect(ctx,GRect(ox+1,oy+5,14,7),0,GCornerNone);
   } else {
-    // Cloud in 12x12: body 10x5 at (1,4), bumps above
     graphics_fill_rect(ctx,GRect(ox+2,oy+3,4,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+3,oy+2,3,2),0,GCornerNone);
     graphics_fill_rect(ctx,GRect(ox+6,oy+2,4,2),0,GCornerNone);
     graphics_fill_rect(ctx,GRect(ox+1,oy+4,10,5),0,GCornerNone);
@@ -565,14 +555,12 @@ static void icon_cloud(GContext *ctx, int ox, int oy, GColor col, bool large) {
 static void icon_partly_cloudy(GContext *ctx, int ox, int oy, GColor col, bool large) {
   graphics_context_set_stroke_color(ctx, col); graphics_context_set_stroke_width(ctx, 1);
   if (large) {
-    // Sun top-right at (11,4), cloud bottom-left in 16x16
     graphics_draw_circle(ctx, GPoint(ox+11,oy+4), 3);
     graphics_draw_pixel(ctx,GPoint(ox+11,oy+0)); graphics_draw_pixel(ctx,GPoint(ox+15,oy+4)); graphics_draw_pixel(ctx,GPoint(ox+11,oy+8));
     graphics_context_set_fill_color(ctx, col);
     graphics_fill_rect(ctx,GRect(ox+2,oy+6,4,1),0,GCornerNone); graphics_fill_rect(ctx,GRect(ox+6,oy+6,3,1),0,GCornerNone);
     graphics_fill_rect(ctx,GRect(ox+1,oy+7,10,6),0,GCornerNone);
   } else {
-    // Sun top-right at (8,3), cloud bottom-left in 12x12
     graphics_draw_circle(ctx, GPoint(ox+8,oy+3), 2);
     graphics_draw_pixel(ctx,GPoint(ox+8,oy+0)); graphics_draw_pixel(ctx,GPoint(ox+11,oy+3)); graphics_draw_pixel(ctx,GPoint(ox+8,oy+6));
     graphics_context_set_fill_color(ctx, col);
@@ -716,10 +704,8 @@ static void draw_stacked_pass(GContext *ctx, int h_tens, int h_ones, int m_tens,
 static void draw_info_line(GContext *ctx, InfoLine *line, int y,
                             int col_x, int col_w, GTextAlignment align) {
   GFont font = fonts_get_system_font(INFO_FONT_KEY);
-  // iy places icon top: vertically centered in INFO_LINE_H, adjusted per-platform
   int iy = y - INFO_TOP_PAD + (INFO_LINE_H - ICON_W) / 2 - ICON_V_ADJUST;
   GColor info_fg = s_fg;
-  // Icon width from ICON_W (16px on emery, 12px on others); uniform UNIT gap
   const int ICW = ICON_W;
   const int ICG = UNIT;
   if (line->has_icon || line->is_debug_sq) {
@@ -727,7 +713,6 @@ static void draw_info_line(GContext *ctx, InfoLine *line, int y,
       line->text, font, GRect(0,0,200,20), GTextOverflowModeFill, GTextAlignmentLeft);
     int block_w = ICW + ICG + sz.w;
     if (block_w > col_w) {
-      // Overflow: drop icon, show text only
       graphics_context_set_text_color(ctx, info_fg);
       graphics_draw_text(ctx, line->text, font, GRect(col_x, y-INFO_TOP_PAD, col_w, INFO_LINE_H),
         GTextOverflowModeTrailingEllipsis,
@@ -744,7 +729,6 @@ static void draw_info_line(GContext *ctx, InfoLine *line, int y,
       text_sx = col_x + ICW + ICG;
       text_w  = col_w - ICW - ICG;
     } else {
-      // Center: block centered in col_w, text left-aligned after icon
       int off = (col_w - block_w) / 2;
       if (off < 0) off = 0;
       icon_sx = col_x + off;
@@ -927,10 +911,10 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
     case SLOT_STEPS_EXP:
 #if defined(PBL_HEALTH)
       if (!wide) return false;
+      if (s_steps_expected<=0) return false;   // hide if typical steps unavailable
       { char sb[16], eb[16];
         prv_fmt_steps(sb,sizeof(sb),s_steps);
-        if (s_steps_expected>0) prv_fmt_steps(eb,sizeof(eb),s_steps_expected);
-        else snprintf(eb,sizeof(eb),"--");
+        prv_fmt_steps(eb,sizeof(eb),s_steps_expected);
         snprintf(buf,len,"%s steps"DOT"exp %s",sb,eb); }
       return true;
 #else
@@ -957,19 +941,19 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       }
       return true;
     case SLOT_UV:
+      if (s_uv_index < 0) return false;  // hide until first weather fetch
       { if (wide) snprintf(buf,len,"UV index %d",s_uv_index);
         else      snprintf(buf,len,"UV %d",s_uv_index); }
       return true;
     case SLOT_LIGHT_REM: {
+      if (s_sunrise_min < 0 || s_sunset_min < 0) return false;
       time_t now_ts = time(NULL); struct tm *tn = localtime(&now_ts);
       int now_min = tn->tm_hour * 60 + tn->tm_min;
       int rem = -1; bool is_day = false;
-      if (s_sunrise_min >= 0 && s_sunset_min >= 0) {
-        if (now_min < s_sunrise_min)     { rem = s_sunrise_min - now_min; }
-        else if (now_min < s_sunset_min) { rem = s_sunset_min - now_min; is_day = true; }
-        else if (s_sunrise_tom_min >= 0) { rem = (24*60 - now_min) + s_sunrise_tom_min; }
-        else                             { rem = (24*60 - now_min) + s_sunrise_min; }
-      }
+      if (now_min < s_sunrise_min)     { rem = s_sunrise_min - now_min; }
+      else if (now_min < s_sunset_min) { rem = s_sunset_min - now_min; is_day = true; }
+      else if (s_sunrise_tom_min >= 0) { rem = (24*60 - now_min) + s_sunrise_tom_min; }
+      else                             { rem = (24*60 - now_min) + s_sunrise_min; }
       if (rem < 0) return false;
       int rh = rem / 60, rm = rem % 60;
       if (wide) {
@@ -982,24 +966,24 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       return true; }
     case SLOT_UV_LIGHT: {
       if (!wide) return false;
+      if (s_uv_index < 0) return false;
+      if (s_sunrise_min < 0 || s_sunset_min < 0) return false;
       time_t now_ts = time(NULL); struct tm *tn = localtime(&now_ts);
       int now_min = tn->tm_hour * 60 + tn->tm_min;
       int rem = -1; bool is_day = false;
-      if (s_sunrise_min >= 0 && s_sunset_min >= 0) {
-        if (now_min < s_sunrise_min)     { rem = s_sunrise_min - now_min; }
-        else if (now_min < s_sunset_min) { rem = s_sunset_min - now_min; is_day = true; }
-        else if (s_sunrise_tom_min >= 0) { rem = (24*60 - now_min) + s_sunrise_tom_min; }
-        else                             { rem = (24*60 - now_min) + s_sunrise_min; }
-      }
-      if (rem < 0) { snprintf(buf,len,"UV index %d",s_uv_index); return true; }
+      if (now_min < s_sunrise_min)     { rem = s_sunrise_min - now_min; }
+      else if (now_min < s_sunset_min) { rem = s_sunset_min - now_min; is_day = true; }
+      else if (s_sunrise_tom_min >= 0) { rem = (24*60 - now_min) + s_sunrise_tom_min; }
+      else                             { rem = (24*60 - now_min) + s_sunrise_min; }
+      if (rem < 0) return false;
       int rh = rem / 60, rm2 = rem % 60;
       if (is_day) snprintf(buf,len,"UV %d"DOT"%dh %02dm light",s_uv_index,rh,rm2);
       else        snprintf(buf,len,"UV %d"DOT"%dh %02dm dark",s_uv_index,rh,rm2);
       return true; }
     case SLOT_WEATHER_UV: {
-      // Wide only: temp · UV index (conditions icon shows weather code)
       if (!wide) return false;
       if (s_weather_temp_f <= -900) return false;
+      if (s_uv_index < 0) return false;
       int t2 = s_cfg_temp_f ? s_weather_temp_f : s_weather_temp_c;
       char u = s_cfg_temp_f ? 'F' : 'C';
       snprintf(buf,len,"%d%c"DOT"UV %d",t2,u,s_uv_index);
@@ -1526,6 +1510,13 @@ static void tick_handler(struct tm *t, TimeUnits units) {
 #if defined(PBL_HEALTH)
   prv_update_health();
 #endif
+  // Age out weather data after 3 hours — hide slots rather than show stale data
+  // Sunrise/sunset stay valid all day (astronomical, not forecast)
+  if (s_weather_ts > 0 && (time(NULL) - s_weather_ts) > WEATHER_MAX_AGE) {
+    s_weather_temp_f = -999;
+    s_weather_temp_c = -999;
+    s_uv_index = -1;
+  }
 }
 static void battery_handler(BatteryChargeState state) {
   s_battery_pct=state.charge_percent; s_charging=state.is_charging; layer_mark_dirty(s_canvas_layer);
@@ -1535,7 +1526,7 @@ static void bt_handler(bool connected) {
 }
 static void inbox_received(DictionaryIterator *iter, void *context) {
   Tuple *t;
-  t = dict_find(iter, MESSAGE_KEY_WeatherTempF); if(t) s_weather_temp_f=(int)t->value->int32;
+  t = dict_find(iter, MESSAGE_KEY_WeatherTempF); if(t) { s_weather_temp_f=(int)t->value->int32; s_weather_ts = time(NULL); }
   t = dict_find(iter, MESSAGE_KEY_WeatherTempC); if(t) s_weather_temp_c=(int)t->value->int32;
   t = dict_find(iter, MESSAGE_KEY_WeatherCode);  if(t) s_weather_code=(int)t->value->int32;
   t = dict_find(iter, MESSAGE_KEY_SunriseTime);
@@ -1543,7 +1534,7 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
   t = dict_find(iter, MESSAGE_KEY_SunsetTime);
   if(t){time_t ts=(time_t)(uint32_t)t->value->uint32;struct tm*lt=localtime(&ts);if(lt)s_sunset_min=lt->tm_hour*60+lt->tm_min;}
   t = dict_find(iter, MESSAGE_KEY_UvIndex);
-  if(t) s_uv_index = (int)t->value->int32;
+  if(t) { s_uv_index = (int)t->value->int32; s_weather_ts = time(NULL); }
   t = dict_find(iter, MESSAGE_KEY_SunriseTomorrow);
   if(t){time_t ts=(time_t)(uint32_t)t->value->uint32;struct tm*lt=localtime(&ts);if(lt)s_sunrise_tom_min=lt->tm_hour*60+lt->tm_min;}
   t = dict_find(iter, MESSAGE_KEY_CfgInfoMode);
