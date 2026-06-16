@@ -1,14 +1,9 @@
 // ============================================================
-// TallBoy — main.c  v3.59j
+// TallBoy — main.c  v3.59k
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
-// v3.59j: data caching philosophy — hide > mislead
-//   - s_uv_index: init -1 (sentinel), gated on >= 0 before display
-//   - s_weather_ts: timestamp of last weather receipt
-//   - Weather ages out after 3h: temp and UV reset to sentinel → slots hide
-//   - Sunrise/sunset NOT aged out (astronomical, stays valid all day)
-//   - SLOT_STEPS_EXP wide combo: return false if typical steps unavailable
-//   - SLOT_UV_LIGHT, SLOT_WEATHER_UV: also gated on s_uv_index >= 0
+// v3.59j: data caching philosophy — hide > mislead; UV sentinel -1; 3h weather timeout
+// v3.59k: remove PBL_TOUCH code — non-functional on emery firmware (see README)
 // ============================================================
 
 #include <pebble.h>
@@ -158,14 +153,9 @@ static const int EASE[10] = { 4, 6, 8, 10, 12, 12, 10, 8, 6, 4 };
 #define STEPS_AVG_MAX_MIN 120
 #define DOT               " \xc2\xb7 "
 #define SHAKE1_TIMEOUT_MS 60000
-#define WEATHER_MAX_AGE   (3 * 3600)   // hide weather after 3 hours without update
+#define WEATHER_MAX_AGE   (3 * 3600)
 
 #define COLON_OFFSCREEN  (SCREEN_H)
-
-#if defined(PBL_TOUCH)
-static const uint32_t TOUCH_VIBE_MS[] = {50};
-static const VibePattern TOUCH_VIBE = { .durations = TOUCH_VIBE_MS, .num_segments = 1 };
-#endif
 
 #define QUICK_LOOK_ACTIVE(ub_h)  ((ub_h) < (SCREEN_H - UNIT))
 #define BOTTOM_MARGIN(ub_h)      (QUICK_LOOK_ACTIVE(ub_h) ? MARGIN_DIGIT : MARGIN_OUTER)
@@ -236,9 +226,9 @@ static int        s_steps_expected = -1;
 static int        s_sunrise_min = -1, s_sunset_min = -1;
 static int        s_weather_temp_f = -999, s_weather_temp_c = -999;
 static int        s_weather_code = 0;
-static int        s_uv_index = -1;          // -1 = never received; 0+ = valid
+static int        s_uv_index = -1;
 static int        s_sunrise_tom_min = -1;
-static time_t     s_weather_ts = 0;         // unix time of last weather receipt; 0 = never
+static time_t     s_weather_ts = 0;
 static int        s_layout = LAYOUT_FULL;
 
 static InfoLine s_above_lines[INFO_LINES_MAX];
@@ -911,7 +901,7 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
     case SLOT_STEPS_EXP:
 #if defined(PBL_HEALTH)
       if (!wide) return false;
-      if (s_steps_expected<=0) return false;   // hide if typical steps unavailable
+      if (s_steps_expected<=0) return false;
       { char sb[16], eb[16];
         prv_fmt_steps(sb,sizeof(sb),s_steps);
         prv_fmt_steps(eb,sizeof(eb),s_steps_expected);
@@ -941,7 +931,7 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       }
       return true;
     case SLOT_UV:
-      if (s_uv_index < 0) return false;  // hide until first weather fetch
+      if (s_uv_index < 0) return false;
       { if (wide) snprintf(buf,len,"UV index %d",s_uv_index);
         else      snprintf(buf,len,"UV %d",s_uv_index); }
       return true;
@@ -960,6 +950,7 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
         if (is_day) snprintf(buf,len,"%dh %02dm daylight left",rh,rm);
         else        snprintf(buf,len,"%dh %02dm til sunrise",rh,rm);
       } else {
+        // Note: stacked budget ~75px with icon; "%dh%02dm" fits, label text does not
         if (is_day) snprintf(buf,len,"%dh %02dm light",rh,rm);
         else        snprintf(buf,len,"%dh %02dm dark",rh,rm);
       }
@@ -1470,16 +1461,6 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   }
   layer_mark_dirty(s_canvas_layer);
 }
-#if defined(PBL_TOUCH)
-static void touch_handler(const TouchEvent *event, void *context) {
-  if (event->type != TouchEvent_Touchdown) return;
-  vibes_enqueue_custom_pattern(TOUCH_VIBE);
-#if defined(PBL_PLATFORM_EMERY)
-  s_radius_idx = (s_radius_idx + 1) % RADIUS_COUNT;
-  layer_mark_dirty(s_canvas_layer);
-#endif
-}
-#endif
 static void prv_noop_click(ClickRecognizerRef ref, void *ctx) { (void)ref; (void)ctx; }
 #if defined(PBL_PLATFORM_EMERY)
 static void prv_up_click(ClickRecognizerRef ref, void *ctx) {
@@ -1510,8 +1491,8 @@ static void tick_handler(struct tm *t, TimeUnits units) {
 #if defined(PBL_HEALTH)
   prv_update_health();
 #endif
-  // Age out weather data after 3 hours — hide slots rather than show stale data
-  // Sunrise/sunset stay valid all day (astronomical, not forecast)
+  // Age out weather/UV after 3 hours — hide rather than show stale data
+  // Sunrise/sunset are NOT aged out (astronomical, valid all day)
   if (s_weather_ts > 0 && (time(NULL) - s_weather_ts) > WEATHER_MAX_AGE) {
     s_weather_temp_f = -999;
     s_weather_temp_c = -999;
@@ -1579,18 +1560,12 @@ static void window_load(Window *window) {
   { UnobstructedAreaHandlers ua = { .change = unobstructed_change };
     unobstructed_area_service_subscribe(ua, NULL); }
   accel_tap_service_subscribe(accel_tap_handler);
-#if defined(PBL_TOUCH)
-  touch_service_subscribe(touch_handler, NULL);
-#endif
   s_phase = PHASE_DONE; s_overshot = false; s_ease_idx = 0;
   layer_mark_dirty(s_canvas_layer);
 }
 static void window_unload(Window *window) {
   unobstructed_area_service_unsubscribe();
   accel_tap_service_unsubscribe();
-#if defined(PBL_TOUCH)
-  touch_service_unsubscribe();
-#endif
   if (s_timer) { app_timer_cancel(s_timer); s_timer = NULL; }
   prv_cancel_shake1();
   layer_destroy(s_canvas_layer);
