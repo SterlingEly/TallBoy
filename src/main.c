@@ -1,5 +1,5 @@
 // ============================================================
-// TallBoy — main.c  v3.59m
+// TallBoy — main.c  v3.59n
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
 // v3.59j: data caching philosophy — hide > mislead; UV sentinel -1; 3h weather timeout
@@ -9,6 +9,7 @@
 //         SLOT_TYPICAL_DAY (26): full-day step goal
 // v3.59m: Weekly scope for typical steps (same-day-of-week, most granular);
 //         SLOT_CALORIES_TOT (27): resting+active; SLOT_SLEEP (28): sleep duration
+// v3.59n: fix wide mode digit freeze — apply pending time at blink bottom (not in SQUISH)
 // ============================================================
 
 #include <pebble.h>
@@ -1511,7 +1512,10 @@ static void timer_cb(void *data) {
     case PHASE_BLINK:
       if (s_going_down) {
         s_h -= BLINK_STEP; layer_mark_dirty(s_canvas_layer);
-        if (s_h<=H_MIN) { s_h=H_MIN; s_going_down=false; s_overshot=false; s_ease_idx=0; }
+        if (s_h<=H_MIN) { s_h=H_MIN; s_going_down=false; s_overshot=false; s_ease_idx=0;
+          // Wide mode (LAYOUT_INFO) uses fast blink instead of squish — apply pending digit
+          // swap here at the bottom of the blink, matching what PHASE_SQUISH does in full mode
+          if(s_digit_pending){s_hour=s_pending_hour;s_minute=s_pending_minute;s_digit_pending=false;} }
         schedule(ANIM_STEP_MS);
       } else {
         bool d = s_expand_no_overshoot ? prv_ease_expand_step_clean() : prv_ease_expand_step();
