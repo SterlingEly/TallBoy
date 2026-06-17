@@ -1,5 +1,5 @@
 // ============================================================
-// TallBoy — main.c  v3.59n
+// TallBoy — main.c  v3.59o
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
 // v3.59j: data caching philosophy — hide > mislead; UV sentinel -1; 3h weather timeout
@@ -10,6 +10,7 @@
 // v3.59m: Weekly scope for typical steps (same-day-of-week, most granular);
 //         SLOT_CALORIES_TOT (27): resting+active; SLOT_SLEEP (28): sleep duration
 // v3.59n: fix wide mode digit freeze — apply pending time at blink bottom (not in SQUISH)
+// v3.59o: stacked minute animation — STACK_L: Option A (symmetric), STACK_R: Option B (fold)
 // ============================================================
 
 #include <pebble.h>
@@ -224,6 +225,7 @@ static AppTimer  *s_timer = NULL;
 static AppTimer  *s_shake1_timer = NULL;
 static bool       s_digit_pending = false;
 static int        s_pending_hour = 0, s_pending_minute = 0;
+static int        s_stk_h_start = 0;  // digit height when stacked anim begins (for Option B drift)
 static int        s_battery_pct = 100;
 static bool       s_charging = false, s_bt_connected = true;
 #if defined(PBL_HEALTH)
@@ -1316,14 +1318,30 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     draw_digits_full(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy, 0, 0, ub_top, ub_bot, s_fg_hr, s_fg_mn);
 
   } else {
+    // Stacked layouts: digits on one side, info column on the other.
+    // s_h is the live digit height (animates during PHASE_BLINK, equals dh at rest).
     int dh = prv_compute_stacked_h(ub_h);
     int h_cy = ub_top + MARGIN_OUTER + dh / 2;
     int m_cy = ub_bot - bot_margin - dh / 2;
     int tens_x, ones_x, col_x, col_w; GTextAlignment info_align;
     prv_stacked_geom(s_layout, &tens_x, &ones_x, &col_x, &col_w, &info_align);
     prv_draw_stacked_info(ctx, tm_now, col_x, col_w, info_align, ub_top, ub_bot, ub_h);
-    draw_stacked_pass(ctx, h_tens, h_ones, m_tens, m_ones, dh, tens_x, ones_x, h_cy, m_cy, SHADOW_DX, SHADOW_DY, s_shadow_col, s_shadow_col);
-    draw_stacked_pass(ctx, h_tens, h_ones, m_tens, m_ones, dh, tens_x, ones_x, h_cy, m_cy, 0, 0, s_fg_hr, s_fg_mn);
+
+    // Stacked animation options (both use fast-blink timing, no overshoot):
+    // Option A (STACK_L): each pair squishes symmetrically around its own fixed center.
+    // Option B (STACK_R): "fold" — hours bottom edge pinned (center drifts DOWN as top
+    //   shrinks inward), minutes top edge pinned (center drifts UP as bottom shrinks inward).
+    //   The two pairs converge toward each other at minimum height, then spring apart.
+    //   drift = (h_start - h_current) / 2, derived purely from the existing s_h value.
+    int draw_h_cy = h_cy;
+    int draw_m_cy = m_cy;
+    if (s_phase == PHASE_BLINK && s_stk_h_start > 0 && s_layout == LAYOUT_STACK_R) {
+      int drift = (s_stk_h_start - s_h) / 2;
+      draw_h_cy = h_cy + drift;   // hours: bottom pinned, center drifts down as top folds in
+      draw_m_cy = m_cy - drift;   // minutes: top pinned, center drifts up as bottom folds in
+    }
+    draw_stacked_pass(ctx, h_tens, h_ones, m_tens, m_ones, s_h, tens_x, ones_x, draw_h_cy, draw_m_cy, SHADOW_DX, SHADOW_DY, s_shadow_col, s_shadow_col);
+    draw_stacked_pass(ctx, h_tens, h_ones, m_tens, m_ones, s_h, tens_x, ones_x, draw_h_cy, draw_m_cy, 0, 0, s_fg_hr, s_fg_mn);
   }
 }
 
@@ -1513,8 +1531,8 @@ static void timer_cb(void *data) {
       if (s_going_down) {
         s_h -= BLINK_STEP; layer_mark_dirty(s_canvas_layer);
         if (s_h<=H_MIN) { s_h=H_MIN; s_going_down=false; s_overshot=false; s_ease_idx=0;
-          // Wide mode (LAYOUT_INFO) uses fast blink instead of squish — apply pending digit
-          // swap here at the bottom of the blink, matching what PHASE_SQUISH does in full mode
+          // Digit swap at minimum height — applies to LAYOUT_INFO and both stacked layouts.
+          // LAYOUT_FULL uses PHASE_SQUISH for this; PHASE_BLINK is shared by the others.
           if(s_digit_pending){s_hour=s_pending_hour;s_minute=s_pending_minute;s_digit_pending=false;} }
         schedule(ANIM_STEP_MS);
       } else {
@@ -1610,11 +1628,25 @@ static void prv_click_config_provider(void *context) {
   window_single_click_subscribe(BUTTON_ID_DOWN,   prv_noop_click);
 }
 static void tick_handler(struct tm *t, TimeUnits units) {
-  bool animated = (s_layout == LAYOUT_FULL || s_layout == LAYOUT_INFO);
+  // All layouts now animate on minute change
+  bool animated = (s_layout == LAYOUT_FULL || s_layout == LAYOUT_INFO
+                   || s_layout == LAYOUT_STACK_L || s_layout == LAYOUT_STACK_R);
   if (s_phase == PHASE_DONE && animated) {
     s_pending_hour=t->tm_hour; s_pending_minute=t->tm_min; s_digit_pending=true;
     s_h_min=H_MIN;
     if (s_layout == LAYOUT_INFO) prv_start_fast_blink();
+    else if (s_layout == LAYOUT_STACK_L || s_layout == LAYOUT_STACK_R) {
+      // Stacked blink: s_h and s_target_h must be dh (per-pair height), not full-screen height.
+      // Store dh in s_stk_h_start for Option B drift calc, and set s_h/s_target_h so
+      // the blink animates correctly from dh → H_MIN → dh.
+      Layer *_root = window_get_root_layer(s_window);
+      GRect _ub = layer_get_unobstructed_bounds(_root);
+      int _dh = prv_compute_stacked_h(_ub.size.h);
+      s_stk_h_start = _dh;
+      s_h = _dh;
+      s_target_h = _dh;
+      prv_start_fast_blink();
+    }
     else { s_phase = PHASE_ANTICIPATE; schedule(ANTICIPATION_MS); }
   } else if (s_phase == PHASE_SQUISH) {
     s_pending_hour=t->tm_hour; s_pending_minute=t->tm_min; s_digit_pending=true;
