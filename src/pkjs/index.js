@@ -25,7 +25,9 @@ var SLOT_NAMES_STACK = [
   { v: 21, n: '[ Debug ]' },
   { v: 22, n: 'UV Index' },
   { v: 23, n: 'Light Remaining' },
-  { v: 26, n: 'Daily Step Goal' }
+  { v: 26, n: 'Daily Step Goal' },
+  { v: 27, n: 'Total Calories' },
+  { v: 28, n: 'Sleep' }
 ];
 
 var SLOT_NAMES_WIDE = [
@@ -45,7 +47,9 @@ var SLOT_NAMES_WIDE = [
   { v: 23, n: 'Light Remaining' },
   { v: 24, n: 'UV & Light Remaining' },
   { v: 25, n: 'Temp & UV Index' },
-  { v: 26, n: 'Daily Step Goal' }
+  { v: 26, n: 'Daily Step Goal' },
+  { v: 27, n: 'Active & Resting Calories' },
+  { v: 28, n: 'Sleep' }
 ];
 
 function pblColorToCss(idx) {
@@ -357,8 +361,6 @@ Pebble.addEventListener('showConfiguration', function() {
   try {
     var info = Pebble.getActiveWatchInfo();
     var p = info.platform;
-    // Color platforms: basalt (Pebble Time), chalk (Time Round), emery (Time 2)
-    // B&W platforms: aplite (OG/Steel), diorite (Pebble 2), flint (2 SE), gabbro
     isColor = (p === 'basalt' || p === 'chalk' || p === 'emery');
   } catch(e) {}
   Pebble.openURL('data:text/html,' + encodeURIComponent(buildConfigPage(loadSettings(), isColor)));
