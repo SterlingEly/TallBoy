@@ -1,5 +1,5 @@
 // ============================================================
-// TallBoy — main.c  v3.59o
+// TallBoy — main.c  v3.59p
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
 // v3.59j: data caching philosophy — hide > mislead; UV sentinel -1; 3h weather timeout
@@ -11,6 +11,7 @@
 //         SLOT_CALORIES_TOT (27): resting+active; SLOT_SLEEP (28): sleep duration
 // v3.59n: fix wide mode digit freeze — apply pending time at blink bottom (not in SQUISH)
 // v3.59o: stacked minute animation — STACK_L: Option A (symmetric), STACK_R: Option B (fold)
+// v3.59p: fix stacked full-height bug; fix blink travel (H_ABSOLUTE_MIN floor); naming pass
 // ============================================================
 
 #include <pebble.h>
@@ -42,8 +43,8 @@ typedef enum {
   SLOT_LIGHT_REM  = 23,
   SLOT_UV_LIGHT   = 24,
   SLOT_WEATHER_UV = 25,
-  SLOT_TYPICAL_DAY = 26,   // typical full-day step goal (midnight-to-midnight average)
-  SLOT_CALORIES_TOT = 27,  // resting + active calories (wide: both; stacked: total)
+  SLOT_TYPICAL_DAY = 26,   // typical full-day step total (midnight-to-midnight, same-day-of-week avg)
+  SLOT_CALORIES_TOT = 27,  // active + resting calories (wide: both; stacked: total)
   SLOT_SLEEP        = 28,  // sleep duration last night
 } SlotType;
 
@@ -225,15 +226,15 @@ static AppTimer  *s_timer = NULL;
 static AppTimer  *s_shake1_timer = NULL;
 static bool       s_digit_pending = false;
 static int        s_pending_hour = 0, s_pending_minute = 0;
-static int        s_stk_h_start = 0;  // digit height when stacked anim begins (for Option B drift)
+static int        s_stk_h_start = 0;  // digit height at start of stacked blink (Option B drift)
 static int        s_battery_pct = 100;
 static bool       s_charging = false, s_bt_connected = true;
 #if defined(PBL_HEALTH)
 static int        s_steps = 0, s_distance_m = 0, s_calories = 0, s_calories_resting = 0, s_heart_rate = 0;
 static bool       s_heart_rate_valid = false;
-static int        s_steps_expected = -1;   // typical steps at current time of day
-static int        s_steps_typical_day = -1; // typical full-day step total
-static int        s_sleep_seconds = -1;     // total sleep last night (seconds); -1 = unavailable
+static int        s_steps_expected = -1;    // typical steps at current time of day (same-day-of-week avg)
+static int        s_steps_typical_day = -1; // typical full-day step total (same-day-of-week avg)
+static int        s_sleep_seconds = -1;     // sleep since 6pm yesterday; -1 = unavailable
 #endif
 static int        s_sunrise_min = -1, s_sunset_min = -1;
 static int        s_weather_temp_f = -999, s_weather_temp_c = -999;
@@ -391,35 +392,29 @@ static void prv_update_health(void) {
   time_t today_start = time_start_of_today();
   time_t now_t = time(NULL);
 
-  // Actual steps today
   mask = health_service_metric_accessible(HealthMetricStepCount, today_start, now_t);
   s_steps = (mask & HealthServiceAccessibilityMaskAvailable)
     ? (int)health_service_sum_today(HealthMetricStepCount) : 0;
 
-  // Distance today
   mask = health_service_metric_accessible(HealthMetricWalkedDistanceMeters, today_start, now_t);
   s_distance_m = (mask & HealthServiceAccessibilityMaskAvailable)
     ? (int)health_service_sum_today(HealthMetricWalkedDistanceMeters) : 0;
 
-  // Active calories today
   mask = health_service_metric_accessible(HealthMetricActiveKCalories, today_start, now_t);
   s_calories = (mask & HealthServiceAccessibilityMaskAvailable)
     ? (int)health_service_sum_today(HealthMetricActiveKCalories) : 0;
 
-  // Resting calories (basal metabolic rate — total burn is resting + active)
   mask = health_service_metric_accessible(HealthMetricRestingKCalories, today_start, now_t);
   s_calories_resting = (mask & HealthServiceAccessibilityMaskAvailable)
     ? (int)health_service_sum_today(HealthMetricRestingKCalories) : 0;
 
-  // Heart rate (instantaneous)
   mask = health_service_metric_accessible(HealthMetricHeartRateBPM, today_start, now_t);
   if (mask & HealthServiceAccessibilityMaskAvailable) {
     int bpm = (int)health_service_peek_current_value(HealthMetricHeartRateBPM);
     if (bpm > 0) { s_heart_rate = bpm; s_heart_rate_valid = true; }
   }
 
-  // Typical steps at current time of day — same day-of-week across up to 4 past weeks
-  // HealthServiceTimeScopeWeekly is most granular: "typical Tuesday by 10am"
+  // Typical steps at current time of day (same-day-of-week, up to 4 past weeks)
   mask = health_service_metric_averaged_accessible(HealthMetricStepCount, today_start, now_t,
                                                     HealthServiceTimeScopeWeekly);
   s_steps_expected = (mask & HealthServiceAccessibilityMaskAvailable)
@@ -427,7 +422,7 @@ static void prv_update_health(void) {
                                         HealthServiceTimeScopeWeekly)
     : -1;
 
-  // Typical full-day step goal — same day-of-week, midnight to midnight
+  // Typical full-day step total (same-day-of-week, midnight to midnight)
   time_t tomorrow_start = today_start + SECONDS_PER_DAY;
   mask = health_service_metric_averaged_accessible(HealthMetricStepCount, today_start, tomorrow_start,
                                                     HealthServiceTimeScopeWeekly);
@@ -436,9 +431,8 @@ static void prv_update_health(void) {
                                         HealthServiceTimeScopeWeekly)
     : -1;
 
-  // Sleep last night: query from 6pm yesterday to now
-  // Wide window ensures we catch all sleep even for late sleepers / naps
-  time_t sleep_start = today_start - (6 * SECONDS_PER_HOUR);  // 6pm yesterday
+  // Sleep last night: 6pm yesterday to now (wide window catches late sleepers)
+  time_t sleep_start = today_start - (6 * SECONDS_PER_HOUR);
   mask = health_service_metric_accessible(HealthMetricSleepSeconds, sleep_start, now_t);
   s_sleep_seconds = (mask & HealthServiceAccessibilityMaskAvailable)
     ? (int)health_service_sum(HealthMetricSleepSeconds, sleep_start, now_t)
@@ -891,7 +885,8 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
 
     case SLOT_EXP_STEPS:
 #if defined(PBL_HEALTH)
-      if (s_steps_expected>0) { char eb[16]; prv_fmt_steps(eb,sizeof(eb),s_steps_expected); snprintf(buf,len,"exp %s",eb); return true; }
+      // Typical steps at current time of day (same-day-of-week SDK average)
+      if (s_steps_expected>0) { char eb[16]; prv_fmt_steps(eb,sizeof(eb),s_steps_expected); snprintf(buf,len,"typ %s",eb); return true; }
       return false;
 #else
       return false;
@@ -901,7 +896,7 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
 #if defined(PBL_HEALTH)
       if (s_steps_expected>0) {
         if (wide) { char eb[16]; prv_fmt_steps(eb,sizeof(eb),s_steps_expected);
-          snprintf(buf,len,"exp %s"DOT"%d%%",eb,(s_steps*100)/s_steps_expected); }
+          snprintf(buf,len,"typ %s"DOT"%d%%",eb,(s_steps*100)/s_steps_expected); }
         else snprintf(buf,len,"%d%%",(s_steps*100)/s_steps_expected);
         return true;
       }
@@ -976,7 +971,7 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       { char sb[16], eb[16];
         prv_fmt_steps(sb,sizeof(sb),s_steps);
         prv_fmt_steps(eb,sizeof(eb),s_steps_expected);
-        snprintf(buf,len,"%s steps"DOT"exp %s",sb,eb); }
+        snprintf(buf,len,"%s steps"DOT"typ %s",sb,eb); }
       return true;
 #else
       return false;
@@ -987,7 +982,7 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       if (!wide) return false;
       if (s_steps_expected<=0) return false;
       { char eb[16]; prv_fmt_steps(eb,sizeof(eb),s_steps_expected);
-        snprintf(buf,len,"exp %s"DOT"%d%%",eb,(s_steps*100)/s_steps_expected); }
+        snprintf(buf,len,"typ %s"DOT"%d%%",eb,(s_steps*100)/s_steps_expected); }
       return true;
 #else
       return false;
@@ -1058,11 +1053,11 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
 
     case SLOT_TYPICAL_DAY:
 #if defined(PBL_HEALTH)
-      // Full-day step goal — same day-of-week average (HealthServiceTimeScopeWeekly)
+      // Typical full-day step total — same day-of-week average (HealthServiceTimeScopeWeekly)
       if (s_steps_typical_day <= 0) return false;
       { char gb[16]; prv_fmt_steps(gb, sizeof(gb), s_steps_typical_day);
-        if (wide) snprintf(buf,len,"goal %s steps",gb);
-        else      snprintf(buf,len,"goal %s",gb); }
+        if (wide) snprintf(buf,len,"typical %s steps",gb);
+        else      snprintf(buf,len,"typ %s",gb); }
       return true;
 #else
       return false;
@@ -1070,13 +1065,13 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
 
     case SLOT_CALORIES_TOT:
 #if defined(PBL_HEALTH)
-      // Total calories = active + resting (BMR). Resting is typically 4-5x active.
-      // Wide: show both components; stacked: show total only
+      // Active + resting (BMR) calories. Resting is typically 4-5x active.
+      // Wide: show both; stacked: show total
       { int total = s_calories + s_calories_resting;
         if (total <= 0) return false;
         if (wide) {
           if (s_calories_resting > 0)
-            snprintf(buf,len,"%d cal"DOT"%d rest",s_calories,s_calories_resting);
+            snprintf(buf,len,"%d active"DOT"%d resting",s_calories,s_calories_resting);
           else
             snprintf(buf,len,"%d cal",total);
         } else {
@@ -1319,7 +1314,17 @@ static void draw_layer(Layer *layer, GContext *ctx) {
 
   } else {
     // Stacked layouts: digits on one side, info column on the other.
-    // s_h is the live digit height (animates during PHASE_BLINK, equals dh at rest).
+    //
+    // s_h is meaningful only during PHASE_BLINK (the stacked minute animation).
+    // At rest, s_h may equal the full-screen height (set by prv_update_targets for stacked
+    // layouts), so we always use dh for at-rest drawing and s_h only while animating.
+    //
+    // Stacked animation options (both use fast-blink timing, no overshoot):
+    // STACK_L — Option A: each pair squishes symmetrically around its own fixed center.
+    // STACK_R — Option B: "fold" toward screen center —
+    //   hours: top folds inward, bottom edge pinned → center drifts DOWN by drift/2
+    //   minutes: bottom folds inward, top edge pinned → center drifts UP by drift/2
+    //   drift = (h_start - h_current) / 2
     int dh = prv_compute_stacked_h(ub_h);
     int h_cy = ub_top + MARGIN_OUTER + dh / 2;
     int m_cy = ub_bot - bot_margin - dh / 2;
@@ -1327,21 +1332,17 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     prv_stacked_geom(s_layout, &tens_x, &ones_x, &col_x, &col_w, &info_align);
     prv_draw_stacked_info(ctx, tm_now, col_x, col_w, info_align, ub_top, ub_bot, ub_h);
 
-    // Stacked animation options (both use fast-blink timing, no overshoot):
-    // Option A (STACK_L): each pair squishes symmetrically around its own fixed center.
-    // Option B (STACK_R): "fold" — hours bottom edge pinned (center drifts DOWN as top
-    //   shrinks inward), minutes top edge pinned (center drifts UP as bottom shrinks inward).
-    //   The two pairs converge toward each other at minimum height, then spring apart.
-    //   drift = (h_start - h_current) / 2, derived purely from the existing s_h value.
+    bool stk_animating = (s_phase == PHASE_BLINK);
+    int draw_h   = stk_animating ? s_h : dh;
     int draw_h_cy = h_cy;
     int draw_m_cy = m_cy;
-    if (s_phase == PHASE_BLINK && s_stk_h_start > 0 && s_layout == LAYOUT_STACK_R) {
+    if (stk_animating && s_stk_h_start > 0 && s_layout == LAYOUT_STACK_R) {
       int drift = (s_stk_h_start - s_h) / 2;
-      draw_h_cy = h_cy + drift;   // hours: bottom pinned, center drifts down as top folds in
-      draw_m_cy = m_cy - drift;   // minutes: top pinned, center drifts up as bottom folds in
+      draw_h_cy = h_cy + drift;   // hours: top folds inward, center drifts down
+      draw_m_cy = m_cy - drift;   // minutes: bottom folds inward, center drifts up
     }
-    draw_stacked_pass(ctx, h_tens, h_ones, m_tens, m_ones, s_h, tens_x, ones_x, draw_h_cy, draw_m_cy, SHADOW_DX, SHADOW_DY, s_shadow_col, s_shadow_col);
-    draw_stacked_pass(ctx, h_tens, h_ones, m_tens, m_ones, s_h, tens_x, ones_x, draw_h_cy, draw_m_cy, 0, 0, s_fg_hr, s_fg_mn);
+    draw_stacked_pass(ctx, h_tens, h_ones, m_tens, m_ones, draw_h, tens_x, ones_x, draw_h_cy, draw_m_cy, SHADOW_DX, SHADOW_DY, s_shadow_col, s_shadow_col);
+    draw_stacked_pass(ctx, h_tens, h_ones, m_tens, m_ones, draw_h, tens_x, ones_x, draw_h_cy, draw_m_cy, 0, 0, s_fg_hr, s_fg_mn);
   }
 }
 
@@ -1530,9 +1531,8 @@ static void timer_cb(void *data) {
     case PHASE_BLINK:
       if (s_going_down) {
         s_h -= BLINK_STEP; layer_mark_dirty(s_canvas_layer);
-        if (s_h<=H_MIN) { s_h=H_MIN; s_going_down=false; s_overshot=false; s_ease_idx=0;
-          // Digit swap at minimum height — applies to LAYOUT_INFO and both stacked layouts.
-          // LAYOUT_FULL uses PHASE_SQUISH for this; PHASE_BLINK is shared by the others.
+        if (s_h<=s_h_min) { s_h=s_h_min; s_going_down=false; s_overshot=false; s_ease_idx=0;
+          // Digit swap at minimum — applies to LAYOUT_INFO and both stacked layouts.
           if(s_digit_pending){s_hour=s_pending_hour;s_minute=s_pending_minute;s_digit_pending=false;} }
         schedule(ANIM_STEP_MS);
       } else {
@@ -1588,7 +1588,17 @@ static void timer_cb(void *data) {
 // ============================================================
 static void unobstructed_change(AnimationProgress progress, void *ctx) {
   prv_update_targets();
-  if (s_phase == PHASE_DONE) { s_h = s_target_h; layer_mark_dirty(s_canvas_layer); }
+  if (s_phase == PHASE_DONE) {
+    if (s_layout == LAYOUT_STACK_L || s_layout == LAYOUT_STACK_R) {
+      // For stacked, s_target_h is full-screen height; reset s_h to per-pair dh instead
+      GRect ub2 = layer_get_unobstructed_bounds(window_get_root_layer(s_window));
+      s_h = prv_compute_stacked_h(ub2.size.h);
+      s_target_h = s_h;
+    } else {
+      s_h = s_target_h;
+    }
+    layer_mark_dirty(s_canvas_layer);
+  }
 }
 static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   if (s_phase != PHASE_DONE) return;
@@ -1634,20 +1644,23 @@ static void tick_handler(struct tm *t, TimeUnits units) {
   if (s_phase == PHASE_DONE && animated) {
     s_pending_hour=t->tm_hour; s_pending_minute=t->tm_min; s_digit_pending=true;
     s_h_min=H_MIN;
-    if (s_layout == LAYOUT_INFO) prv_start_fast_blink();
-    else if (s_layout == LAYOUT_STACK_L || s_layout == LAYOUT_STACK_R) {
-      // Stacked blink: s_h and s_target_h must be dh (per-pair height), not full-screen height.
-      // Store dh in s_stk_h_start for Option B drift calc, and set s_h/s_target_h so
-      // the blink animates correctly from dh → H_MIN → dh.
+    if (s_layout == LAYOUT_INFO) {
+      prv_start_fast_blink();
+    } else if (s_layout == LAYOUT_STACK_L || s_layout == LAYOUT_STACK_R) {
+      // Stacked blink: set s_h and s_target_h to per-pair height dh so the blink
+      // animates dh → H_ABSOLUTE_MIN → dh (not full-screen height → H_ABSOLUTE_MIN).
+      // H_ABSOLUTE_MIN gives enough travel for a visible animation on small stacked digits.
       Layer *_root = window_get_root_layer(s_window);
       GRect _ub = layer_get_unobstructed_bounds(_root);
       int _dh = prv_compute_stacked_h(_ub.size.h);
       s_stk_h_start = _dh;
       s_h = _dh;
       s_target_h = _dh;
+      s_h_min = H_ABSOLUTE_MIN;  // deeper floor → more visible animation on small digits
       prv_start_fast_blink();
+    } else {
+      s_phase = PHASE_ANTICIPATE; schedule(ANTICIPATION_MS);
     }
-    else { s_phase = PHASE_ANTICIPATE; schedule(ANTICIPATION_MS); }
   } else if (s_phase == PHASE_SQUISH) {
     s_pending_hour=t->tm_hour; s_pending_minute=t->tm_min; s_digit_pending=true;
   } else { s_hour=t->tm_hour; s_minute=t->tm_min; layer_mark_dirty(s_canvas_layer); }
