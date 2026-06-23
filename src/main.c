@@ -1,5 +1,5 @@
 // ============================================================
-// TallBoy — main.c  v3.59r
+// TallBoy — main.c  v3.59s
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
 // v3.59j: data caching philosophy — hide > mislead; UV sentinel -1; 3h weather timeout
@@ -14,6 +14,7 @@
 // v3.59p: fix stacked full-height bug; fix blink travel (H_ABSOLUTE_MIN floor); naming pass
 // v3.59q: wide mode empty slots collapse — digit height computed from actual rendered count
 // v3.59r: sun icon rays doubled to stroke_width 2 for better visibility
+// v3.59s: remove UP button radius debug feature
 // ============================================================
 
 #include <pebble.h>
@@ -90,9 +91,6 @@ typedef enum {
   #define UNIT                 8
   #define ICON_W              16
   #define ICON_V_ADJUST       -3
-  static const uint16_t s_radius_opts[] = { UNIT*2, UNIT*3, UNIT*4 };
-  #define RADIUS_COUNT 3
-  static int s_radius_idx = 0;
 #else
   #define SCREEN_W           144
   #define SCREEN_H           168
@@ -1251,13 +1249,8 @@ static void draw_layer(Layer *layer, GContext *ctx) {
 
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
-#if defined(PBL_PLATFORM_EMERY)
-  graphics_context_set_fill_color(ctx, bg);
-  graphics_fill_rect(ctx, bounds, s_radius_opts[s_radius_idx], GCornersAll);
-#else
   graphics_context_set_fill_color(ctx, bg);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
-#endif
 
   int hr_disp = s_hour;
   if (!clock_is_24h_style()) { hr_disp = s_hour % 12; if (!hr_disp) hr_disp = 12; }
@@ -1652,19 +1645,8 @@ static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   layer_mark_dirty(s_canvas_layer);
 }
 static void prv_noop_click(ClickRecognizerRef ref, void *ctx) { (void)ref; (void)ctx; }
-#if defined(PBL_PLATFORM_EMERY)
-static void prv_up_click(ClickRecognizerRef ref, void *ctx) {
-  (void)ref; (void)ctx;
-  s_radius_idx = (s_radius_idx + 1) % RADIUS_COUNT;
-  layer_mark_dirty(s_canvas_layer);
-}
-#endif
 static void prv_click_config_provider(void *context) {
-#if defined(PBL_PLATFORM_EMERY)
-  window_single_click_subscribe(BUTTON_ID_UP, prv_up_click);
-#else
-  window_single_click_subscribe(BUTTON_ID_UP, prv_noop_click);
-#endif
+  window_single_click_subscribe(BUTTON_ID_UP,     prv_noop_click);
   window_single_click_subscribe(BUTTON_ID_SELECT, prv_noop_click);
   window_single_click_subscribe(BUTTON_ID_DOWN,   prv_noop_click);
 }
