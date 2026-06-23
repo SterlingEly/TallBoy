@@ -1,5 +1,5 @@
 // ============================================================
-// TallBoy — main.c  v3.59p
+// TallBoy — main.c  v3.59q
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
 // v3.59j: data caching philosophy — hide > mislead; UV sentinel -1; 3h weather timeout
@@ -12,6 +12,7 @@
 // v3.59n: fix wide mode digit freeze — apply pending time at blink bottom (not in SQUISH)
 // v3.59o: stacked minute animation — STACK_L: Option A (symmetric), STACK_R: Option B (fold)
 // v3.59p: fix stacked full-height bug; fix blink travel (H_ABSOLUTE_MIN floor); naming pass
+// v3.59q: wide mode empty slots collapse — digit height computed from actual rendered count
 // ============================================================
 
 #include <pebble.h>
@@ -1144,6 +1145,9 @@ static int build_lines(InfoLine *lines, int max, int *slots, int n_slots, struct
 static int prv_info_block_h(int n, int step) { return n <= 0 ? 0 : INFO_GLYPH_H + (n-1) * step; }
 
 static int prv_compute_target_h(int ub_h, int layout) {
+  // For wide layout, uses configured slot count as a conservative estimate.
+  // draw_layer refines this live using actual rendered count (slots that hide due
+  // to missing data collapse, giving digits more space automatically).
   if (layout != LAYOUT_INFO) return ub_h - MARGIN_OUTER - BOTTOM_MARGIN(ub_h);
   int n_above = 0, n_below = 0;
   for (int i = 0; i < 3; i++) if (s_cfg_wide[i] != SLOT_EMPTY) n_above++;
@@ -1296,6 +1300,21 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     for (int i = 0; i < 3; i++) below_s[i] = s_cfg_wide[3+i];
     int an = build_lines(s_above_lines, 3, above_s, 3, tm_now, true);
     int bn = build_lines(s_below_lines, 3, below_s, 3, tm_now, true);
+
+    // Compute digit height from actual rendered counts, not configured counts.
+    // Slots that hide (no data available) collapse to nothing — digits expand to fill.
+    // s_target_h uses configured counts as a conservative init; we refine it here live.
+    int reserved = HALF_UNIT + prv_info_block_h(an, INFO_LINE_STEP_WIDE) + HALF_UNIT
+                 + HALF_UNIT + WIDE_BELOW_EXTRA
+                 + prv_info_block_h(bn, INFO_LINE_STEP_WIDE) + HALF_UNIT;
+    int actual_h = ub_h - reserved;
+    if (actual_h < H_MIN) actual_h = H_MIN;
+    // Sync s_h and s_target_h when at rest so blink animation targets the right height
+    if (s_phase == PHASE_DONE && actual_h != s_target_h) {
+      s_target_h = actual_h; s_h = actual_h;
+    }
+    int draw_h    = (s_phase == PHASE_BLINK) ? s_h : actual_h;
+
     int above_start = ub_top + HALF_UNIT;
     int above_end   = above_start + prv_info_block_h(an, INFO_LINE_STEP_WIDE);
     int below_end   = ub_bot - HALF_UNIT;
@@ -1309,8 +1328,8 @@ static void draw_layer(Layer *layer, GContext *ctx) {
       int gy = below_top + i * INFO_LINE_STEP_WIDE;
       draw_info_line(ctx, &s_below_lines[i], gy + slide, col_x, col_w, GTextAlignmentCenter);
     }
-    draw_digits_full(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy, SHADOW_DX, SHADOW_DY, ub_top, ub_bot, s_shadow_col, s_shadow_col);
-    draw_digits_full(ctx, h_tens, h_ones, m_tens, m_ones, s_h, time_cy, 0, 0, ub_top, ub_bot, s_fg_hr, s_fg_mn);
+    draw_digits_full(ctx, h_tens, h_ones, m_tens, m_ones, draw_h, time_cy, SHADOW_DX, SHADOW_DY, ub_top, ub_bot, s_shadow_col, s_shadow_col);
+    draw_digits_full(ctx, h_tens, h_ones, m_tens, m_ones, draw_h, time_cy, 0, 0, ub_top, ub_bot, s_fg_hr, s_fg_mn);
 
   } else {
     // Stacked layouts: digits on one side, info column on the other.
