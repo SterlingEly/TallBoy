@@ -1,5 +1,5 @@
 // ============================================================
-// TallBoy — main.c  v3.59q
+// TallBoy — main.c  v3.59r
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
 // v3.59j: data caching philosophy — hide > mislead; UV sentinel -1; 3h weather timeout
@@ -13,6 +13,7 @@
 // v3.59o: stacked minute animation — STACK_L: Option A (symmetric), STACK_R: Option B (fold)
 // v3.59p: fix stacked full-height bug; fix blink travel (H_ABSOLUTE_MIN floor); naming pass
 // v3.59q: wide mode empty slots collapse — digit height computed from actual rendered count
+// v3.59r: sun icon rays doubled to stroke_width 2 for better visibility
 // ============================================================
 
 #include <pebble.h>
@@ -553,26 +554,37 @@ static void icon_calories(GContext *ctx, int ox, int oy, GColor col, bool large)
   }
 }
 static void icon_sun(GContext *ctx, int ox, int oy, GColor col, bool large) {
-  graphics_context_set_stroke_color(ctx, col); graphics_context_set_stroke_width(ctx, 1);
   int sz  = large ? 16 : 12;
   int icx = ox + sz/2, icy = oy + sz/2;
   int cr  = large ? 3 : 2;
+  // Thick circle: two concentric rings at width 1
+  graphics_context_set_stroke_color(ctx, col); graphics_context_set_stroke_width(ctx, 1);
   graphics_draw_circle(ctx, GPoint(icx,icy), cr);
   graphics_draw_circle(ctx, GPoint(icx,icy), cr + 1);
-  graphics_draw_pixel(ctx,GPoint(icx,oy));      graphics_draw_pixel(ctx,GPoint(icx,oy+1));
-  graphics_draw_pixel(ctx,GPoint(icx,oy+sz-1)); graphics_draw_pixel(ctx,GPoint(icx,oy+sz-2));
-  graphics_draw_pixel(ctx,GPoint(ox,icy));       graphics_draw_pixel(ctx,GPoint(ox+1,icy));
-  graphics_draw_pixel(ctx,GPoint(ox+sz-1,icy));  graphics_draw_pixel(ctx,GPoint(ox+sz-2,icy));
+  // Rays: stroke_width 2 so they read clearly at small icon size
+  graphics_context_set_stroke_width(ctx, 2);
   if (large) {
-    graphics_draw_pixel(ctx,GPoint(ox+2, oy+2));  graphics_draw_pixel(ctx,GPoint(ox+3, oy+3));
-    graphics_draw_pixel(ctx,GPoint(ox+13,oy+2));  graphics_draw_pixel(ctx,GPoint(ox+12,oy+3));
-    graphics_draw_pixel(ctx,GPoint(ox+2, oy+13)); graphics_draw_pixel(ctx,GPoint(ox+3, oy+12));
-    graphics_draw_pixel(ctx,GPoint(ox+13,oy+13)); graphics_draw_pixel(ctx,GPoint(ox+12,oy+12));
+    // Cardinal rays: 2px outward from circle edge
+    graphics_draw_line(ctx, GPoint(icx, oy),      GPoint(icx, oy+1));      // top
+    graphics_draw_line(ctx, GPoint(icx, oy+sz-2), GPoint(icx, oy+sz-1));   // bottom
+    graphics_draw_line(ctx, GPoint(ox,      icy),  GPoint(ox+1,    icy));   // left
+    graphics_draw_line(ctx, GPoint(ox+sz-2, icy),  GPoint(ox+sz-1, icy));   // right
+    // Diagonal rays: 2px lines at 45 degrees from corners inward
+    graphics_draw_line(ctx, GPoint(ox+2, oy+2),   GPoint(ox+3, oy+3));      // top-left
+    graphics_draw_line(ctx, GPoint(ox+12,oy+2),   GPoint(ox+13,oy+3));      // top-right
+    graphics_draw_line(ctx, GPoint(ox+2, oy+12),  GPoint(ox+3, oy+13));     // bottom-left
+    graphics_draw_line(ctx, GPoint(ox+12,oy+12),  GPoint(ox+13,oy+13));     // bottom-right
   } else {
-    graphics_draw_pixel(ctx,GPoint(ox+1, oy+1)); graphics_draw_pixel(ctx,GPoint(ox+2, oy+2));
-    graphics_draw_pixel(ctx,GPoint(ox+10,oy+1)); graphics_draw_pixel(ctx,GPoint(ox+9, oy+2));
-    graphics_draw_pixel(ctx,GPoint(ox+1, oy+10)); graphics_draw_pixel(ctx,GPoint(ox+2, oy+9));
-    graphics_draw_pixel(ctx,GPoint(ox+10,oy+10)); graphics_draw_pixel(ctx,GPoint(ox+9, oy+9));
+    // Cardinal rays
+    graphics_draw_line(ctx, GPoint(icx, oy),      GPoint(icx, oy+1));
+    graphics_draw_line(ctx, GPoint(icx, oy+sz-2), GPoint(icx, oy+sz-1));
+    graphics_draw_line(ctx, GPoint(ox,      icy),  GPoint(ox+1,    icy));
+    graphics_draw_line(ctx, GPoint(ox+sz-2, icy),  GPoint(ox+sz-1, icy));
+    // Diagonal rays
+    graphics_draw_line(ctx, GPoint(ox+1, oy+1),  GPoint(ox+2, oy+2));
+    graphics_draw_line(ctx, GPoint(ox+9, oy+1),  GPoint(ox+10,oy+2));
+    graphics_draw_line(ctx, GPoint(ox+1, oy+9),  GPoint(ox+2, oy+10));
+    graphics_draw_line(ctx, GPoint(ox+9, oy+9),  GPoint(ox+10,oy+10));
   }
 }
 static void icon_cloud(GContext *ctx, int ox, int oy, GColor col, bool large) {
