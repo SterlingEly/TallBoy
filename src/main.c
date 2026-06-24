@@ -1,5 +1,5 @@
 // ============================================================
-// TallBoy — main.c  v3.59s
+// TallBoy — main.c  v3.59t
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
 // v3.59j: data caching philosophy — hide > mislead; UV sentinel -1; 3h weather timeout
@@ -15,6 +15,7 @@
 // v3.59q: wide mode empty slots collapse — digit height computed from actual rendered count
 // v3.59r: sun icon rays doubled to stroke_width 2 for better visibility
 // v3.59s: remove UP button radius debug feature
+// v3.59t: restore rounded rect background (fixed radius UNIT*3)
 // ============================================================
 
 #include <pebble.h>
@@ -1247,10 +1248,11 @@ static void draw_layer(Layer *layer, GContext *ctx) {
   s_shadow_col = s_cfg_invert ? GColorWhite : GColorBlack;
 #endif
 
+  // Black base fills the whole layer; rounded rect clips the colored background
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
   graphics_context_set_fill_color(ctx, bg);
-  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+  graphics_fill_rect(ctx, bounds, UNIT * 3, GCornersAll);
 
   int hr_disp = s_hour;
   if (!clock_is_24h_style()) { hr_disp = s_hour % 12; if (!hr_disp) hr_disp = 12; }
