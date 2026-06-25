@@ -1,5 +1,5 @@
 // ============================================================
-// TallBoy — main.c  v3.60
+// TallBoy — main.c  v3.61
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
 // v3.59j: data caching philosophy — hide > mislead; UV sentinel -1; 3h weather timeout
@@ -18,6 +18,8 @@
 // v3.59t: restore rounded rect background (fixed radius UNIT*3)
 // v3.59u: background radius corrected to UNIT*2 (matches digit stroke weight)
 // v3.60: round platform support (chalk+gabbro, full mode only); faster wide blink (BLINK_STEP 6→8)
+// v3.61: round per-column heights — outer digits shorter to follow circle, no clipping;
+//        cy centered at ub midpoint on round
 // ============================================================
 
 #include <pebble.h>
@@ -95,12 +97,14 @@ typedef enum {
   #define ICON_W              16
   #define ICON_V_ADJUST       -3
 #elif defined(PBL_ROUND)
-  // chalk (Pebble Time Round) and gabbro (Pebble 2 HR): both 180x180 round color
-  // UNIT=6 keeps digits same physical scale as basalt/diorite and centers cleanly:
-  //   5 slots x 30px = 150px, leaving 15px each side on a 180px screen.
-  //   Colon center lands at x=90 = exact screen center.
-  //   At full height (156px), outer digit caps are gently clipped by the circular
-  //   bezel — intentional, looks natural. Info layouts not supported on round.
+  // chalk (Pebble Time Round) and gabbro (Pebble 2 HR): both 180x180 round color.
+  // UNIT=6 centers cleanly: 5 slots x 30px = 150px, 15px margin each side.
+  // Colon center at x=90 = exact screen center.
+  // Per-column heights follow the circular bezel (MARGIN_OUTER inset from edge):
+  //   Outer cols (H_TENS, M_ONES) dx=60 from center: max_h = ROUND_OUTER_H = 108px
+  //   Inner cols (H_ONES, M_TENS) dx=30 from center: max_h = ROUND_INNER_H = 144px
+  // No clipping — digits are sized to fit the circle, not clipped by it.
+  // Info layouts not supported on round.
   #define SCREEN_W           180
   #define SCREEN_H           180
   #define SLOT_W              30
@@ -120,6 +124,11 @@ typedef enum {
   #define UNIT                 6
   #define ICON_W              12
   #define ICON_V_ADJUST        0
+  // Per-column max digit heights inscribed in the circular bezel with MARGIN_OUTER inset:
+  //   Outer cols (H_TENS, M_ONES): dx=60px from center -> max_h = 108px (UNIT*18)
+  //   Inner cols (H_ONES, M_TENS): dx=30px from center -> max_h = 144px (UNIT*24)
+  #define ROUND_OUTER_H       (UNIT * 18)   // 108px
+  #define ROUND_INNER_H       (UNIT * 24)   // 144px
 #else
   #define SCREEN_W           144
   #define SCREEN_H           168
@@ -764,6 +773,25 @@ static void draw_digits_full(GContext *ctx, int h_tens, int h_ones, int m_tens, 
   draw_digit_vec(ctx, m_tens, SLOT_M_TENS, cy, h, dx, dy);
   draw_digit_vec(ctx, m_ones, SLOT_M_ONES, cy, h, dx, dy);
 }
+#if defined(PBL_ROUND)
+// Round variant: outer digit columns are shorter to follow the circular bezel.
+// Each column's height is capped to its circle-inscribed maximum so digits never clip.
+// h is the animation height (s_h, driven by s_target_h = ROUND_INNER_H at rest).
+static void draw_digits_full_round(GContext *ctx, int h_tens, int h_ones, int m_tens, int m_ones,
+                                    int h, int cy, int dx, int dy,
+                                    int ub_top, int ub_bot,
+                                    GColor col_h, GColor col_m) {
+  int h_outer = (h < ROUND_OUTER_H) ? h : ROUND_OUTER_H;
+  int h_inner = (h < ROUND_INNER_H) ? h : ROUND_INNER_H;
+  graphics_context_set_fill_color(ctx, col_h);
+  draw_digit_vec(ctx, h_tens, SLOT_H_TENS, cy, h_outer, dx, dy);
+  draw_digit_vec(ctx, h_ones, SLOT_H_ONES, cy, h_inner, dx, dy);
+  draw_colon_vec(ctx, COLON_SLOT_X, cy, h_inner, dx, dy, ub_top, ub_bot);
+  graphics_context_set_fill_color(ctx, col_m);
+  draw_digit_vec(ctx, m_tens, SLOT_M_TENS, cy, h_inner, dx, dy);
+  draw_digit_vec(ctx, m_ones, SLOT_M_ONES, cy, h_outer, dx, dy);
+}
+#endif
 static void draw_stacked_pass(GContext *ctx, int h_tens, int h_ones, int m_tens, int m_ones,
                                int h, int tens_x, int ones_x,
                                int hr_cy, int mn_cy, int dx, int dy,
@@ -1187,6 +1215,12 @@ static int prv_compute_target_h(int ub_h, int layout) {
   // For wide layout, uses configured slot count as a conservative estimate.
   // draw_layer refines this live using actual rendered count (slots that hide due
   // to missing data collapse, giving digits more space automatically).
+#if defined(PBL_ROUND)
+  // On round, target height is the inner column max (inner pair fits the circle at dx=30).
+  // Outer columns cap themselves independently in draw_digits_full_round().
+  (void)ub_h; (void)layout;
+  return ROUND_INNER_H;
+#endif
   if (layout != LAYOUT_INFO) return ub_h - MARGIN_OUTER - BOTTOM_MARGIN(ub_h);
   int n_above = 0, n_below = 0;
   for (int i = 0; i < 3; i++) if (s_cfg_wide[i] != SLOT_EMPTY) n_above++;
@@ -1331,9 +1365,17 @@ static void draw_layer(Layer *layer, GContext *ctx) {
 
   if (s_layout == LAYOUT_FULL) {
     s_info_slide = 0;
+#if defined(PBL_ROUND)
+    // On round, center digits at the true midpoint of the unobstructed area.
+    // The outer/inner heights differ per column, so MARGIN_OUTER + h/2 would be off-center.
+    int cy = ub_top + ub_h / 2;
+    draw_digits_full_round(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy, SHADOW_DX, SHADOW_DY, ub_top, ub_bot, s_shadow_col, s_shadow_col);
+    draw_digits_full_round(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy, 0, 0, ub_top, ub_bot, s_fg_hr, s_fg_mn);
+#else
     int cy = ub_top + MARGIN_OUTER + s_target_h / 2;
     draw_digits_full(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy, SHADOW_DX, SHADOW_DY, ub_top, ub_bot, s_shadow_col, s_shadow_col);
     draw_digits_full(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy, 0, 0, ub_top, ub_bot, s_fg_hr, s_fg_mn);
+#endif
 
   } else if (s_layout == LAYOUT_INFO) {
     int above_s[3], below_s[3];
