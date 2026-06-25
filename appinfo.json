@@ -10,7 +10,7 @@
   "enableMultiJS": false,
   "watchapp": {"watchface": true},
   "capabilities": ["health", "configurable"],
-  "targetPlatforms": ["aplite","basalt","diorite","emery","flint","gabbro"],
+  "targetPlatforms": ["aplite","basalt","chalk","diorite","emery","flint","gabbro"],
   "resources": {
     "media": []
   },

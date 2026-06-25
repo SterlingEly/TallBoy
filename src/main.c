@@ -1,5 +1,5 @@
 // ============================================================
-// TallBoy — main.c  v3.59u
+// TallBoy — main.c  v3.60
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
 // v3.59j: data caching philosophy — hide > mislead; UV sentinel -1; 3h weather timeout
@@ -17,6 +17,7 @@
 // v3.59s: remove UP button radius debug feature
 // v3.59t: restore rounded rect background (fixed radius UNIT*3)
 // v3.59u: background radius corrected to UNIT*2 (matches digit stroke weight)
+// v3.60: round platform support (chalk+gabbro, full mode only); faster wide blink (BLINK_STEP 6→8)
 // ============================================================
 
 #include <pebble.h>
@@ -93,6 +94,32 @@ typedef enum {
   #define UNIT                 8
   #define ICON_W              16
   #define ICON_V_ADJUST       -3
+#elif defined(PBL_ROUND)
+  // chalk (Pebble Time Round) and gabbro (Pebble 2 HR): both 180x180 round color
+  // UNIT=6 keeps digits same physical scale as basalt/diorite and centers cleanly:
+  //   5 slots x 30px = 150px, leaving 15px each side on a 180px screen.
+  //   Colon center lands at x=90 = exact screen center.
+  //   At full height (156px), outer digit caps are gently clipped by the circular
+  //   bezel — intentional, looks natural. Info layouts not supported on round.
+  #define SCREEN_W           180
+  #define SCREEN_H           180
+  #define SLOT_W              30
+  #define COLON_SLOT_X        75
+  #define SLOT_H_TENS         15
+  #define SLOT_H_ONES         45
+  #define SLOT_M_TENS        105
+  #define SLOT_M_ONES        135
+  #define SIDE_MARGIN         15
+  #define HALF_UNIT            3
+  #define INFO_LINE_H         20
+  #define INFO_GLYPH_H        14
+  #define INFO_TOP_PAD         6
+  #define INFO_LINE_STEP      20
+  #define INFO_LINE_STEP_WIDE 17
+  #define INFO_FONT_KEY    FONT_KEY_GOTHIC_18_BOLD
+  #define UNIT                 6
+  #define ICON_W              12
+  #define ICON_V_ADJUST        0
 #else
   #define SCREEN_W           144
   #define SCREEN_H           168
@@ -162,7 +189,7 @@ static const int EASE[10] = { 4, 6, 8, 10, 12, 12, 10, 8, 6, 4 };
 #define ANTICIPATION_MS   16
 #define COUNTDOWN_HOLD_MS 120
 #define BLINK_REPS        2
-#define BLINK_STEP        6
+#define BLINK_STEP        8
 #define DOT               " \xc2\xb7 "
 #define SHAKE1_TIMEOUT_MS 60000
 #define WEATHER_MAX_AGE   (3 * 3600)   // hide weather/UV after 3h without update
@@ -445,8 +472,8 @@ static void prv_update_health(void) {
 // ============================================================
 // ICONS
 // Each icon draws into a fixed box at (ox,oy):
-//   large=true  → 16x16 px box (emery, ICON_W=16 = 2×UNIT)
-//   large=false → 12x12 px box (other platforms, ICON_W=12 = 2×UNIT)
+//   large=true  -> 16x16 px box (emery, ICON_W=16 = 2xUNIT)
+//   large=false -> 12x12 px box (other platforms, ICON_W=12 = 2xUNIT)
 // ============================================================
 
 static void icon_footprint(GContext *ctx, int fx, int fy, GColor col, bool large) {
@@ -1251,10 +1278,15 @@ static void draw_layer(Layer *layer, GContext *ctx) {
 
   // Black base fills the whole layer; rounded rect clips the colored background.
   // Radius UNIT*2 (16px on emery) matches the digit cap stroke weight.
+  // On round platforms the OS clips to a circle automatically; no rounded rect needed.
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
   graphics_context_set_fill_color(ctx, bg);
+#if defined(PBL_ROUND)
+  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+#else
   graphics_fill_rect(ctx, bounds, UNIT * 2, GCornersAll);
+#endif
 
   int hr_disp = s_hour;
   if (!clock_is_24h_style()) { hr_disp = s_hour % 12; if (!hr_disp) hr_disp = 12; }
@@ -1350,8 +1382,8 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     // Stacked animation options (both use fast-blink timing, no overshoot):
     // STACK_L — Option A: each pair squishes symmetrically around its own fixed center.
     // STACK_R — Option B: "fold" toward screen center —
-    //   hours: top folds inward, bottom edge pinned → center drifts DOWN by drift/2
-    //   minutes: bottom folds inward, top edge pinned → center drifts UP by drift/2
+    //   hours: top folds inward, bottom edge pinned -> center drifts DOWN by drift/2
+    //   minutes: bottom folds inward, top edge pinned -> center drifts UP by drift/2
     //   drift = (h_start - h_current) / 2
     int dh = prv_compute_stacked_h(ub_h);
     int h_cy = ub_top + MARGIN_OUTER + dh / 2;
@@ -1631,6 +1663,9 @@ static void unobstructed_change(AnimationProgress progress, void *ctx) {
 static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   if (s_phase != PHASE_DONE) return;
   if (s_cfg_info_mode == INFO_MODE_OFF || s_cfg_info_mode == INFO_MODE_ALWAYS) return;
+#if defined(PBL_ROUND)
+  return;  // info layouts not supported on round
+#endif
   if (s_layout == LAYOUT_FULL) {
     int target = prv_info_layout_for_shake();
     if (target == LAYOUT_STACK_L || target == LAYOUT_STACK_R) {
@@ -1665,7 +1700,7 @@ static void tick_handler(struct tm *t, TimeUnits units) {
       prv_start_fast_blink();
     } else if (s_layout == LAYOUT_STACK_L || s_layout == LAYOUT_STACK_R) {
       // Stacked blink: set s_h and s_target_h to per-pair height dh so the blink
-      // animates dh → H_ABSOLUTE_MIN → dh (not full-screen height → H_ABSOLUTE_MIN).
+      // animates dh -> H_ABSOLUTE_MIN -> dh (not full-screen height -> H_ABSOLUTE_MIN).
       // H_ABSOLUTE_MIN gives enough travel for a visible animation on small stacked digits.
       Layer *_root = window_get_root_layer(s_window);
       GRect _ub = layer_get_unobstructed_bounds(_root);
@@ -1673,7 +1708,7 @@ static void tick_handler(struct tm *t, TimeUnits units) {
       s_stk_h_start = _dh;
       s_h = _dh;
       s_target_h = _dh;
-      s_h_min = H_ABSOLUTE_MIN;  // deeper floor → more visible animation on small digits
+      s_h_min = H_ABSOLUTE_MIN;  // deeper floor -> more visible animation on small digits
       prv_start_fast_blink();
     } else {
       s_phase = PHASE_ANTICIPATE; schedule(ANTICIPATION_MS);
@@ -1766,6 +1801,7 @@ static void init(void) {
   s_fg = GColorWhite; s_fg_hr = GColorWhite; s_fg_mn = GColorWhite;
   s_bg = GColorBlack; s_shadow_col = GColorBlack;
   prv_load_config();
+#if !defined(PBL_ROUND)
   if (s_cfg_info_mode == INFO_MODE_ALWAYS) {
     switch (s_cfg_info_layout) {
       case INFO_LAYOUT_WIDE:    s_layout = LAYOUT_INFO; break;
@@ -1773,6 +1809,7 @@ static void init(void) {
       case INFO_LAYOUT_STACK_R: s_layout = LAYOUT_STACK_R; break;
     }
   }
+#endif
   s_window = window_create();
   window_set_background_color(s_window, GColorBlack);
   window_set_click_config_provider(s_window, prv_click_config_provider);
