@@ -23,7 +23,7 @@
 // v3.62: sun icon filled disc + thin rays; three pace palettes (dark/medium/light);
 //        greys in palette; colon separate color; default custom bg = dark red
 // v3.63: sun icon rays longer + correct diagonal directions; AQI slot (29);
-//        wide combo slot temp+UV+AQI (30); AQI message key 34
+//        wide combo slot temp+UV+AQI (30); AQI message key 34; AQI stacked labeled "AQI ##"
 // ============================================================
 
 #include <pebble.h>
@@ -58,7 +58,7 @@ typedef enum {
   SLOT_TYPICAL_DAY = 26,   // typical full-day step total (midnight-to-midnight, same-day-of-week avg)
   SLOT_CALORIES_TOT = 27,  // active + resting calories (wide: both; stacked: total)
   SLOT_SLEEP        = 28,  // sleep duration last night
-  SLOT_AQI          = 29,  // air quality index (stacked: alone; wide: combined below)
+  SLOT_AQI          = 29,  // air quality index (stacked: "AQI ##"; wide: combined below)
   SLOT_TEMP_UV_AQI  = 30,  // wide-only: temp · UV index · AQI
 } SlotType;
 
@@ -1249,7 +1249,7 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       // Air Quality Index (US EPA scale: 0-50 Good, 51-100 Moderate, 101-150 USG, 151+ Unhealthy)
       if (s_aqi < 0) return false;
       { if (wide) snprintf(buf,len,"AQI %d",s_aqi);
-        else      snprintf(buf,len,"%d",s_aqi); }
+        else      snprintf(buf,len,"AQI %d",s_aqi); }
       return true;
 
     case SLOT_TEMP_UV_AQI:
