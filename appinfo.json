@@ -61,6 +61,7 @@
     "CfgColorInfo": 30,
     "UvIndex": 31,
     "SunriseTomorrow": 32,
-    "CfgColorColon": 33
+    "CfgColorColon": 33,
+    "AqiIndex": 34
   }
 }
