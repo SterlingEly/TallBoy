@@ -1,5 +1,5 @@
 // ============================================================
-// TallBoy — main.c  v3.62
+// TallBoy — main.c  v3.63
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
 // v3.59j: data caching philosophy — hide > mislead; UV sentinel -1; 3h weather timeout
@@ -22,6 +22,8 @@
 //        cy centered at ub midpoint on round
 // v3.62: sun icon filled disc + thin rays; three pace palettes (dark/medium/light);
 //        greys in palette; colon separate color; default custom bg = dark red
+// v3.63: sun icon rays longer + correct diagonal directions; AQI slot (29);
+//        wide combo slot temp+UV+AQI (30); AQI message key 34
 // ============================================================
 
 #include <pebble.h>
@@ -56,6 +58,8 @@ typedef enum {
   SLOT_TYPICAL_DAY = 26,   // typical full-day step total (midnight-to-midnight, same-day-of-week avg)
   SLOT_CALORIES_TOT = 27,  // active + resting calories (wide: both; stacked: total)
   SLOT_SLEEP        = 28,  // sleep duration last night
+  SLOT_AQI          = 29,  // air quality index (stacked: alone; wide: combined below)
+  SLOT_TEMP_UV_AQI  = 30,  // wide-only: temp · UV index · AQI
 } SlotType;
 
 #define LAYOUT_FULL    0
@@ -203,7 +207,7 @@ static const int EASE[10] = { 4, 6, 8, 10, 12, 12, 10, 8, 6, 4 };
 #define BLINK_STEP        8
 #define DOT               " \xc2\xb7 "
 #define SHAKE1_TIMEOUT_MS 60000
-#define WEATHER_MAX_AGE   (3 * 3600)   // hide weather/UV after 3h without update
+#define WEATHER_MAX_AGE   (3 * 3600)   // hide weather/UV/AQI after 3h without update
 
 #define COLON_OFFSCREEN  (SCREEN_H)
 
@@ -297,8 +301,10 @@ static int        s_sunrise_min = -1, s_sunset_min = -1;
 static int        s_weather_temp_f = -999, s_weather_temp_c = -999;
 static int        s_weather_code = 0;
 static int        s_uv_index = -1;          // -1 = never received; 0+ = valid (0 is real UV 0)
+static int        s_aqi = -1;               // -1 = never received; 0+ = valid AQI
 static int        s_sunrise_tom_min = -1;
 static time_t     s_weather_ts = 0;         // unix time of last weather receipt; 0 = never
+static time_t     s_aqi_ts = 0;             // unix time of last AQI receipt; 0 = never
 static int        s_layout = LAYOUT_FULL;
 
 static InfoLine s_above_lines[INFO_LINES_MAX];
@@ -644,30 +650,32 @@ static void icon_sun(GContext *ctx, int ox, int oy, GColor col, bool large) {
   graphics_context_set_fill_color(ctx, col);
   graphics_fill_radial(ctx, GRect(icx-cr, icy-cr, cr*2, cr*2),
                         GOvalScaleModeFitCircle, (uint16_t)cr, 0, DEG_TO_TRIGANGLE(360));
-  // Thin rays: stroke_width 1
+  // Thin rays: stroke_width 1, all pointing directly away from center.
+  // Diagonal rays: start near circle edge and extend outward along the true 45 degree diagonal.
+  // top-right and bottom-left were previously mirrored -- now corrected.
   graphics_context_set_stroke_color(ctx, col); graphics_context_set_stroke_width(ctx, 1);
   if (large) {
-    // Cardinal rays
-    graphics_draw_line(ctx, GPoint(icx, oy),      GPoint(icx, oy+1));
-    graphics_draw_line(ctx, GPoint(icx, oy+sz-2), GPoint(icx, oy+sz-1));
-    graphics_draw_line(ctx, GPoint(ox,      icy),  GPoint(ox+1,    icy));
-    graphics_draw_line(ctx, GPoint(ox+sz-2, icy),  GPoint(ox+sz-1, icy));
-    // Diagonal rays
-    graphics_draw_line(ctx, GPoint(ox+2, oy+2),   GPoint(ox+3, oy+3));
-    graphics_draw_line(ctx, GPoint(ox+12,oy+2),   GPoint(ox+13,oy+3));
-    graphics_draw_line(ctx, GPoint(ox+2, oy+12),  GPoint(ox+3, oy+13));
-    graphics_draw_line(ctx, GPoint(ox+12,oy+12),  GPoint(ox+13,oy+13));
+    // Cardinal rays (3px)
+    graphics_draw_line(ctx, GPoint(icx, oy+0),   GPoint(icx, oy+2));    // top
+    graphics_draw_line(ctx, GPoint(icx, oy+13),  GPoint(icx, oy+15));   // bottom
+    graphics_draw_line(ctx, GPoint(ox+0,  icy),  GPoint(ox+2,  icy));   // left
+    graphics_draw_line(ctx, GPoint(ox+13, icy),  GPoint(ox+15, icy));   // right
+    // Diagonal rays (3px): from near edge outward along each 45 degree axis
+    graphics_draw_line(ctx, GPoint(ox+5, oy+5),  GPoint(ox+3, oy+3));   // top-left
+    graphics_draw_line(ctx, GPoint(ox+11,oy+5),  GPoint(ox+13,oy+3));   // top-right
+    graphics_draw_line(ctx, GPoint(ox+5, oy+11), GPoint(ox+3, oy+13));  // bottom-left
+    graphics_draw_line(ctx, GPoint(ox+11,oy+11), GPoint(ox+13,oy+13));  // bottom-right
   } else {
-    // Cardinal rays
-    graphics_draw_line(ctx, GPoint(icx, oy),      GPoint(icx, oy+1));
-    graphics_draw_line(ctx, GPoint(icx, oy+sz-2), GPoint(icx, oy+sz-1));
-    graphics_draw_line(ctx, GPoint(ox,      icy),  GPoint(ox+1,    icy));
-    graphics_draw_line(ctx, GPoint(ox+sz-2, icy),  GPoint(ox+sz-1, icy));
-    // Diagonal rays
-    graphics_draw_line(ctx, GPoint(ox+1, oy+1),  GPoint(ox+2, oy+2));
-    graphics_draw_line(ctx, GPoint(ox+9, oy+1),  GPoint(ox+10,oy+2));
-    graphics_draw_line(ctx, GPoint(ox+1, oy+9),  GPoint(ox+2, oy+10));
-    graphics_draw_line(ctx, GPoint(ox+9, oy+9),  GPoint(ox+10,oy+10));
+    // Cardinal rays (2px)
+    graphics_draw_line(ctx, GPoint(icx, oy+0),  GPoint(icx, oy+1));    // top
+    graphics_draw_line(ctx, GPoint(icx, oy+10), GPoint(icx, oy+11));   // bottom
+    graphics_draw_line(ctx, GPoint(ox+0, icy),  GPoint(ox+1, icy));    // left
+    graphics_draw_line(ctx, GPoint(ox+10,icy),  GPoint(ox+11,icy));    // right
+    // Diagonal rays (2px)
+    graphics_draw_line(ctx, GPoint(ox+4, oy+4),  GPoint(ox+2, oy+2));  // top-left
+    graphics_draw_line(ctx, GPoint(ox+8, oy+4),  GPoint(ox+10,oy+2));  // top-right
+    graphics_draw_line(ctx, GPoint(ox+4, oy+8),  GPoint(ox+2, oy+10)); // bottom-left
+    graphics_draw_line(ctx, GPoint(ox+8, oy+8),  GPoint(ox+10,oy+10)); // bottom-right
   }
 }
 static void icon_cloud(GContext *ctx, int ox, int oy, GColor col, bool large) {
@@ -731,6 +739,31 @@ static void icon_storm(GContext *ctx, int ox, int oy, GColor col, bool large) {
     graphics_draw_pixel(ctx,GPoint(ox+6,oy+9));  graphics_draw_pixel(ctx,GPoint(ox+6,oy+10));
     graphics_draw_pixel(ctx,GPoint(ox+5,oy+10)); graphics_draw_pixel(ctx,GPoint(ox+5,oy+11));
     graphics_draw_pixel(ctx,GPoint(ox+7,oy+11));
+  }
+}
+static void icon_haze(GContext *ctx, int ox, int oy, GColor col, bool large) {
+  // Three horizontal wavy lines representing hazy/polluted air
+  graphics_context_set_stroke_color(ctx, col); graphics_context_set_stroke_width(ctx, 1);
+  if (large) {
+    graphics_draw_line(ctx, GPoint(ox+1, oy+4),  GPoint(ox+6, oy+4));
+    graphics_draw_line(ctx, GPoint(ox+7, oy+5),  GPoint(ox+8, oy+5));
+    graphics_draw_line(ctx, GPoint(ox+9, oy+4),  GPoint(ox+14,oy+4));
+    graphics_draw_line(ctx, GPoint(ox+1, oy+8),  GPoint(ox+6, oy+8));
+    graphics_draw_line(ctx, GPoint(ox+7, oy+9),  GPoint(ox+8, oy+9));
+    graphics_draw_line(ctx, GPoint(ox+9, oy+8),  GPoint(ox+14,oy+8));
+    graphics_draw_line(ctx, GPoint(ox+1, oy+12), GPoint(ox+6, oy+12));
+    graphics_draw_line(ctx, GPoint(ox+7, oy+11), GPoint(ox+8, oy+11));
+    graphics_draw_line(ctx, GPoint(ox+9, oy+12), GPoint(ox+14,oy+12));
+  } else {
+    graphics_draw_line(ctx, GPoint(ox+1, oy+3),  GPoint(ox+4, oy+3));
+    graphics_draw_line(ctx, GPoint(ox+5, oy+4),  GPoint(ox+6, oy+4));
+    graphics_draw_line(ctx, GPoint(ox+7, oy+3),  GPoint(ox+10,oy+3));
+    graphics_draw_line(ctx, GPoint(ox+1, oy+6),  GPoint(ox+4, oy+6));
+    graphics_draw_line(ctx, GPoint(ox+5, oy+7),  GPoint(ox+6, oy+7));
+    graphics_draw_line(ctx, GPoint(ox+7, oy+6),  GPoint(ox+10,oy+6));
+    graphics_draw_line(ctx, GPoint(ox+1, oy+9),  GPoint(ox+4, oy+9));
+    graphics_draw_line(ctx, GPoint(ox+5, oy+8),  GPoint(ox+6, oy+8));
+    graphics_draw_line(ctx, GPoint(ox+7, oy+9),  GPoint(ox+10,oy+9));
   }
 }
 static void icon_weather(GContext *ctx, int ox, int oy, GColor col, int code, bool large) {
@@ -1170,7 +1203,7 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
 
     case SLOT_TYPICAL_DAY:
 #if defined(PBL_HEALTH)
-      // Typical full-day step total — same day-of-week average (HealthServiceTimeScopeWeekly)
+      // Typical full-day step total -- same day-of-week average (HealthServiceTimeScopeWeekly)
       if (s_steps_typical_day <= 0) return false;
       { char gb[16]; prv_fmt_steps(gb, sizeof(gb), s_steps_typical_day);
         if (wide) snprintf(buf,len,"typical %s steps",gb);
@@ -1212,6 +1245,30 @@ static bool prv_slot_text(char *buf, int len, SlotType slot, struct tm *t, bool 
       return false;
 #endif
 
+    case SLOT_AQI:
+      // Air Quality Index (US EPA scale: 0-50 Good, 51-100 Moderate, 101-150 USG, 151+ Unhealthy)
+      if (s_aqi < 0) return false;
+      { if (wide) snprintf(buf,len,"AQI %d",s_aqi);
+        else      snprintf(buf,len,"%d",s_aqi); }
+      return true;
+
+    case SLOT_TEMP_UV_AQI:
+      // Wide-only: temperature + UV index + AQI -- gracefully degrades if any is missing
+      if (!wide) return false;
+      if (s_weather_temp_f <= -900) return false;
+      { int t2 = s_cfg_temp_f ? s_weather_temp_f : s_weather_temp_c;
+        char u = s_cfg_temp_f ? 'F' : 'C';
+        if (s_uv_index >= 0 && s_aqi >= 0)
+          snprintf(buf,len,"%d %c"DOT"UV %d"DOT"AQI %d",t2,u,s_uv_index,s_aqi);
+        else if (s_uv_index >= 0)
+          snprintf(buf,len,"%d %c"DOT"UV %d",t2,u,s_uv_index);
+        else if (s_aqi >= 0)
+          snprintf(buf,len,"%d %c"DOT"AQI %d",t2,u,s_aqi);
+        else
+          snprintf(buf,len,"%d %c",t2,u);
+      }
+      return true;
+
     case SLOT_DEBUG:
       if (wide) snprintf(buf, len, "[ Tallboy Debug Text ]");
       else       snprintf(buf, len, "[ Debug ]");
@@ -1233,8 +1290,9 @@ static IconFn prv_slot_icon(SlotType slot, bool *is_battery, bool *is_weather, b
     case SLOT_BATTERY: case SLOT_BAT_BT: *is_battery=true; *extra=s_battery_pct; return NULL;
     case SLOT_BLUETOOTH: return icon_bt;
     case SLOT_TEMP: case SLOT_WEATHER:
-    case SLOT_UV: case SLOT_UV_LIGHT: case SLOT_WEATHER_UV:
+    case SLOT_UV: case SLOT_UV_LIGHT: case SLOT_WEATHER_UV: case SLOT_TEMP_UV_AQI:
       *is_weather=true; *extra=s_weather_code; return NULL;
+    case SLOT_AQI: return icon_haze;
     case SLOT_DEBUG: *is_debug_sq=true; return NULL;
     default: return NULL;
   }
@@ -1437,7 +1495,7 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int bn = build_lines(s_below_lines, 3, below_s, 3, tm_now, true);
 
     // Compute digit height from actual rendered counts, not configured counts.
-    // Slots that hide (no data available) collapse to nothing — digits expand to fill.
+    // Slots that hide (no data available) collapse to nothing -- digits expand to fill.
     // s_target_h uses configured counts as a conservative init; we refine it here live.
     int reserved = HALF_UNIT + prv_info_block_h(an, INFO_LINE_STEP_WIDE) + HALF_UNIT
                  + HALF_UNIT + WIDE_BELOW_EXTRA
@@ -1474,8 +1532,8 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     // layouts), so we always use dh for at-rest drawing and s_h only while animating.
     //
     // Stacked animation options (both use fast-blink timing, no overshoot):
-    // STACK_L — Option A: each pair squishes symmetrically around its own fixed center.
-    // STACK_R — Option B: "fold" toward screen center —
+    // STACK_L -- Option A: each pair squishes symmetrically around its own fixed center.
+    // STACK_R -- Option B: "fold" toward screen center --
     //   hours: top folds inward, bottom edge pinned -> center drifts DOWN by drift/2
     //   minutes: bottom folds inward, top edge pinned -> center drifts UP by drift/2
     //   drift = (h_start - h_current) / 2
@@ -1686,7 +1744,7 @@ static void timer_cb(void *data) {
       if (s_going_down) {
         s_h -= BLINK_STEP; layer_mark_dirty(s_canvas_layer);
         if (s_h<=s_h_min) { s_h=s_h_min; s_going_down=false; s_overshot=false; s_ease_idx=0;
-          // Digit swap at minimum — applies to LAYOUT_INFO and both stacked layouts.
+          // Digit swap at minimum -- applies to LAYOUT_INFO and both stacked layouts.
           if(s_digit_pending){s_hour=s_pending_hour;s_minute=s_pending_minute;s_digit_pending=false;} }
         schedule(ANIM_STEP_MS);
       } else {
@@ -1813,11 +1871,16 @@ static void tick_handler(struct tm *t, TimeUnits units) {
 #if defined(PBL_HEALTH)
   prv_update_health();
 #endif
-  // Age out weather/UV after 3 hours; sunrise/sunset stay valid all day
-  if (s_weather_ts > 0 && (time(NULL) - s_weather_ts) > WEATHER_MAX_AGE) {
-    s_weather_temp_f = -999;
-    s_weather_temp_c = -999;
-    s_uv_index = -1;
+  // Age out weather/UV/AQI after 3 hours; sunrise/sunset stay valid all day
+  { time_t _now = time(NULL);
+    if (s_weather_ts > 0 && (_now - s_weather_ts) > WEATHER_MAX_AGE) {
+      s_weather_temp_f = -999;
+      s_weather_temp_c = -999;
+      s_uv_index = -1;
+    }
+    if (s_aqi_ts > 0 && (_now - s_aqi_ts) > WEATHER_MAX_AGE) {
+      s_aqi = -1;
+    }
   }
 }
 static void battery_handler(BatteryChargeState state) {
@@ -1837,6 +1900,8 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
   if(t){time_t ts=(time_t)(uint32_t)t->value->uint32;struct tm*lt=localtime(&ts);if(lt)s_sunset_min=lt->tm_hour*60+lt->tm_min;}
   t = dict_find(iter, MESSAGE_KEY_UvIndex);
   if(t) { s_uv_index = (int)t->value->int32; s_weather_ts = time(NULL); }
+  t = dict_find(iter, MESSAGE_KEY_AqiIndex);
+  if(t) { s_aqi = (int)t->value->int32; s_aqi_ts = time(NULL); }
   t = dict_find(iter, MESSAGE_KEY_SunriseTomorrow);
   if(t){time_t ts=(time_t)(uint32_t)t->value->uint32;struct tm*lt=localtime(&ts);if(lt)s_sunrise_tom_min=lt->tm_hour*60+lt->tm_min;}
   t = dict_find(iter, MESSAGE_KEY_CfgInfoMode);
