@@ -1,5 +1,5 @@
 // ============================================================
-// TallBoy — main.c  v3.61
+// TallBoy — main.c  v3.62
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
 // v3.59j: data caching philosophy — hide > mislead; UV sentinel -1; 3h weather timeout
@@ -20,6 +20,8 @@
 // v3.60: round platform support (chalk+gabbro, full mode only); faster wide blink (BLINK_STEP 6→8)
 // v3.61: round per-column heights — outer digits shorter to follow circle, no clipping;
 //        cy centered at ub midpoint on round
+// v3.62: sun icon filled disc + thin rays; three pace palettes (dark/medium/light);
+//        greys in palette; colon separate color; default custom bg = dark red
 // ============================================================
 
 #include <pebble.h>
@@ -229,15 +231,32 @@ static GColor prv_color_from_idx(uint8_t idx) {
   return GColorFromRGB(((idx >> 4) & 3) * 85, ((idx >> 2) & 3) * 85, (idx & 3) * 85);
 }
 
-#define COLOR_MODE_DYNAMIC 0
-#define COLOR_MODE_STATIC  1
+// Color modes
+// DYNAMIC (0)      — pace-based background, medium palette, auto fg (backward compat)
+// STATIC (1)       — fully custom colors from picker
+// PACE_DARK (2)    — pace palette using dark colors (#AA max channel); always white fg
+// PACE_MEDIUM (3)  — pace palette using saturated mid-brightness; always white fg
+// PACE_LIGHT (4)   — pace palette using light colors (#55 min channel); always black fg
+#define COLOR_MODE_DYNAMIC    0
+#define COLOR_MODE_STATIC     1
+#define COLOR_MODE_PACE_DARK  2
+#define COLOR_MODE_PACE_MED   3
+#define COLOR_MODE_PACE_LIGHT 4
+
+// Default custom color scheme: dark red background, black shadow, white digits
+#define COLOR_DEFAULT_BG     32   // #AA0000 dark red
+#define COLOR_DEFAULT_DIG    COLOR_WHITE
+#define COLOR_DEFAULT_SHADOW COLOR_BLACK
+#define COLOR_DEFAULT_INFO   COLOR_WHITE
+#define COLOR_DEFAULT_COLON  COLOR_WHITE
 
 static int     s_cfg_color_mode   = COLOR_MODE_DYNAMIC;
-static uint8_t s_cfg_col_bg       = COLOR_BLACK;
-static uint8_t s_cfg_col_dig_h    = COLOR_WHITE;
-static uint8_t s_cfg_col_dig_m    = COLOR_WHITE;
-static uint8_t s_cfg_col_shadow   = COLOR_BLACK;
-static uint8_t s_cfg_col_info     = COLOR_WHITE;
+static uint8_t s_cfg_col_bg       = COLOR_DEFAULT_BG;
+static uint8_t s_cfg_col_dig_h    = COLOR_DEFAULT_DIG;
+static uint8_t s_cfg_col_dig_m    = COLOR_DEFAULT_DIG;
+static uint8_t s_cfg_col_shadow   = COLOR_DEFAULT_SHADOW;
+static uint8_t s_cfg_col_info     = COLOR_DEFAULT_INFO;
+static uint8_t s_cfg_col_colon    = COLOR_DEFAULT_COLON;
 
 typedef void (*IconFn)(GContext*,int,int,GColor,bool);
 typedef struct {
@@ -254,7 +273,7 @@ static Window    *s_window;
 static Layer     *s_canvas_layer;
 static int        s_hour = 0, s_minute = 0;
 static int        s_h = 0, s_target_h = 0, s_h_min = 0, s_ease_idx = 0;
-static GColor     s_fg, s_bg, s_fg_hr, s_fg_mn, s_shadow_col;
+static GColor     s_fg, s_bg, s_fg_hr, s_fg_mn, s_fg_colon, s_shadow_col;
 static Phase      s_phase = PHASE_DONE;
 static int        s_anim_step = 0, s_anim_rep = 0;
 static bool       s_going_down = true, s_overshot = false;
@@ -304,7 +323,7 @@ static const int DEBUG_CYCLE_LAYOUTS[] = { LAYOUT_INFO, LAYOUT_STACK_R, LAYOUT_S
 #define PERSIST_CFG_STACK    3
 #define PERSIST_CFG_STACK_HI 4
 #define PERSIST_CFG_COLORS   5
-#define CFG_VERSION          5
+#define CFG_VERSION          6   // bumped v3.62: added colon color to persist
 
 static int s_sv_hr_cy_s, s_sv_hr_cy_e;
 static int s_sv_mn_cy_s, s_sv_mn_cy_e;
@@ -341,7 +360,8 @@ static void prv_save_config(void) {
              | ((int32_t)(s_cfg_col_dig_h & 0x3f) << 16)
              | ((int32_t)(s_cfg_col_dig_m & 0x3f) << 24);
   int32_t cb = ((int32_t)(s_cfg_col_shadow & 0x3f))
-             | ((int32_t)(s_cfg_col_info   & 0x3f) << 8);
+             | ((int32_t)(s_cfg_col_info   & 0x3f) << 8)
+             | ((int32_t)(s_cfg_col_colon  & 0x3f) << 16);
   persist_write_int(PERSIST_CFG_COLORS, ca);
   persist_write_int(PERSIST_CFG_COLORS + 1, cb);
 }
@@ -377,6 +397,7 @@ static void prv_load_config(void) {
     s_cfg_col_dig_m   = (ca >> 24) & 0x3f;
     s_cfg_col_shadow  =  cb        & 0x3f;
     s_cfg_col_info    = (cb >>  8) & 0x3f;
+    s_cfg_col_colon   = (cb >> 16) & 0x3f;
   }
 }
 
@@ -400,22 +421,48 @@ static int prv_info_layout_for_shake(void) {
 }
 
 #if defined(PBL_COLOR)
-// Background color reflects step pace vs. typical (same-day-of-week average via SDK)
-static GColor prv_pace_color(int steps_today, int steps_expected) {
+// Step pace background color palettes.
+// Each maps today's steps vs. typical (same-day-of-week avg) to a background color.
+// Palette choice controls brightness tier and fg color:
+//   DARK   — #AA max per channel; always white fg
+//   MEDIUM — saturated, no fg flip (Chrome Yellow and May Green replace Yellow/Green)
+//   LIGHT  — #55 min per channel; always black fg
+// DYNAMIC mode uses MEDIUM for backward compatibility.
+
+static GColor prv_pace_color_from_idx(int idx) {
+  // Convert 6-bit Pebble palette index to GColor
+  return GColorFromRGB(((idx >> 4) & 3) * 85, ((idx >> 2) & 3) * 85, (idx & 3) * 85);
+}
+
+static GColor prv_pace_color(int steps_today, int steps_expected, int mode) {
   if (steps_expected <= 0 || steps_today <= 0) return GColorBlack;
   int pct = (steps_today * 100) / steps_expected;
-  if (pct <= 0)    return GColorBlack;
-  if (pct <= 30)   return GColorRed;
-  if (pct <= 60)   return GColorOrange;
-  if (pct <= 90)   return GColorYellow;
-  if (pct <= 200)  return GColorGreen;
-  if (pct <= 400)  return GColorBlue;
-  if (pct <= 700)  return GColorIndigo;
-  if (pct <= 1000) return GColorVividViolet;
-  return GColorBlack;
+  if (pct <= 0) return GColorBlack;
+
+  // Palette indices for 7 pace steps (thresholds: 30/60/90/200/400/700/1000%)
+  // Dark:   idx 32,36,40, 8, 2,18,34  (#AA0000→#AA5500→#AAAA00→#00AA00→#0000AA→#5500AA→#AA00AA)
+  // Medium: idx 48,52,56,25, 3,18,34  (#FF0000→#FF5500→#FFAA00→#55AA55→#0000FF→#5500AA→#AA00AA)
+  // Light:  idx 53,57,61,45,27,23,55  (#FF5555→#FFAA55→#FFFF55→#AAFF55→#55AAFF→#5555FF→#FF55FF)
+  static const int dark_pal[7]   = { 32, 36, 40,  8,  2, 18, 34 };
+  static const int medium_pal[7] = { 48, 52, 56, 25,  3, 18, 34 };
+  static const int light_pal[7]  = { 53, 57, 61, 45, 27, 23, 55 };
+
+  const int *pal = (mode == COLOR_MODE_PACE_DARK)  ? dark_pal  :
+                   (mode == COLOR_MODE_PACE_LIGHT)  ? light_pal : medium_pal;
+
+  int step = (pct <= 30)   ? 0 :
+             (pct <= 60)   ? 1 :
+             (pct <= 90)   ? 2 :
+             (pct <= 200)  ? 3 :
+             (pct <= 400)  ? 4 :
+             (pct <= 700)  ? 5 : 6;
+
+  return prv_pace_color_from_idx(pal[step]);
 }
-static bool prv_bg_needs_dark_fg(GColor bg) {
-  return gcolor_equal(bg, GColorYellow) || gcolor_equal(bg, GColorGreen);
+
+static bool prv_pace_mode_needs_dark_fg(int mode) {
+  // Light tier always has dark (black) fg; dark and medium always white
+  return (mode == COLOR_MODE_PACE_LIGHT);
 }
 #endif
 
@@ -593,23 +640,23 @@ static void icon_sun(GContext *ctx, int ox, int oy, GColor col, bool large) {
   int sz  = large ? 16 : 12;
   int icx = ox + sz/2, icy = oy + sz/2;
   int cr  = large ? 3 : 2;
-  // Thick circle: two concentric rings at width 1
+  // Filled disc
+  graphics_context_set_fill_color(ctx, col);
+  graphics_fill_radial(ctx, GRect(icx-cr, icy-cr, cr*2, cr*2),
+                        GOvalScaleModeFitCircle, (uint16_t)cr, 0, DEG_TO_TRIGANGLE(360));
+  // Thin rays: stroke_width 1
   graphics_context_set_stroke_color(ctx, col); graphics_context_set_stroke_width(ctx, 1);
-  graphics_draw_circle(ctx, GPoint(icx,icy), cr);
-  graphics_draw_circle(ctx, GPoint(icx,icy), cr + 1);
-  // Rays: stroke_width 2 so they read clearly at small icon size
-  graphics_context_set_stroke_width(ctx, 2);
   if (large) {
-    // Cardinal rays: 2px outward from circle edge
-    graphics_draw_line(ctx, GPoint(icx, oy),      GPoint(icx, oy+1));      // top
-    graphics_draw_line(ctx, GPoint(icx, oy+sz-2), GPoint(icx, oy+sz-1));   // bottom
-    graphics_draw_line(ctx, GPoint(ox,      icy),  GPoint(ox+1,    icy));   // left
-    graphics_draw_line(ctx, GPoint(ox+sz-2, icy),  GPoint(ox+sz-1, icy));   // right
-    // Diagonal rays: 2px lines at 45 degrees from corners inward
-    graphics_draw_line(ctx, GPoint(ox+2, oy+2),   GPoint(ox+3, oy+3));      // top-left
-    graphics_draw_line(ctx, GPoint(ox+12,oy+2),   GPoint(ox+13,oy+3));      // top-right
-    graphics_draw_line(ctx, GPoint(ox+2, oy+12),  GPoint(ox+3, oy+13));     // bottom-left
-    graphics_draw_line(ctx, GPoint(ox+12,oy+12),  GPoint(ox+13,oy+13));     // bottom-right
+    // Cardinal rays
+    graphics_draw_line(ctx, GPoint(icx, oy),      GPoint(icx, oy+1));
+    graphics_draw_line(ctx, GPoint(icx, oy+sz-2), GPoint(icx, oy+sz-1));
+    graphics_draw_line(ctx, GPoint(ox,      icy),  GPoint(ox+1,    icy));
+    graphics_draw_line(ctx, GPoint(ox+sz-2, icy),  GPoint(ox+sz-1, icy));
+    // Diagonal rays
+    graphics_draw_line(ctx, GPoint(ox+2, oy+2),   GPoint(ox+3, oy+3));
+    graphics_draw_line(ctx, GPoint(ox+12,oy+2),   GPoint(ox+13,oy+3));
+    graphics_draw_line(ctx, GPoint(ox+2, oy+12),  GPoint(ox+3, oy+13));
+    graphics_draw_line(ctx, GPoint(ox+12,oy+12),  GPoint(ox+13,oy+13));
   } else {
     // Cardinal rays
     graphics_draw_line(ctx, GPoint(icx, oy),      GPoint(icx, oy+1));
@@ -764,10 +811,11 @@ static void draw_pair(GContext *ctx, int tens, int ones, int tens_x, int ones_x,
 static void draw_digits_full(GContext *ctx, int h_tens, int h_ones, int m_tens, int m_ones,
                                int h, int cy, int dx, int dy,
                                int ub_top, int ub_bot,
-                               GColor col_h, GColor col_m) {
+                               GColor col_h, GColor col_m, GColor col_colon) {
   graphics_context_set_fill_color(ctx, col_h);
   draw_digit_vec(ctx, h_tens, SLOT_H_TENS, cy, h, dx, dy);
   draw_digit_vec(ctx, h_ones, SLOT_H_ONES, cy, h, dx, dy);
+  graphics_context_set_fill_color(ctx, col_colon);
   draw_colon_vec(ctx, COLON_SLOT_X, cy, h, dx, dy, ub_top, ub_bot);
   graphics_context_set_fill_color(ctx, col_m);
   draw_digit_vec(ctx, m_tens, SLOT_M_TENS, cy, h, dx, dy);
@@ -780,12 +828,13 @@ static void draw_digits_full(GContext *ctx, int h_tens, int h_ones, int m_tens, 
 static void draw_digits_full_round(GContext *ctx, int h_tens, int h_ones, int m_tens, int m_ones,
                                     int h, int cy, int dx, int dy,
                                     int ub_top, int ub_bot,
-                                    GColor col_h, GColor col_m) {
+                                    GColor col_h, GColor col_m, GColor col_colon) {
   int h_outer = (h < ROUND_OUTER_H) ? h : ROUND_OUTER_H;
   int h_inner = (h < ROUND_INNER_H) ? h : ROUND_INNER_H;
   graphics_context_set_fill_color(ctx, col_h);
   draw_digit_vec(ctx, h_tens, SLOT_H_TENS, cy, h_outer, dx, dy);
   draw_digit_vec(ctx, h_ones, SLOT_H_ONES, cy, h_inner, dx, dy);
+  graphics_context_set_fill_color(ctx, col_colon);
   draw_colon_vec(ctx, COLON_SLOT_X, cy, h_inner, dx, dy, ub_top, ub_bot);
   graphics_context_set_fill_color(ctx, col_m);
   draw_digit_vec(ctx, m_tens, SLOT_M_TENS, cy, h_inner, dx, dy);
@@ -1291,22 +1340,25 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     s_fg         = prv_color_from_idx(s_cfg_col_info);
     s_fg_hr      = prv_color_from_idx(s_cfg_col_dig_h);
     s_fg_mn      = prv_color_from_idx(s_cfg_col_dig_m);
+    s_fg_colon   = prv_color_from_idx(s_cfg_col_colon);
     s_shadow_col = prv_color_from_idx(s_cfg_col_shadow);
   } else {
+    // Pace-based modes: DYNAMIC (compat), PACE_DARK, PACE_MED, PACE_LIGHT
+    int pace_mode = s_cfg_color_mode;  // all non-STATIC modes use pace palette
 #if defined(PBL_HEALTH)
-    bg = prv_pace_color(s_steps, s_steps_expected);
+    bg = prv_pace_color(s_steps, s_steps_expected, pace_mode);
 #else
     bg = GColorBlack;
 #endif
-    bool dark = prv_bg_needs_dark_fg(bg);
+    bool dark = prv_pace_mode_needs_dark_fg(pace_mode);
     s_fg = dark ? GColorBlack : GColorWhite;
-    s_fg_hr = s_fg; s_fg_mn = s_fg;
+    s_fg_hr = s_fg; s_fg_mn = s_fg; s_fg_colon = s_fg;
     s_shadow_col = dark ? GColorWhite : GColorBlack;
   }
 #else
   bg = s_cfg_invert ? GColorWhite : GColorBlack;
   s_fg = s_cfg_invert ? GColorBlack : GColorWhite;
-  s_fg_hr = s_fg; s_fg_mn = s_fg;
+  s_fg_hr = s_fg; s_fg_mn = s_fg; s_fg_colon = s_fg;
   s_shadow_col = s_cfg_invert ? GColorWhite : GColorBlack;
 #endif
 
@@ -1338,7 +1390,7 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int bot_cy = prv_lerp_v(s_sv_bot_dot_s, s_sv_bot_dot_e, step);
     graphics_context_set_fill_color(ctx, s_shadow_col);
     draw_colon_split(ctx, COLON_SLOT_X, top_cy, bot_cy, SHADOW_DX, SHADOW_DY, ub_top, ub_bot);
-    graphics_context_set_fill_color(ctx, s_fg_hr);
+    graphics_context_set_fill_color(ctx, s_fg_colon);
     draw_colon_split(ctx, COLON_SLOT_X, top_cy, bot_cy, 0, 0, ub_top, ub_bot);
     draw_pair(ctx, h_tens, h_ones, SLOT_H_TENS, SLOT_H_ONES, hr_cy, dh, SHADOW_DX, SHADOW_DY, s_shadow_col);
     draw_pair(ctx, m_tens, m_ones, SLOT_M_TENS, SLOT_M_ONES, mn_cy, dh, SHADOW_DX, SHADOW_DY, s_shadow_col);
@@ -1369,12 +1421,12 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     // On round, center digits at the true midpoint of the unobstructed area.
     // The outer/inner heights differ per column, so MARGIN_OUTER + h/2 would be off-center.
     int cy = ub_top + ub_h / 2;
-    draw_digits_full_round(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy, SHADOW_DX, SHADOW_DY, ub_top, ub_bot, s_shadow_col, s_shadow_col);
-    draw_digits_full_round(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy, 0, 0, ub_top, ub_bot, s_fg_hr, s_fg_mn);
+    draw_digits_full_round(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy, SHADOW_DX, SHADOW_DY, ub_top, ub_bot, s_shadow_col, s_shadow_col, s_shadow_col);
+    draw_digits_full_round(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy, 0, 0, ub_top, ub_bot, s_fg_hr, s_fg_mn, s_fg_colon);
 #else
     int cy = ub_top + MARGIN_OUTER + s_target_h / 2;
-    draw_digits_full(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy, SHADOW_DX, SHADOW_DY, ub_top, ub_bot, s_shadow_col, s_shadow_col);
-    draw_digits_full(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy, 0, 0, ub_top, ub_bot, s_fg_hr, s_fg_mn);
+    draw_digits_full(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy, SHADOW_DX, SHADOW_DY, ub_top, ub_bot, s_shadow_col, s_shadow_col, s_shadow_col);
+    draw_digits_full(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy, 0, 0, ub_top, ub_bot, s_fg_hr, s_fg_mn, s_fg_colon);
 #endif
 
   } else if (s_layout == LAYOUT_INFO) {
@@ -1411,8 +1463,8 @@ static void draw_layer(Layer *layer, GContext *ctx) {
       int gy = below_top + i * INFO_LINE_STEP_WIDE;
       draw_info_line(ctx, &s_below_lines[i], gy + slide, col_x, col_w, GTextAlignmentCenter);
     }
-    draw_digits_full(ctx, h_tens, h_ones, m_tens, m_ones, draw_h, time_cy, SHADOW_DX, SHADOW_DY, ub_top, ub_bot, s_shadow_col, s_shadow_col);
-    draw_digits_full(ctx, h_tens, h_ones, m_tens, m_ones, draw_h, time_cy, 0, 0, ub_top, ub_bot, s_fg_hr, s_fg_mn);
+    draw_digits_full(ctx, h_tens, h_ones, m_tens, m_ones, draw_h, time_cy, SHADOW_DX, SHADOW_DY, ub_top, ub_bot, s_shadow_col, s_shadow_col, s_shadow_col);
+    draw_digits_full(ctx, h_tens, h_ones, m_tens, m_ones, draw_h, time_cy, 0, 0, ub_top, ub_bot, s_fg_hr, s_fg_mn, s_fg_colon);
 
   } else {
     // Stacked layouts: digits on one side, info column on the other.
@@ -1809,6 +1861,8 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
   if(t) s_cfg_col_shadow = (uint8_t)(t->value->int32 & 0x3f);
   t = dict_find(iter, MESSAGE_KEY_CfgColorInfo);
   if(t) s_cfg_col_info = (uint8_t)(t->value->int32 & 0x3f);
+  t = dict_find(iter, MESSAGE_KEY_CfgColorColon);
+  if(t) s_cfg_col_colon = (uint8_t)(t->value->int32 & 0x3f);
   for (int i = 0; i < WIDE_SLOTS; i++) {
     t = dict_find(iter, MESSAGE_KEY_CfgWide1 + i);
     if(t) s_cfg_wide[i] = (int)t->value->int32;
@@ -1840,7 +1894,7 @@ static void window_unload(Window *window) {
   layer_destroy(s_canvas_layer);
 }
 static void init(void) {
-  s_fg = GColorWhite; s_fg_hr = GColorWhite; s_fg_mn = GColorWhite;
+  s_fg = GColorWhite; s_fg_hr = GColorWhite; s_fg_mn = GColorWhite; s_fg_colon = GColorWhite;
   s_bg = GColorBlack; s_shadow_col = GColorBlack;
   prv_load_config();
 #if !defined(PBL_ROUND)
