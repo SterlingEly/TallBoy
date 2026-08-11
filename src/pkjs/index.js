@@ -1,6 +1,6 @@
 // ============================================================
-// TallBoy -- src/pkjs/index.js  v3.62
-// PebbleKit JS: weather, solar, config page
+// TallBoy -- src/pkjs/index.js  v3.63
+// PebbleKit JS: weather, solar, AQI, config page
 // ============================================================
 
 var STORAGE_KEY = 'tallboy_settings_v362';
@@ -27,7 +27,8 @@ var SLOT_NAMES_STACK = [
   { v: 23, n: 'Light Remaining' },
   { v: 26, n: 'Daily Step Goal' },
   { v: 27, n: 'Total Calories' },
-  { v: 28, n: 'Sleep' }
+  { v: 28, n: 'Sleep' },
+  { v: 29, n: 'Air Quality (AQI)' }
 ];
 
 var SLOT_NAMES_WIDE = [
@@ -49,7 +50,9 @@ var SLOT_NAMES_WIDE = [
   { v: 25, n: 'Temp & UV Index' },
   { v: 26, n: 'Daily Step Goal' },
   { v: 27, n: 'Active & Resting Calories' },
-  { v: 28, n: 'Sleep' }
+  { v: 28, n: 'Sleep' },
+  { v: 29, n: 'Air Quality (AQI)' },
+  { v: 30, n: 'Temp + UV + AQI' }
 ];
 
 function pblColorToCss(idx) {
@@ -165,6 +168,37 @@ function fetchWeather() {
     xhr.open('GET', url);
     xhr.send();
   }, function(e) { console.log('Geo error: ' + e.message); },
+  { timeout: 15000, maximumAge: 300000 });
+}
+
+// ============================================================
+// AIR QUALITY (AQI)
+// Uses Open-Meteo Air Quality API — same no-key approach.
+// US AQI is derived from PM2.5. We fetch us_aqi directly.
+// Fetched on connect and every 30 minutes alongside weather.
+// ============================================================
+function fetchAqi() {
+  navigator.geolocation.getCurrentPosition(function(pos) {
+    var lat = pos.coords.latitude, lon = pos.coords.longitude;
+    var url = 'https://air-quality-api.open-meteo.com/v1/air-quality'
+      + '?latitude=' + lat + '&longitude=' + lon
+      + '&current=us_aqi'
+      + '&timezone=auto';
+    var xhr = new XMLHttpRequest();
+    xhr.onload = function() {
+      try {
+        var d = JSON.parse(this.responseText);
+        if (d.current && d.current.us_aqi !== undefined && d.current.us_aqi !== null) {
+          var aqi = Math.round(d.current.us_aqi);
+          Pebble.sendAppMessage({ AqiIndex: aqi },
+            function() { console.log('AQI sent: ' + aqi); },
+            function(e) { console.log('AQI send error: ' + e.error.message); });
+        }
+      } catch(e) { console.log('AQI parse error: ' + e); }
+    };
+    xhr.open('GET', url);
+    xhr.send();
+  }, function(e) { console.log('AQI geo error: ' + e.message); },
   { timeout: 15000, maximumAge: 300000 });
 }
 
@@ -373,7 +407,9 @@ Pebble.addEventListener('ready', function() {
   console.log('TallBoy JS ready');
   sendSettings(loadSettings());
   fetchWeather();
+  fetchAqi();
   setInterval(fetchWeather, 30 * 60 * 1000);
+  setInterval(fetchAqi, 30 * 60 * 1000);
 });
 
 Pebble.addEventListener('showConfiguration', function() {
