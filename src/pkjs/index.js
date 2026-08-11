@@ -1,9 +1,9 @@
 // ============================================================
-// TallBoy -- src/pkjs/index.js  v3.59
+// TallBoy -- src/pkjs/index.js  v3.62
 // PebbleKit JS: weather, solar, config page
 // ============================================================
 
-var STORAGE_KEY = 'tallboy_settings_v359';
+var STORAGE_KEY = 'tallboy_settings_v362';
 
 var SLOT_NAMES_STACK = [
   { v:  0, n: 'Empty' },
@@ -62,12 +62,20 @@ function pblLuminance(idx) {
   return ((idx >> 4) & 3) * 2 + ((idx >> 2) & 3) * 4 + (idx & 3);
 }
 
+// Color mode values:
+//   0 = DYNAMIC (legacy alias for medium — not exposed in UI)
+//   1 = STATIC  (custom color picker)
+//   2 = PACE_DARK   (dark palette, white fg)
+//   3 = PACE_MED    (medium palette, white fg)  <- default
+//   4 = PACE_LIGHT  (light palette, black fg)
+
 var DEFAULT_SETTINGS = {
   infoMode:   0, infoLayout: 1,
   wide:    [3, 5, 0, 6, 17, 15],
   stack:   [1, 3, 6, 9, 11, 5, 15, 16],
   tempUnit: 0, distUnit: 0, invert: 0,
-  colorMode: 0, colBg: 0, colDigH: 63, colDigM: 63, colShadow: 0, colInfo: 63
+  colorMode: 3,
+  colBg: 32, colDigH: 63, colDigM: 63, colShadow: 0, colInfo: 63, colColon: 63
 };
 
 function loadSettings() {
@@ -88,7 +96,8 @@ function loadSettings() {
         colDigH:    p.colDigH    !== undefined ? p.colDigH    : d.colDigH,
         colDigM:    p.colDigM    !== undefined ? p.colDigM    : d.colDigM,
         colShadow:  p.colShadow  !== undefined ? p.colShadow  : d.colShadow,
-        colInfo:    p.colInfo    !== undefined ? p.colInfo    : d.colInfo
+        colInfo:    p.colInfo    !== undefined ? p.colInfo    : d.colInfo,
+        colColon:   p.colColon   !== undefined ? p.colColon   : d.colColon
       };
     }
   } catch(e) {}
@@ -106,7 +115,7 @@ function sendSettings(s) {
     CfgInvert: s.invert, CfgColorMode: s.colorMode,
     CfgColorBg: s.colBg, CfgColorDigH: s.colDigH,
     CfgColorDigM: s.colDigM, CfgColorShadow: s.colShadow,
-    CfgColorInfo: s.colInfo
+    CfgColorInfo: s.colInfo, CfgColorColon: s.colColon
   };
   for (var i = 0; i < 6; i++) msg['CfgWide'  + (i+1)] = s.wide[i];
   for (var i = 0; i < 8; i++) msg['CfgStack' + (i+1)] = s.stack[i];
@@ -165,18 +174,18 @@ function fetchWeather() {
 function slotSelectFromList(id, currentVal, list) {
   var out = '<select id="' + id + '">';
   for (var i = 0; i < list.length; i++) {
-    out += '<option value="' + list[i].v + '"' + (list[i].v === currentVal ? ' selected' : '') + '>' + list[i].n + '<\/option>';
+    out += '<option value="' + list[i].v + '"' + (list[i].v === currentVal ? ' selected' : '') + '>' + list[i].n + '</option>';
   }
-  return out + '<\/select>';
+  return out + '</select>';
 }
 
 function radioGroup(name, labels, values, currentVal) {
   var out = '<div class="toggle">';
   for (var i = 0; i < labels.length; i++) {
     out += '<input type="radio" name="' + name + '" id="' + name + i + '" value="' + values[i] + '"' + (values[i] === currentVal ? ' checked' : '') + '>';
-    out += '<label for="' + name + i + '">' + labels[i] + '<\/label>';
+    out += '<label for="' + name + i + '">' + labels[i] + '</label>';
   }
-  return out + '<\/div>';
+  return out + '</div>';
 }
 
 function colorPicker(fieldId, currentIdx) {
@@ -189,15 +198,15 @@ function colorPicker(fieldId, currentIdx) {
     var sel = (idx === currentIdx) ? ' cp-sel' : '';
     grid += '<div class="cp-sw' + sel + '" style="background:' + css + '"'
           + ' onclick="cpPick(\'' + fieldId + '\',' + idx + ')">'
-          + '<\/div>';
+          + '</div>';
   }
-  grid += '<\/div>';
+  grid += '</div>';
   return '<input type="hidden" id="' + fieldId + '" value="' + currentIdx + '">'
     + '<div class="cp-trigger" id="' + fieldId + '_tr"'
     + ' style="background:' + bg + ';color:' + fg + '"'
     + ' onclick="cpToggle(\'' + fieldId + '\')">'
-    + '<span id="' + fieldId + '_lbl">' + currentIdx + '<\/span>'
-    + '<\/div>'
+    + '<span id="' + fieldId + '_lbl">' + currentIdx + '</span>'
+    + '</div>'
     + grid;
 }
 
@@ -205,37 +214,47 @@ function buildConfigPage(s, isColor) {
   var wideRows = '', stackRows = '';
   var wideLabels = ['Above 1','Above 2','Above 3','Below 1','Below 2','Below 3'];
   for (var i = 0; i < 6; i++)
-    wideRows += '<div class="row"><span class="lbl">' + wideLabels[i] + '<\/span>' + slotSelectFromList('w'+i, s.wide[i], SLOT_NAMES_WIDE) + '<\/div>';
+    wideRows += '<div class="row"><span class="lbl">' + wideLabels[i] + '</span>' + slotSelectFromList('w'+i, s.wide[i], SLOT_NAMES_WIDE) + '</div>';
   for (var i = 0; i < 8; i++)
-    stackRows += '<div class="row"><span class="lbl">' + (i+1) + '<\/span>' + slotSelectFromList('s'+i, s.stack[i], SLOT_NAMES_STACK) + '<\/div>';
+    stackRows += '<div class="row"><span class="lbl">' + (i+1) + '</span>' + slotSelectFromList('s'+i, s.stack[i], SLOT_NAMES_STACK) + '</div>';
 
+  // Color pickers for static mode — includes colon
   var colorDefs = [
-    ['colBg','Background',s.colBg],['colDigH','Hour digits',s.colDigH],
-    ['colDigM','Minute digits',s.colDigM],['colShadow','Shadow',s.colShadow],
-    ['colInfo','Info & icons',s.colInfo]
+    ['colBg',     'Background',    s.colBg],
+    ['colDigH',   'Hour digits',   s.colDigH],
+    ['colDigM',   'Minute digits', s.colDigM],
+    ['colColon',  'Colon',         s.colColon],
+    ['colShadow', 'Shadow',        s.colShadow],
+    ['colInfo',   'Info & icons',  s.colInfo]
   ];
   var colorRows = '';
   for (var i = 0; i < colorDefs.length; i++) {
     colorRows += '<div class="color-row">'
-      + '<span class="lbl">' + colorDefs[i][1] + '<\/span>'
+      + '<span class="lbl">' + colorDefs[i][1] + '</span>'
       + colorPicker(colorDefs[i][0], colorDefs[i][2])
-      + '<\/div>';
+      + '</div>';
   }
 
+  // Color section: pace palette selector + static color pickers
   var colorSection = isColor
-    ? '<div class="section"><h3>Colors<\/h3>'
-      + '<label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">Color mode<\/label>'
-      + radioGroup('cm',['Step Pace Progression','Static'],[0,1],s.colorMode)
+    ? '<div class="section"><h3>Background Color</h3>'
+      + '<label class="sub-lbl">Color mode</label>'
+      + radioGroup('cm',
+          ['Pace: Dark','Pace: Medium','Pace: Light','Static'],
+          [2, 3, 4, 1],
+          s.colorMode)
+      + '<p class="note">Pace modes color the background by how your step count compares to a typical day.<br>'
+      + 'Dark and Medium use white digits. Light uses black digits.</p>'
       + '<div id="static-colors" style="display:none;margin-top:12px">'
       + colorRows
-      + '<\/div><\/div>'
+      + '</div></div>'
     : '';
 
   var invertSection = !isColor
-    ? '<div class="section"><h3>Display<\/h3>'
-      + '<label style="color:#aaa;font-size:12px;display:block;margin-bottom:4px">Theme<\/label>'
+    ? '<div class="section"><h3>Display</h3>'
+      + '<label class="sub-lbl">Theme</label>'
       + radioGroup('inv',['Black on white','White on black'],[1,0],s.invert)
-      + '<\/div>'
+      + '</div>'
     : '';
 
   var html = '<!DOCTYPE html><html><head>'
@@ -245,12 +264,13 @@ function buildConfigPage(s, isColor) {
     + 'h2{color:#fff;margin:0 0 16px;font-size:20px}'
     + '.section{margin-bottom:22px}'
     + '.section h3{color:#aaa;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin:0 0 8px;border-bottom:1px solid #333;padding-bottom:4px}'
+    + '.sub-lbl{color:#aaa;font-size:12px;display:block;margin-bottom:4px}'
     + '.row{display:flex;align-items:center;gap:8px;padding:5px 6px;background:#1a1a1a;border:1px solid #2a2a2a;border-radius:6px;margin-bottom:4px}'
     + '.lbl{color:#888;font-size:12px;min-width:80px;flex-shrink:0}'
     + 'select{flex:1;padding:6px 8px;background:#222;border:1px solid #444;color:#eee;border-radius:4px;font-size:12px}'
-    + '.toggle{display:flex}'
+    + '.toggle{display:flex;flex-wrap:wrap}'
     + '.toggle input{display:none}'
-    + '.toggle label{flex:1;text-align:center;padding:8px 4px;background:#222;border:1px solid #444;cursor:pointer;color:#aaa;font-size:12px;line-height:1.2}'
+    + '.toggle label{flex:1;text-align:center;padding:8px 4px;background:#222;border:1px solid #444;cursor:pointer;color:#aaa;font-size:12px;line-height:1.3;min-width:60px}'
     + '.toggle input:checked+label{background:#4a9;color:#fff;border-color:#4a9}'
     + '.toggle label:first-of-type{border-radius:6px 0 0 6px}'
     + '.toggle label:last-of-type{border-radius:0 6px 6px 0}'
@@ -263,32 +283,32 @@ function buildConfigPage(s, isColor) {
     + '.cp-sel{border-color:#fff!important;transform:scale(1.15)}'
     + '#save{width:100%;padding:14px;background:#4a9;border:none;color:#fff;font-size:16px;font-weight:bold;border-radius:8px;cursor:pointer;margin-top:4px}'
     + '#save:active{background:#3a8}'
-    + '.note{color:#555;font-size:11px;margin:6px 0 0}'
-    + '<\/style><\/head><body>'
-    + '<h2>TallBoy<\/h2>'
-    + '<div class="section"><h3>Info Display Mode<\/h3>'
-    + radioGroup('im',['Always On','Always Off','Shake','Shake - 1 min','Debug'],[2,1,3,4,0],s.infoMode)
-    + '<\/div>'
-    + '<div class="section"><h3>Info Layout<\/h3>'
+    + '.note{color:#666;font-size:11px;margin:8px 0 0;line-height:1.5}'
+    + '</style></head><body>'
+    + '<h2>TallBoy</h2>'
+    + '<div class="section"><h3>Info Display Mode</h3>'
+    + radioGroup('im',['Always On','Always Off','Shake','Shake — 1 min','Debug'],[2,1,3,4,0],s.infoMode)
+    + '</div>'
+    + '<div class="section"><h3>Info Layout</h3>'
     + radioGroup('il',['Wide','Stacked Left','Stacked Right'],[0,1,2],s.infoLayout)
-    + '<\/div>'
-    + '<div class="section"><h3>Wide Mode Lines<\/h3>'
-    + '<p class="note" style="margin:0 0 8px">3 lines above the time, 3 below.<\/p>'
-    + wideRows + '<\/div>'
-    + '<div class="section"><h3>Stacked Mode Lines<\/h3>'
-    + '<p class="note" style="margin:0 0 8px">Shared by Stacked Left and Stacked Right.<\/p>'
-    + stackRows + '<\/div>'
-    + '<div class="section"><h3>Units<\/h3>'
+    + '</div>'
+    + '<div class="section"><h3>Wide Mode Lines</h3>'
+    + '<p class="note" style="margin:0 0 8px">3 lines above the time, 3 below.</p>'
+    + wideRows + '</div>'
+    + '<div class="section"><h3>Stacked Mode Lines</h3>'
+    + '<p class="note" style="margin:0 0 8px">Shared by Stacked Left and Stacked Right.</p>'
+    + stackRows + '</div>'
+    + '<div class="section"><h3>Units</h3>'
     + '<div class="pair">'
-    + '<div><label style="color:#aaa;font-size:12px;display:block;margin-bottom:4px">Temperature<\/label>'
-    + radioGroup('tu',['F','C'],[0,1],s.tempUnit) + '<\/div>'
-    + '<div><label style="color:#aaa;font-size:12px;display:block;margin-bottom:4px">Distance<\/label>'
-    + radioGroup('du',['mi','km'],[0,1],s.distUnit) + '<\/div><\/div>'
-    + '<p class="note">Clock format uses your Pebble system setting.<\/p>'
-    + '<\/div>'
+    + '<div><label class="sub-lbl">Temperature</label>'
+    + radioGroup('tu',['F','C'],[0,1],s.tempUnit) + '</div>'
+    + '<div><label class="sub-lbl">Distance</label>'
+    + radioGroup('du',['mi','km'],[0,1],s.distUnit) + '</div></div>'
+    + '<p class="note">Clock format uses your Pebble system setting.</p>'
+    + '</div>'
     + colorSection
     + invertSection
-    + '<button id="save" onclick="doSave()">Save<\/button>'
+    + '<button id="save" onclick="doSave()">Save</button>'
     + '<script>';
 
   if (isColor) {
@@ -335,13 +355,13 @@ function buildConfigPage(s, isColor) {
     + '    infoMode:im?+im.value:0,infoLayout:il?+il.value:1,'
     + '    wide:wide,stack:stack,'
     + '    tempUnit:tu?+tu.value:0,distUnit:du?+du.value:0,'
-    + '    invert:inv?+inv.value:0,colorMode:cm?+cm.value:0,'
+    + '    invert:inv?+inv.value:0,colorMode:cm?+cm.value:3,'
     + '    colBg:ci("colBg"),colDigH:ci("colDigH"),colDigM:ci("colDigM"),'
-    + '    colShadow:ci("colShadow"),colInfo:ci("colInfo")'
+    + '    colShadow:ci("colShadow"),colInfo:ci("colInfo"),colColon:ci("colColon")'
     + '  };'
     + '  location.href="pebblejs://close#"+encodeURIComponent(JSON.stringify(s));'
     + '}'
-    + '<\/script><\/body><\/html>';
+    + '</script></body></html>';
 
   return html;
 }
@@ -361,7 +381,7 @@ Pebble.addEventListener('showConfiguration', function() {
   try {
     var info = Pebble.getActiveWatchInfo();
     var p = info.platform;
-    isColor = (p === 'basalt' || p === 'chalk' || p === 'emery');
+    isColor = (p === 'basalt' || p === 'chalk' || p === 'emery' || p === 'gabbro');
   } catch(e) {}
   Pebble.openURL('data:text/html,' + encodeURIComponent(buildConfigPage(loadSettings(), isColor)));
 });
