@@ -5,7 +5,7 @@ A Pebble watchface built around oversized vector-drawn digits that dynamically s
 **Design:** Sterling Ely  
 **Implementation:** Sterling Ely + Claude  
 **Primary device:** Pebble Time 2 (emery, 200×228, color)  
-**Status:** Active development — v3.61, not yet formally released
+**Status:** Active development — v3.63, not yet formally released
 
 ---
 
@@ -15,7 +15,7 @@ A Pebble watchface built around oversized vector-drawn digits that dynamically s
 
 ## Current status
 
-Version **v3.61** is functional on all 7 Pebble platforms. Animated digits, three display layouts, health and weather data, and pace-based background color are all working. Round platform support (chalk and gabbro) was added in v3.60–v3.61 with per-column digit heights that follow the circular bezel. A config page has not yet been built.
+Version **v3.63** is functional on all 7 Pebble platforms. Animated digits, three display layouts, health and weather data, and pace-based background color are all working. Round platform support (chalk and gabbro) was added in v3.60–v3.61 with per-column digit heights that follow the circular bezel. A config page (PebbleKit JS) covers layouts, units, info slots and colors; v3.62 added three pace palettes (dark / medium / light) and a colon color, and v3.63 added air quality (AQI) from Open-Meteo.
 
 See [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md) for the full status, known bugs, and next work.
 
@@ -49,7 +49,7 @@ Round platforms (chalk, gabbro) support Full mode only. Per-column digit heights
 
 Info lines display health, weather, solar, and device status data. **Data caching philosophy: hide > mislead** — if data is unavailable or stale, the slot disappears entirely rather than showing zeros or stale values.
 
-28 slot types are available (IDs 0–28). See [`PROJECT_CONTEXT.md`](PROJECT_CONTEXT.md) for the complete slot reference.
+Slot type IDs 0–30 are available, including air quality (AQI) as of v3.63. See [`PROJECT_CONTEXT.md`](PROJECT_CONTEXT.md) for the complete slot reference.
 
 ---
 
