@@ -18,21 +18,24 @@ The watchface supports all seven Pebble hardware platforms, three display layout
 
 ## Current Status
 
-**Version: v3.61** — active development, not yet formally released.
+**Version: v3.63** — active development, not yet formally released. (Code last changed 2026-08-11; this doc synced to the commit history on 2026-09-28.)
 
 ### What is working
 - Builds clean on all 7 target platforms
 - Full-mode animated digits: anticipate → squish → expand on every minute tick
 - Wide info mode: up to 3 info slots above + 3 below; digits fill remaining space; empty slots collapse instantly
 - Stacked info mode (STACK_L / STACK_R): stacked hour/minute digits on one side, up to 8 info lines in a column on the other; minute-change fast-blink animation
-- Pace-based background color spectrum (color + health platforms)
+- Pace-based background color spectrum (color + health platforms), with three palettes selectable in the config page — dark (#AA max channel, white fg), medium (default, white fg), light (#55 min channel, black fg) — plus a static-color mode (v3.62)
+- Separately colorable colon (`CfgColorColon`, v3.62); default custom background dark red #AA0000
 - Weather, UV index, and solar time fetch via PebbleKit JS (Open-Meteo API, no key required)
-- All 28 info slot types working, including sleep, calories (active + resting), and typical steps
+- Air quality (v3.63): US AQI from the Open-Meteo air-quality API (`current=us_aqi`), fetched on connect and every 30 min; hidden after 3 h without an update like weather/UV; stacked slot reads "AQI ##"; uses the new `icon_haze`
+- All info slot types (IDs 0–30) working, including sleep, calories (active + resting), typical steps, AQI (29) and the wide-only Temp + UV + AQI combo (30)
+- Sun icon redrawn (v3.62: filled disc + thin rays; v3.63: longer rays with correct diagonal directions)
 - Round platform support (chalk + gabbro): per-column digit heights follow circular bezel geometry — outer columns 108px, inner 144px; center point aligned at unobstructed midpoint
 - Background: black base → colored rounded-rect (radius UNIT×2 = 16px on emery); plain fill on round (OS clips to circle automatically)
 
 ### Known active bugs
-None as of v3.61.
+None logged as of v3.63.
 
 ### Unresolved questions
 - STACK_L animation (symmetric squish) vs STACK_R animation (fold toward center) — preference pending device comparison
@@ -242,6 +245,7 @@ CfgStack1..8 = 16..23
 CfgInvert=24, CfgColorMode=25
 CfgColorBg=26, CfgColorDigH=27, CfgColorDigM=28, CfgColorShadow=29, CfgColorInfo=30
 UvIndex=31, SunriseTomorrow=32
+CfgColorColon=33 (v3.62), AqiIndex=34 (v3.63)
 ```
 
 ### Persist keys
@@ -249,7 +253,7 @@ UvIndex=31, SunriseTomorrow=32
 ```
 PERSIST_CFG_VERSION=0, PERSIST_CFG_FLAGS=1, PERSIST_CFG_WIDE=2
 PERSIST_CFG_STACK=3, PERSIST_CFG_STACK_HI=4, PERSIST_CFG_COLORS=5 (and 6)
-CFG_VERSION=5  ← bump this if the persist layout changes
+CFG_VERSION=6  ← bump this if the persist layout changes (bumped to 6 in v3.62 for colon color)
 ```
 
 ### Slot type IDs (complete)
@@ -270,6 +274,7 @@ CFG_VERSION=5  ← bump this if the persist layout changes
 23 = light_remaining            24 = uv+light (wide only)
 25 = temp+UV (wide only)        26 = typical_day (full-day step total)
 27 = calories_total (active+resting)   28 = sleep duration
+29 = AQI (stacked: "AQI ##")        30 = temp+UV+AQI (wide only; degrades gracefully if any value is missing)
 ```
 
 ---
@@ -277,7 +282,7 @@ CFG_VERSION=5  ← bump this if the persist layout changes
 ## Known Bugs / Known Traps
 
 ### Active bugs
-None as of v3.61.
+None logged as of v3.63.
 
 ### Known traps — do not repeat
 
@@ -301,13 +306,15 @@ None as of v3.61.
 ## Current TODO
 
 ### Immediate
-- Test v3.61 round geometry on chalk or gabbro — confirm per-column heights look correct and nothing clips
+- Device-test the v3.62/v3.63 changes: pace palettes, colon color, sun icon, AQI slot + haze icon, Temp+UV+AQI combo
+- Decide the default pace palette (code default: medium)
+- Test round geometry on chalk or gabbro — confirm per-column heights look correct and nothing clips
 - Decide STACK_L vs STACK_R animation preference after device comparison
 
 ### Near-term
 - Delete dead files via GitHub web UI: `src/digit.c`, `src/digit.h`, `src/case8_patch.txt`, `src/main_digit1_fix.txt`, and the root scratch/stub files
 - Lower-resolution platform tuning (basalt/aplite/diorite/flint) — layout math scales with UNIT; needs device testing
-- Config page (JavaScript/Clay) — not yet built
+- Config page — exists in `src/pkjs/index.js`; v3.62 added the pace palette selector and colon color picker. Further config polish as needed
 
 ### Backlog
 - Info line support for round platforms — no design decision yet
@@ -357,6 +364,8 @@ TallBoy shares platform constants, build rules, and CloudPebble conventions with
 
 ## Last Updated
 
-v3.61 — July 2026
-Updated by: AI collaborator (Claude Sonnet)
-Changes in this pass: added Related Projects section, reorganized Build Rules to separate human vs. AI collaborator rules, minor clarifications throughout, updated status.
+v3.63 — doc sync 2026-09-28
+Updated by: AI collaborator (Claude, Anthropic) with direction from Sterling Ely
+Changes in this pass: brought status, message keys, persist version, slot IDs and TODO up to date with the v3.62 (July 2026) and v3.63 (Aug. 10–11, 2026) commits, which had landed without a matching doc update.
+
+Previous: v3.61 — July 2026 (Claude Sonnet): added Related Projects section, reorganized Build Rules, updated status.
