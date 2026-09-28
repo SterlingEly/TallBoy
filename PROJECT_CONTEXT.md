@@ -70,11 +70,7 @@ SterlingEly/TallBoy  (branch: main)
 └── wscript                 ← Waf build script (do not edit)
 ```
 
-**Dead files still in repo — safe to delete via GitHub web UI:**
-- `src/digit.c`, `src/digit.h` — old raster digit library, fully superseded by vector drawing
-- `src/case8_patch.txt`, `src/main_digit1_fix.txt` — old patch notes
-- `CLAUDE_CONTEXT.md`, `CONTEXT_TALLBOY.md` — retired legacy context docs (stubbed)
-- `_cycle_fix.txt`, `_draw_info_line_snippet.txt`, `_smooth_fix.txt` — old scratch files (stubbed)
+The repo contains only the files above (plus `resources/`). The old dead/scratch files (`src/digit.c`, `src/digit.h`, patch notes, retired context stubs, root scratch files) were deleted on 2026-09-28.
 
 ---
 
@@ -312,7 +308,6 @@ None logged as of v3.63.
 - Decide STACK_L vs STACK_R animation preference after device comparison
 
 ### Near-term
-- Delete dead files via GitHub web UI: `src/digit.c`, `src/digit.h`, `src/case8_patch.txt`, `src/main_digit1_fix.txt`, and the root scratch/stub files
 - Lower-resolution platform tuning (basalt/aplite/diorite/flint) — layout math scales with UNIT; needs device testing
 - Config page — exists in `src/pkjs/index.js`; v3.62 added the pace palette selector and colon color picker. Further config polish as needed
 
@@ -366,6 +361,6 @@ TallBoy shares platform constants, build rules, and CloudPebble conventions with
 
 v3.63 — doc sync 2026-09-28
 Updated by: AI collaborator (Claude, Anthropic) with direction from Sterling Ely
-Changes in this pass: brought status, message keys, persist version, slot IDs and TODO up to date with the v3.62 (July 2026) and v3.63 (Aug. 10–11, 2026) commits, which had landed without a matching doc update.
+Changes in this pass: removed the nine dead/scratch files and their TODO; brought status, message keys, persist version, slot IDs and TODO up to date with the v3.62 (July 2026) and v3.63 (Aug. 10–11, 2026) commits, which had landed without a matching doc update.
 
 Previous: v3.61 — July 2026 (Claude Sonnet): added Related Projects section, reorganized Build Rules, updated status.
