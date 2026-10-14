@@ -12,34 +12,40 @@ TallBoy is a Pebble watchface built around oversized vector-drawn digits that dy
 
 **Design tenet:** *Watchfaces display data as atmosphere, not content. Artfully vague > precisely readable. Color = mood. Position = direction. The watch is the barometer; the phone is the app.*
 
-The watchface supports all seven Pebble hardware platforms, three display layouts, health and weather data integration, and a pace-based background color system. It is under active development as of mid-2026.
+The watchface supports all seven Pebble hardware platforms, three display layouts, health and weather data integration, and a pace-based background color system. It is under active development as of autumn 2026.
 
 ---
 
 ## Current Status
 
-**Version: v3.63** — active development, not yet formally released. (Code last changed 2026-08-11; this doc synced to the commit history on 2026-09-28.)
+**Internal version: v3.64** — active development, not yet formally released. (Internal numbers are development checkpoints, not public releases.)
 
 ### What is working
-- Builds clean on all 7 target platforms
+- Builds clean on all 7 target platforms as of v3.63; v3.64 (below) has not yet been compiled or device-tested
 - Full-mode animated digits: anticipate → squish → expand on every minute tick
 - Wide info mode: up to 3 info slots above + 3 below; digits fill remaining space; empty slots collapse instantly
 - Stacked info mode (STACK_L / STACK_R): stacked hour/minute digits on one side, up to 8 info lines in a column on the other; minute-change fast-blink animation
 - Pace-based background color spectrum (color + health platforms), with three palettes selectable in the config page — dark (#AA max channel, white fg), medium (default, white fg), light (#55 min channel, black fg) — plus a static-color mode (v3.62)
 - Separately colorable colon (`CfgColorColon`, v3.62); default custom background dark red #AA0000
 - Weather, UV index, and solar time fetch via PebbleKit JS (Open-Meteo API, no key required)
-- Air quality (v3.63): US AQI from the Open-Meteo air-quality API (`current=us_aqi`), fetched on connect and every 30 min; hidden after 3 h without an update like weather/UV; stacked slot reads "AQI ##"; uses the new `icon_haze`
+- Air quality (v3.63): US AQI from the Open-Meteo air-quality API (`current=us_aqi`), fetched on connect and every 30 min; hidden after 3 h without an update like weather/UV; stacked slot reads "AQI ##"; uses `icon_haze`. **Device-confirmed working by Sterling, 2026-10-13.**
 - All info slot types (IDs 0–30) working, including sleep, calories (active + resting), typical steps, AQI (29) and the wide-only Temp + UV + AQI combo (30)
 - Sun icon redrawn (v3.62: filled disc + thin rays; v3.63: longer rays with correct diagonal directions)
-- Round platform support (chalk + gabbro): per-column digit heights follow circular bezel geometry — outer columns 108px, inner 144px; center point aligned at unobstructed midpoint
+- Round platform support: per-column digit heights follow circular bezel geometry; center point aligned at unobstructed midpoint. **chalk (180×180) and gabbro (260×260) now have separate geometry blocks (v3.64).**
 - Background: black base → colored rounded-rect (radius UNIT×2 = 16px on emery); plain fill on round (OS clips to circle automatically)
 
+### v3.64 changes (2026-10-13) — NOT YET COMPILED OR DEVICE-TESTED
+1. **Gabbro split from chalk.** Gabbro (Pebble Round 2) is a 260×260 round screen; it had been sharing chalk's 180×180 geometry block (and was mislabeled "Pebble 2 HR"). It now has its own block: `UNIT=8` (same glyph scale as emery), `SLOT_W=40`, slots centered on x=130 (`H_TENS 30 | H_ONES 70 | colon 110 | M_TENS 150 | M_ONES 190`), `ROUND_OUTER_H = UNIT*20 = 160`, `ROUND_INNER_H = UNIT*26 = 208`. **The two round heights are scaled from chalk's proportions (outer ≈ 0.6, inner ≈ 0.8 of screen height), not measured** — tune on the real device.
+2. **Heart rate fixed.** `prv_update_health()` used `health_service_metric_accessible()` for `HealthMetricHeartRateBPM`, which always reports HR unavailable. It now uses `health_service_metric_aggregate_averaged_accessible(metric, now, now, HealthAggregationAvg, HealthServiceTimeScopeOnce)` — the same fix that made HR work in Radium 2.
+
 ### Known active bugs
-None logged as of v3.63.
+None logged. (v3.64 changes above are unverified.)
 
 ### Unresolved questions
 - STACK_L animation (symmetric squish) vs STACK_R animation (fold toward center) — preference pending device comparison
 - Whether to add info line support to round platforms in a future version
+- Gabbro digit heights (see v3.64 note) — scaled, not measured
+- Whether the HR slot should hide (rather than show "--") on platforms with no HR sensor (basalt, chalk, gabbro, flint, aplite) — currently shows "--"
 
 ---
 
@@ -61,16 +67,16 @@ None logged as of v3.63.
 ```
 SterlingEly/TallBoy  (branch: main)
 ├── src/
-│   ├── main.c              ← entire watchface (~88KB); single-file architecture
+│   ├── main.c              ← entire watchface (~97KB); single-file architecture
 │   └── pkjs/
-│       └── index.js        ← PebbleKit JS: weather/UV/solar fetch + config page
+│       └── index.js        ← PebbleKit JS: weather/UV/solar/AQI fetch + config page
 ├── appinfo.json            ← app metadata, message keys, target platforms
 ├── PROJECT_CONTEXT.md      ← this file
 ├── README.md               ← human-facing overview
 └── wscript                 ← Waf build script (do not edit)
 ```
 
-The repo contains only the files above (plus `resources/`). The old dead/scratch files (`src/digit.c`, `src/digit.h`, patch notes, retired context stubs, root scratch files) were deleted on 2026-09-28.
+The repo contains only the files above (plus `resources/`). The old dead/scratch files were deleted on 2026-09-28.
 
 ---
 
@@ -97,7 +103,7 @@ The repo contains only the files above (plus `resources/`). The old dead/scratch
 - **ALWAYS use `create_or_update_file` with the current file SHA** — NEVER use `push_files` (confirmed bug: sends empty content, silently zeroing the file)
 - Always commit **full file content** — never partial diffs or patches
 - **Always fetch the current SHA** immediately before any update — SHAs from prior sessions are stale after any intervening commit
-- `get_file_contents` times out on `main.c` (~88KB) — use `create_or_update_file` directly; retry if timeout occurs
+- `get_file_contents` on `main.c` (~97KB) has timed out in some sessions and worked in others — retry before assuming it is unavailable
 - File "deletion" via MCP produces a stub file, not a true delete — actual deletion requires the GitHub web UI trash icon
 
 ---
@@ -109,21 +115,21 @@ The repo contains only the files above (plus `resources/`). The old dead/scratch
 | Platform | Watch | Screen | UNIT | HALF_UNIT | Notes |
 |---|---|---|---|---|---|
 | emery | Pebble Time 2 | 200×228 rect | 8 | 4 | Color, HR sensor — primary dev device |
-| basalt | Pebble Time | 144×168 rect | 6 | 3 | Color |
-| chalk | Pebble Time Round | 180×180 round | 6 | 3 | Color, round |
-| diorite | Pebble 2 SE | 144×168 rect | 6 | 3 | B&W, HR sensor |
-| flint | Pebble 2 | 144×168 rect | 6 | 3 | B&W |
-| aplite | Pebble Classic | 144×168 rect | 6 | 3 | B&W |
-| gabbro | Pebble 2 HR | 180×180 round | 6 | 3 | Color, round, HR sensor |
+| basalt | Pebble Time | 144×168 rect | 6 | 3 | Color, no HR |
+| chalk | Pebble Time Round | 180×180 round | 6 | 3 | Color, round, no HR |
+| diorite | Pebble 2 (SE and HR models) | 144×168 rect | 6 | 3 | B&W; HR sensor on the HR model only |
+| flint | Pebble 2 Duo | 144×168 rect | 6 | 3 | B&W, no HR |
+| aplite | Pebble Classic / Steel | 144×168 rect | 6 | 3 | B&W, no HR, no health service |
+| gabbro | Pebble Round 2 (Core Devices, 2026) | **260×260 round** | **8** | 4 | Color, round, **no HR sensor** |
 
-- HR sensors: **emery, diorite, and gabbro only** — use "on supported models" in store copy, never list platforms
-- Round platforms (chalk, gabbro): share a single `PBL_ROUND` code block; info layouts not supported on round
+- HR sensors: **emery and diorite (HR model) only** — use "on supported models" in store copy, never list platforms
+- Round platforms (chalk, gabbro): share the `PBL_ROUND` code paths but have **separate geometry blocks** (chalk 180×180 UNIT 6; gabbro 260×260 UNIT 8); info layouts not supported on round
 - Touch input: emery only — non-functional at firmware level on shipping hardware; all `PBL_TOUCH` code removed
 
 ### Digit geometry (stable)
 
 ```
-UNIT = 8 (emery) / 6 (all others)
+UNIT = 8 (emery, gabbro) / 6 (all others)
 SLOT_W       = UNIT * 5     — digit slot width (includes padding)
 GLYPH_W      = UNIT * 4     — actual drawn glyph width
 HALF_SLOT_PAD = UNIT / 2    — padding each side of glyph
@@ -149,7 +155,7 @@ Digits 1, 2, and 7 use `gpath_create` for diagonal strokes — these allocate/fr
 SLOT_H_TENS=12, SLOT_H_ONES=52, COLON_SLOT_X=80, SLOT_M_TENS=108, SLOT_M_ONES=148
 ```
 
-### Slot positions — round (chalk/gabbro, UNIT=6, SLOT_W=30, centered on 180px)
+### Slot positions — chalk (UNIT=6, SLOT_W=30, centered on 180px)
 
 ```
 SLOT_H_TENS=15, SLOT_H_ONES=45, COLON_SLOT_X=75, SLOT_M_TENS=105, SLOT_M_ONES=135
@@ -157,6 +163,16 @@ Colon center = x=90 = exact screen center ✓
 ROUND_OUTER_H = UNIT*18 = 108px  — H_TENS and M_ONES columns (dx=60 from center)
 ROUND_INNER_H = UNIT*24 = 144px  — H_ONES and M_TENS columns (dx=30 from center)
 cy on round   = ub_top + ub_h/2  — NOT MARGIN_OUTER + s_target_h/2 (6px off-center)
+```
+
+### Slot positions — gabbro (UNIT=8, SLOT_W=40, centered on 260px) — v3.64, unverified on device
+
+```
+SLOT_H_TENS=30, SLOT_H_ONES=70, COLON_SLOT_X=110, SLOT_M_TENS=150, SLOT_M_ONES=190
+Colon center = 110 + 20 = 130 = exact screen center ✓  (30px margin each side)
+ROUND_OUTER_H = UNIT*20 = 160px  — H_TENS and M_ONES columns (dx=80 from center)
+ROUND_INNER_H = UNIT*26 = 208px  — H_ONES and M_TENS columns (dx=40 from center)
+Heights are scaled from chalk's proportions (outer ~0.6, inner ~0.8 of screen), NOT measured.
 ```
 
 ### Slot positions — other rect (basalt/diorite/flint/aplite, UNIT=6, SLOT_W=30)
@@ -212,7 +228,9 @@ static int s_steps_typical_day = -1; // typical full-day total (same-day-of-week
 static int s_calories_resting = 0;   // BMR calories today
 static int s_sleep_seconds = -1;     // sleep since 6pm yesterday; -1 = unavailable
 static int s_uv_index = -1;          // -1 = never received; 0+ = valid (0 is real UV 0)
+static int s_aqi = -1;               // -1 = never received; 0+ = valid
 static time_t s_weather_ts = 0;      // unix time of last weather receipt; 0 = never
+static time_t s_aqi_ts = 0;          // unix time of last AQI receipt; 0 = never
 static int s_weather_temp_f = -999;  // sentinel for no data
 ```
 
@@ -221,10 +239,14 @@ static int s_weather_temp_f = -999;  // sentinel for no data
 **Hide > mislead.** If data is unavailable or stale, the slot returns `false` and disappears. Never show zeros or stale defaults.
 
 - UV index 0 is a valid reading — use `-1` as the "never received" sentinel
-- Weather/UV ages out after 3 hours without a phone update (`WEATHER_MAX_AGE = 3 * 3600`)
+- Weather/UV/AQI age out after 3 hours without a phone update (`WEATHER_MAX_AGE = 3 * 3600`)
 - Sunrise/sunset never ages out (astronomical; valid all day)
-- Heart rate displays `"--"` when the sensor exists but has no reading — the only exception to the hide rule
+- Heart rate displays `"--"` when the slot is shown but there is no reading — the only exception to the hide rule
 - Wide mode empty slots collapse immediately on the next redraw after data arrives or expires
+
+### Heart rate (SDK quirk)
+
+`health_service_metric_accessible()` **always** reports `HealthMetricHeartRateBPM` as unavailable. Use `health_service_metric_aggregate_averaged_accessible(HealthMetricHeartRateBPM, now, now, HealthAggregationAvg, HealthServiceTimeScopeOnce)` as the availability check, then `health_service_peek_current_value()` to read it. Only emery and diorite (HR model) have the sensor.
 
 ---
 
@@ -278,7 +300,7 @@ CFG_VERSION=6  ← bump this if the persist layout changes (bumped to 6 in v3.62
 ## Known Bugs / Known Traps
 
 ### Active bugs
-None logged as of v3.63.
+None logged.
 
 ### Known traps — do not repeat
 
@@ -286,10 +308,10 @@ None logged as of v3.63.
 |---|---|
 | `push_files` sends empty content | Always use `create_or_update_file` with the current SHA |
 | Stale SHA | Fetch SHA immediately before every update — any intervening commit invalidates it |
-| `get_file_contents` times out on `main.c` | Skip the read; write directly using `create_or_update_file` |
+| `health_service_metric_accessible` for heart rate | Always reports HR unavailable. Use `aggregate_averaged_accessible` with a point-in-time range (see Architecture → Heart rate) |
 | Degree symbol (0xB0) breaks weather text | Use plain ASCII — `"72 F"` not `"72°F"` — degree symbol silently prevents rendering |
-| Gabbro is round, not rectangular | Never group gabbro with aplite/basalt/diorite/flint; use `PBL_ROUND` |
-| Round `cy` must be `ub_top + ub_h/2` | `MARGIN_OUTER + s_target_h/2` is 6px off-center on 180px screens |
+| **Gabbro is 260×260, not 180×180** | gabbro = Pebble Round 2 (large round, no HR). It was once wrongly grouped with chalk (180×180) and labeled "Pebble 2 HR". Never share chalk's geometry block with gabbro; never group gabbro with rect platforms |
+| Round `cy` must be `ub_top + ub_h/2` | `MARGIN_OUTER + s_target_h/2` is off-center on round screens |
 | Wide mode draw height | Use `actual_h` (live-computed from rendered slot count), not `s_target_h` |
 | Stacked blink floor | Uses `H_ABSOLUTE_MIN`, not `H_MIN` |
 | Stacked `s_h` at rest | Not meaningful at rest — use `prv_compute_stacked_h(ub_h)` directly |
@@ -302,14 +324,15 @@ None logged as of v3.63.
 ## Current TODO
 
 ### Immediate
-- Device-test the v3.62/v3.63 changes: pace palettes, colon color, sun icon, AQI slot + haze icon, Temp+UV+AQI combo
+- **Compile and device-test v3.64**: gabbro geometry on the Round 2 (digit heights, margins, nothing clipping at the bezel), and heart rate showing a real BPM on emery
+- Device-test the v3.62 changes still unconfirmed: pace palettes, colon color, sun icon, Temp+UV+AQI combo (AQI itself is confirmed working)
 - Decide the default pace palette (code default: medium)
-- Test round geometry on chalk or gabbro — confirm per-column heights look correct and nothing clips
 - Decide STACK_L vs STACK_R animation preference after device comparison
 
 ### Near-term
 - Lower-resolution platform tuning (basalt/aplite/diorite/flint) — layout math scales with UNIT; needs device testing
-- Config page — exists in `src/pkjs/index.js`; v3.62 added the pace palette selector and colon color picker. Further config polish as needed
+- Config page — exists in `src/pkjs/index.js`; further polish as needed
+- Consider hiding the HR slot on platforms with no HR sensor instead of showing "--"
 
 ### Backlog
 - Info line support for round platforms — no design decision yet
@@ -326,8 +349,9 @@ Before committing any version:
 2. No geometry regressions — digit height, colon position, info line spacing
 3. Wide mode slot collapse works correctly when data is absent vs. present
 4. Stacked mode minute-change blink animation fires correctly
-5. For round: outer digits (H_TENS, M_ONES) are visibly shorter than inner (H_ONES, M_TENS); no bezel clipping
-6. SHA fetched fresh immediately before `create_or_update_file`
+5. For round: outer digits (H_TENS, M_ONES) are visibly shorter than inner (H_ONES, M_TENS); no bezel clipping — check on **both** chalk and gabbro, they have separate geometry
+6. Heart rate shows a live BPM (not `--`) on emery
+7. SHA fetched fresh immediately before `create_or_update_file`
 
 ---
 
@@ -338,7 +362,10 @@ Before committing any version:
 | Pebble SDK docs (primary) | https://developer.repebble.com |
 | TallBoy repo | https://github.com/SterlingEly/TallBoy |
 | Open-Meteo API | https://open-meteo.com/ |
+| Open-Meteo air-quality API (US AQI 0–500) | https://open-meteo.com/en/docs/air-quality-api |
 | WMO weather code reference | https://open-meteo.com/en/docs |
+
+Note: air-quality data is CAMS ENSEMBLE via Open-Meteo, whose terms require attribution to the CAMS data provider as well as Open-Meteo. Add that acknowledgement to store/README copy before any public release.
 
 ---
 
@@ -348,19 +375,19 @@ Other Pebble watchface and tool repositories by Sterling Ely:
 
 | Repository | URL | Relationship |
 |---|---|---|
-| Radium2 | https://github.com/SterlingEly/Radium2 | Sibling watchface; radial time display with weather, health presets, and config; the most mature released project in the portfolio |
+| Radium2 | https://github.com/SterlingEly/Radium2 | Sibling watchface; radial time display with weather, health, UV/AQI and pace features; the most mature released project in the portfolio. Radium 2's pace color and info-line set were ported from TallBoy |
 | BarGraph2 | https://github.com/SterlingEly/BarGraph2 | Sibling watchface; time as vertical bar graphs; rebuild of the original 2013 Pebble concept |
 | Monogram | https://github.com/SterlingEly/Monogram | Sibling watchface; custom monogram-style digit assets; early development, targets gabbro (Pebble Round 2) |
 | PixelSampler | https://github.com/SterlingEly/PixelSampler | Developer reference tool; samples fonts, colors, and hardware capabilities across Pebble platforms |
 
-TallBoy shares platform constants, build rules, and CloudPebble conventions with all of the above. Radium2 is the most complete reference for PebbleKit JS weather/solar fetch patterns.
+TallBoy shares platform constants, build rules, and CloudPebble conventions with all of the above. Radium2 is the most complete reference for PebbleKit JS weather/solar fetch patterns and for the heart-rate API quirk.
 
 ---
 
 ## Last Updated
 
-v3.63 — doc sync 2026-09-28
+v3.64 — 2026-10-13
 Updated by: AI collaborator (Claude, Anthropic) with direction from Sterling Ely
-Changes in this pass: removed the nine dead/scratch files and their TODO; brought status, message keys, persist version, slot IDs and TODO up to date with the v3.62 (July 2026) and v3.63 (Aug. 10–11, 2026) commits, which had landed without a matching doc update.
+Changes in this pass: gabbro corrected to 260×260 / no HR and given its own geometry block; heart-rate availability check fixed; AQI recorded as device-confirmed; platform table naming aligned (diorite = Pebble 2, flint = Pebble 2 Duo).
 
-Previous: v3.61 — July 2026 (Claude Sonnet): added Related Projects section, reorganized Build Rules, updated status.
+Previous: v3.63 doc sync 2026-09-28; v3.61 — July 2026: added Related Projects section, reorganized Build Rules, updated status.
