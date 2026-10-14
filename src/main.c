@@ -1,5 +1,5 @@
 // ============================================================
-// TallBoy — main.c  v3.65
+// TallBoy — main.c  v3.66
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
 // v3.59j: data caching philosophy — hide > mislead; UV sentinel -1; 3h weather timeout
@@ -30,6 +30,8 @@
 //        HR unavailable -- use aggregate_averaged_accessible with a point-in-time range)
 // v3.65: gabbro colon spacing -- slots now use emery's pitch (digit slot to colon slot = 28px =
 //        3.5 UNIT, not a full SLOT_W of 40) so the gap across the colon is 3 UNIT, not 6.
+// v3.66: chalk colon spacing -- same 3.5 UNIT digit-slot-to-colon pitch (21px at UNIT 6), so the
+//        colon dot is 1 UNIT from each neighboring glyph (was a uniform 30px pitch = 2.5 UNIT).
 // ============================================================
 
 #include <pebble.h>
@@ -110,8 +112,13 @@ typedef enum {
   #define ICON_V_ADJUST       -3
 #elif defined(PBL_PLATFORM_CHALK)
   // chalk (Pebble Time Round): 180x180 round color.
-  // UNIT=6 centers cleanly: 5 slots x 30px = 150px, 15px margin each side.
-  // Colon center at x=90 = exact screen center.
+  // UNIT=6. Digit-to-digit pitch is SLOT_W (30px = 5 UNIT: 4 UNIT glyph + 1 UNIT gap); the
+  // digit-slot-to-colon pitch is 21px (3.5 UNIT), same rule as emery/gabbro, so the colon dot
+  // (1 UNIT wide) sits 1 UNIT from each neighboring glyph:
+  //   H_TENS 24 | H_ONES 54 | colon 75 | M_TENS 96 | M_ONES 126   (glyphs 27..51, 57..81, 99..123, 129..153)
+  //   Colon center = 75 + 15 = 90 = exact screen center; glyph span 27..153 is centered too.
+  // Heights below were set for the old wider columns (outer glyph edge dx=72, now 63), so there
+  // is headroom to raise them -- not measured; tune on device.
   // Per-column heights follow the circular bezel (MARGIN_OUTER inset from edge):
   //   Outer cols (H_TENS, M_ONES) dx=60 from center: max_h = ROUND_OUTER_H = 108px
   //   Inner cols (H_ONES, M_TENS) dx=30 from center: max_h = ROUND_INNER_H = 144px
@@ -122,11 +129,11 @@ typedef enum {
   #define SCREEN_H           180
   #define SLOT_W              30
   #define COLON_SLOT_X        75
-  #define SLOT_H_TENS         15
-  #define SLOT_H_ONES         45
-  #define SLOT_M_TENS        105
-  #define SLOT_M_ONES        135
-  #define SIDE_MARGIN         15
+  #define SLOT_H_TENS         24
+  #define SLOT_H_ONES         54
+  #define SLOT_M_TENS         96
+  #define SLOT_M_ONES        126
+  #define SIDE_MARGIN         24
   #define HALF_UNIT            3
   #define INFO_LINE_H         20
   #define INFO_GLYPH_H        14
