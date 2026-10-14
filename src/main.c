@@ -1,5 +1,5 @@
 // ============================================================
-// TallBoy — main.c  v3.63
+// TallBoy — main.c  v3.64
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
 // v3.59j: data caching philosophy — hide > mislead; UV sentinel -1; 3h weather timeout
@@ -24,6 +24,10 @@
 //        greys in palette; colon separate color; default custom bg = dark red
 // v3.63: sun icon rays longer + correct diagonal directions; AQI slot (29);
 //        wide combo slot temp+UV+AQI (30); AQI message key 34; AQI stacked labeled "AQI ##"
+// v3.64: gabbro split from chalk -- Pebble Round 2 is 260x260 (UNIT=8, own slot positions and
+//        round column heights), it was wrongly sharing chalk's 180x180 block;
+//        heart-rate availability check fixed (health_service_metric_accessible always reports
+//        HR unavailable -- use aggregate_averaged_accessible with a point-in-time range)
 // ============================================================
 
 #include <pebble.h>
@@ -102,8 +106,8 @@ typedef enum {
   #define UNIT                 8
   #define ICON_W              16
   #define ICON_V_ADJUST       -3
-#elif defined(PBL_ROUND)
-  // chalk (Pebble Time Round) and gabbro (Pebble 2 HR): both 180x180 round color.
+#elif defined(PBL_PLATFORM_CHALK)
+  // chalk (Pebble Time Round): 180x180 round color.
   // UNIT=6 centers cleanly: 5 slots x 30px = 150px, 15px margin each side.
   // Colon center at x=90 = exact screen center.
   // Per-column heights follow the circular bezel (MARGIN_OUTER inset from edge):
@@ -111,6 +115,7 @@ typedef enum {
   //   Inner cols (H_ONES, M_TENS) dx=30 from center: max_h = ROUND_INNER_H = 144px
   // No clipping — digits are sized to fit the circle, not clipped by it.
   // Info layouts not supported on round.
+  // NOTE: gabbro (Pebble Round 2) is a DIFFERENT, larger screen -- see its own block below.
   #define SCREEN_W           180
   #define SCREEN_H           180
   #define SLOT_W              30
@@ -135,6 +140,38 @@ typedef enum {
   //   Inner cols (H_ONES, M_TENS): dx=30px from center -> max_h = 144px (UNIT*24)
   #define ROUND_OUTER_H       (UNIT * 18)   // 108px
   #define ROUND_INNER_H       (UNIT * 24)   // 144px
+#elif defined(PBL_PLATFORM_GABBRO)
+  // gabbro (Pebble Round 2, Core Devices 2026): 260x260 round color. NO heart-rate sensor.
+  // Same glyph scale as emery (UNIT=8, SLOT_W=40) so digits keep their weight on the bigger screen.
+  // Slots are spaced SLOT_W apart and centered on x=130:
+  //   H_TENS 30 | H_ONES 70 | colon 110 | M_TENS 150 | M_ONES 190  (30px margin each side)
+  //   Colon center = 110 + 20 = 130 = exact screen center.
+  // Per-column heights keep chalk's proportions (outer ~0.6, inner ~0.8 of screen height):
+  //   Outer cols (H_TENS, M_ONES) dx=80 from center -> ROUND_OUTER_H = UNIT*20 = 160px
+  //   Inner cols (H_ONES, M_TENS) dx=40 from center -> ROUND_INNER_H = UNIT*26 = 208px
+  // These two heights are scaled from chalk, not measured -- tune on device if anything clips
+  // or looks undersized. Info layouts not supported on round.
+  #define SCREEN_W           260
+  #define SCREEN_H           260
+  #define SLOT_W              40
+  #define COLON_SLOT_X       110
+  #define SLOT_H_TENS         30
+  #define SLOT_H_ONES         70
+  #define SLOT_M_TENS        150
+  #define SLOT_M_ONES        190
+  #define SIDE_MARGIN         30
+  #define HALF_UNIT            4
+  #define INFO_LINE_H         28
+  #define INFO_GLYPH_H        18
+  #define INFO_TOP_PAD        10
+  #define INFO_LINE_STEP      26
+  #define INFO_LINE_STEP_WIDE 22
+  #define INFO_FONT_KEY    FONT_KEY_GOTHIC_24_BOLD
+  #define UNIT                 8
+  #define ICON_W              16
+  #define ICON_V_ADJUST       -3
+  #define ROUND_OUTER_H       (UNIT * 20)   // 160px
+  #define ROUND_INNER_H       (UNIT * 26)   // 208px
 #else
   #define SCREEN_W           144
   #define SCREEN_H           168
@@ -499,7 +536,14 @@ static void prv_update_health(void) {
   s_calories_resting = (mask & HealthServiceAccessibilityMaskAvailable)
     ? (int)health_service_sum_today(HealthMetricRestingKCalories) : 0;
 
-  mask = health_service_metric_accessible(HealthMetricHeartRateBPM, today_start, now_t);
+  // Heart rate. SDK quirk: health_service_metric_accessible() ALWAYS reports
+  // HealthMetricHeartRateBPM as unavailable, so the cumulative-metric check used above can never
+  // succeed here. aggregate_averaged_accessible with a point-in-time range is the correct check
+  // for an instantaneous metric. Only emery and diorite (HR model) have the sensor; elsewhere this
+  // stays unavailable and the slot shows "--".
+  mask = health_service_metric_aggregate_averaged_accessible(
+           HealthMetricHeartRateBPM, now_t, now_t,
+           HealthAggregationAvg, HealthServiceTimeScopeOnce);
   if (mask & HealthServiceAccessibilityMaskAvailable) {
     int bpm = (int)health_service_peek_current_value(HealthMetricHeartRateBPM);
     if (bpm > 0) { s_heart_rate = bpm; s_heart_rate_valid = true; }
