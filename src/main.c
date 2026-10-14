@@ -1,5 +1,5 @@
 // ============================================================
-// TallBoy — main.c  v3.66
+// TallBoy — main.c  v3.67
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
 // v3.59j: data caching philosophy — hide > mislead; UV sentinel -1; 3h weather timeout
@@ -32,6 +32,11 @@
 //        3.5 UNIT, not a full SLOT_W of 40) so the gap across the colon is 3 UNIT, not 6.
 // v3.66: chalk colon spacing -- same 3.5 UNIT digit-slot-to-colon pitch (21px at UNIT 6), so the
 //        colon dot is 1 UNIT from each neighboring glyph (was a uniform 30px pitch = 2.5 UNIT).
+// v3.67: round heights raised (chalk 108/150, gabbro 176/224 -- 2U clearance at column centre,
+//        >=1U at glyph corners, measured against the bezel); wide and stacked L/R layouts now
+//        work on round. Wide: short-format lines only, 2 above + 2 below (chalk 1 + 1), inset
+//        to fit the chord. Stacked: top row tops / bottom row bottoms stretch to each column's
+//        full-view bound, the other ends meet at the middle gap; info column clamped to the chord.
 // ============================================================
 
 #include <pebble.h>
@@ -123,7 +128,7 @@ typedef enum {
   //   Outer cols (H_TENS, M_ONES) dx=60 from center: max_h = ROUND_OUTER_H = 108px
   //   Inner cols (H_ONES, M_TENS) dx=30 from center: max_h = ROUND_INNER_H = 144px
   // No clipping — digits are sized to fit the circle, not clipped by it.
-  // Info layouts not supported on round.
+  // Info layouts (wide, stacked L/R) supported on round since v3.67.
   // NOTE: gabbro (Pebble Round 2) is a DIFFERENT, larger screen -- see its own block below.
   #define SCREEN_W           180
   #define SCREEN_H           180
@@ -146,9 +151,14 @@ typedef enum {
   #define ICON_V_ADJUST        0
   // Per-column max digit heights inscribed in the circular bezel with MARGIN_OUTER inset:
   //   Outer cols (H_TENS, M_ONES): dx=60px from center -> max_h = 108px (UNIT*18)
-  //   Inner cols (H_ONES, M_TENS): dx=30px from center -> max_h = 144px (UNIT*24)
+  //   Inner cols (H_ONES, M_TENS): dx=30px from center -> max_h = 150px (UNIT*25, v3.67)
+  // v3.67: inner 144 -> 150. Outer stays 108 (114 would leave only 0.83 UNIT at the glyph corners).
   #define ROUND_OUTER_H       (UNIT * 18)   // 108px
-  #define ROUND_INNER_H       (UNIT * 24)   // 144px
+  #define ROUND_INNER_H       (UNIT * 25)   // 150px
+  // Round wide mode: info lines are inset so each fits the bezel chord; short-format text only.
+  #define ROUND_INFO_INSET    11            // px from the top/bottom of the unobstructed area
+  #define ROUND_WIDE_LINES    1             // lines above and below the digits
+  #define ROUND_STACK_LINES   5             // max lines in the stacked info column
 #elif defined(PBL_PLATFORM_GABBRO)
   // gabbro (Pebble Round 2, Core Devices 2026): 260x260 round color. NO heart-rate sensor.
   // Same glyph scale as emery (UNIT=8, SLOT_W=40) so digits keep their weight on the bigger screen.
@@ -162,7 +172,7 @@ typedef enum {
   //   Inner cols (H_ONES, M_TENS) dx=28 from center -> ROUND_INNER_H = UNIT*26 = 208px
   //   (heights kept from v3.64; columns moved inward so there is headroom to raise them)
   // These two heights are scaled from chalk, not measured -- tune on device if anything clips
-  // or looks undersized. Info layouts not supported on round.
+  // or looks undersized. Info layouts supported on round since v3.67.
   #define SCREEN_W           260
   #define SCREEN_H           260
   #define SLOT_W              40
@@ -182,8 +192,12 @@ typedef enum {
   #define UNIT                 8
   #define ICON_W              16
   #define ICON_V_ADJUST       -3
-  #define ROUND_OUTER_H       (UNIT * 20)   // 160px
-  #define ROUND_INNER_H       (UNIT * 26)   // 208px
+  // v3.67: 160/208 -> 176/224 (corner clearance 1.05 / 1.23 UNIT, centre clearance 2.35 / 1.82 UNIT).
+  #define ROUND_OUTER_H       (UNIT * 22)   // 176px
+  #define ROUND_INNER_H       (UNIT * 28)   // 224px
+  #define ROUND_INFO_INSET    13
+  #define ROUND_WIDE_LINES    2
+  #define ROUND_STACK_LINES   6
 #else
   #define SCREEN_W           144
   #define SCREEN_H           168
@@ -1374,6 +1388,50 @@ static int build_lines(InfoLine *lines, int max, int *slots, int n_slots, struct
 
 static int prv_info_block_h(int n, int step) { return n <= 0 ? 0 : INFO_GLYPH_H + (n-1) * step; }
 
+#if defined(PBL_ROUND)
+// ------------------------------------------------------------
+// Round geometry helpers (v3.67)
+// Column bound = the max digit height a column can take inside the bezel (outer or inner pair).
+// Stacked rows: the top row's top and the bottom row's bottom sit at the column's full-view bound;
+// the other ends meet at the middle gap (UNIT total, HALF_UNIT each side of centre). Row heights are
+// forced even (draw_digit_vec uses h/2 on both sides), so a column whose bound leaves an odd row
+// height starts 1px inside its bound; the middle gap edges stay aligned across columns.
+// ------------------------------------------------------------
+static int prv_isqrt(int n) {
+  if (n <= 0) return 0;
+  int x = n, y = (x + 1) / 2;
+  while (y < x) { x = y; y = (x + n / x) / 2; }
+  return x;
+}
+// Half-width of the screen chord at the worse (farther from centre) of two y values.
+static int prv_round_chord_half(int y0, int y1) {
+  int R = SCREEN_W / 2, c = SCREEN_H / 2;
+  int d0 = y0 - c; if (d0 < 0) d0 = -d0;
+  int d1 = y1 - c; if (d1 < 0) d1 = -d1;
+  int d = (d0 > d1) ? d0 : d1;
+  return prv_isqrt(R * R - d * d);
+}
+static int prv_round_bound(int slot_x) {
+  return (slot_x == SLOT_H_TENS || slot_x == SLOT_M_ONES) ? ROUND_OUTER_H : ROUND_INNER_H;
+}
+static int prv_round_row_h(int bound) { return (bound / 2 - HALF_UNIT) & ~1; }
+static int prv_round_row_cy(int bound, bool top_row, int cy_mid) {
+  int hr = prv_round_row_h(bound);
+  return top_row ? (cy_mid - HALF_UNIT - hr / 2) : (cy_mid + HALF_UNIT + hr / 2);
+}
+// Height of a wide-mode digit zone on round, from line counts (info blocks inset to fit the chord).
+static int prv_round_wide_h(int ub_h, int an, int bn);
+#endif
+#if defined(PBL_ROUND)
+static int prv_round_wide_h(int ub_h, int an, int bn) {
+  int top_res = (an > 0) ? ROUND_INFO_INSET + prv_info_block_h(an, INFO_LINE_STEP_WIDE) + HALF_UNIT : 0;
+  int bot_res = (bn > 0) ? ROUND_INFO_INSET + prv_info_block_h(bn, INFO_LINE_STEP_WIDE) + HALF_UNIT + WIDE_BELOW_EXTRA : 0;
+  int h = ub_h - top_res - bot_res;
+  if (h > ROUND_INNER_H) h = ROUND_INNER_H;
+  return h < H_MIN ? H_MIN : h;
+}
+#endif
+
 static int prv_compute_target_h(int ub_h, int layout) {
   // For wide layout, uses configured slot count as a conservative estimate.
   // draw_layer refines this live using actual rendered count (slots that hide due
@@ -1381,8 +1439,13 @@ static int prv_compute_target_h(int ub_h, int layout) {
 #if defined(PBL_ROUND)
   // On round, target height is the inner column max (inner pair fits the circle at dx=30).
   // Outer columns cap themselves independently in draw_digits_full_round().
-  (void)ub_h; (void)layout;
-  return ROUND_INNER_H;
+  if (layout == LAYOUT_INFO) {
+    int na = 0, nb = 0;
+    for (int i = 0; i < 3 && na < ROUND_WIDE_LINES; i++) if (s_cfg_wide[i] != SLOT_EMPTY) na++;
+    for (int i = 3; i < 6 && nb < ROUND_WIDE_LINES; i++) if (s_cfg_wide[i] != SLOT_EMPTY) nb++;
+    return prv_round_wide_h(ub_h, na, nb);
+  }
+  return ROUND_INNER_H;   // stacked layouts use prv_compute_stacked_h
 #endif
   if (layout != LAYOUT_INFO) return ub_h - MARGIN_OUTER - BOTTOM_MARGIN(ub_h);
   int n_above = 0, n_below = 0;
@@ -1396,6 +1459,10 @@ static int prv_compute_target_h(int ub_h, int layout) {
 }
 
 static int prv_compute_stacked_h(int ub_h) {
+#if defined(PBL_ROUND)
+  (void)ub_h;
+  return prv_round_row_h(ROUND_INNER_H);   // tallest stacked row; outer-column rows are shorter
+#endif
   int h = (ub_h - MARGIN_OUTER - BOTTOM_MARGIN(ub_h) - UNIT) / 2;
   return h < H_ABSOLUTE_MIN ? H_ABSOLUTE_MIN : h;
 }
@@ -1423,10 +1490,101 @@ static void prv_stacked_geom(int layout, int *tens_x, int *ones_x,
   }
 }
 
+#if defined(PBL_ROUND)
+// Round digit drawing for stacked layouts and the split/merge transitions (v3.67).
+// Digits are indexed 0 h_tens, 1 h_ones, 2 m_tens, 3 m_ones; each column has its own height and centre.
+static void prv_round_draw_digit4(GContext *ctx, const int *dv, const int *x, const int *h, const int *cy,
+                                  int dx, int dy, GColor col_h, GColor col_m) {
+  for (int d = 0; d < 4; d++) {
+    graphics_context_set_fill_color(ctx, d < 2 ? col_h : col_m);
+    draw_digit_vec(ctx, dv[d], x[d], cy[d], h[d], dx, dy);
+  }
+}
+
+static void prv_round_stacked_draw(GContext *ctx, int layout, int cy_mid, int anim_h,
+                                   const int *dv, int dx, int dy, GColor col_h, GColor col_m) {
+  int tens_x, ones_x, cxf, cw; GTextAlignment al;
+  prv_stacked_geom(layout, &tens_x, &ones_x, &cxf, &cw, &al);
+  int x[4], h[4], cy[4];
+  for (int d = 0; d < 4; d++) {
+    bool top = (d < 2);
+    x[d] = (d & 1) ? ones_x : tens_x;
+    int b  = prv_round_bound(x[d]);
+    int hr = prv_round_row_h(b);
+    h[d]  = (anim_h > 0 && anim_h < hr) ? anim_h : hr;
+    cy[d] = prv_round_row_cy(b, top, cy_mid);
+    // STACK_R fold: the pinned edge stays put, so the centre drifts toward it as the row shrinks
+    if (anim_h > 0 && layout == LAYOUT_STACK_R) {
+      int drift = (hr - h[d]) / 2;
+      cy[d] += top ? drift : -drift;
+    }
+  }
+  prv_round_draw_digit4(ctx, dv, x, h, cy, dx, dy, col_h, col_m);
+}
+
+// Split/merge transitions: vertical phases keep the full-view x and move each digit into its stacked
+// row (height/centre computed for its own full-view column); horizontal phases then slide it to the
+// stacked column and re-fit the height to that column. Everything is continuous at the phase edges.
+static void prv_round_split_draw(GContext *ctx, Phase ph, int step, int tl, int cy_mid,
+                                 const int *dv, int dx, int dy, GColor col_h, GColor col_m) {
+  static const int FX[4] = { SLOT_H_TENS, SLOT_H_ONES, SLOT_M_TENS, SLOT_M_ONES };
+  int tens_x, ones_x, cxf, cw; GTextAlignment al;
+  prv_stacked_geom(tl, &tens_x, &ones_x, &cxf, &cw, &al);
+  int x[4], h[4], cy[4];
+  for (int d = 0; d < 4; d++) {
+    bool top = (d < 2);
+    int sx = (d & 1) ? ones_x : tens_x;
+    int fb = prv_round_bound(FX[d]), sb = prv_round_bound(sx);
+    int v_h = prv_round_row_h(fb),  v_cy = prv_round_row_cy(fb, top, cy_mid);
+    int s_h = prv_round_row_h(sb),  s_cy = prv_round_row_cy(sb, top, cy_mid);
+    switch (ph) {
+      case PHASE_SPLIT_V:
+        x[d] = FX[d]; h[d] = prv_lerp_v(fb, v_h, step); cy[d] = prv_lerp_v(cy_mid, v_cy, step); break;
+      case PHASE_MERGE_V:
+        x[d] = FX[d]; h[d] = prv_lerp_v(v_h, fb, step); cy[d] = prv_lerp_v(v_cy, cy_mid, step); break;
+      case PHASE_SPLIT_H:
+        x[d] = prv_lerp_h(FX[d], sx, step); h[d] = prv_lerp_h(v_h, s_h, step); cy[d] = prv_lerp_h(v_cy, s_cy, step); break;
+      default: /* PHASE_MERGE_H */
+        x[d] = prv_lerp_h(sx, FX[d], step); h[d] = prv_lerp_h(s_h, v_h, step); cy[d] = prv_lerp_h(s_cy, v_cy, step); break;
+    }
+  }
+  prv_round_draw_digit4(ctx, dv, x, h, cy, dx, dy, col_h, col_m);
+}
+#endif
+
+// col_x is the column's CURRENT x (it slides during the split); col_x_final is where it ends up.
 static void prv_draw_stacked_info(GContext *ctx, struct tm *tm_now,
                                    int col_x, int col_w, GTextAlignment align,
+                                   int col_x_final,
                                    int ub_top, int ub_bot, int ub_h) {
   if (!tm_now || col_w <= 20) return;
+#if defined(PBL_ROUND)
+  {
+  (void)ub_top; (void)ub_bot; (void)ub_h;
+  int cn = build_lines(s_col_lines, ROUND_STACK_LINES, s_cfg_stack, STACK_SLOTS, tm_now, false);
+  if (cn <= 0) return;
+  // Lines span the outer columns' full-view extent; each is clamped to the bezel chord (1 UNIT margin).
+  int top = SCREEN_H / 2 - ROUND_OUTER_H / 2;
+  int avail_h = ROUND_OUTER_H - INFO_GLYPH_H;
+  for (int i = 0; i < cn; i++) {
+    int y = top + (cn > 1 ? (i * avail_h) / (cn - 1) : avail_h / 2);
+    int half = prv_round_chord_half(y, y + INFO_GLYPH_H) - UNIT;
+    int lx, lw;
+    if (align == GTextAlignmentRight) {
+      int left = SCREEN_W / 2 - half;
+      lx = (left > col_x_final) ? left : col_x_final;
+      lw = (col_x_final + col_w) - lx;
+    } else {
+      lx = col_x_final;
+      lw = (SCREEN_W / 2 + half) - lx;
+      if (lw > col_w) lw = col_w;
+    }
+    if (lw <= 20) continue;
+    draw_info_line(ctx, &s_col_lines[i], y, lx + (col_x - col_x_final), lw, align);
+  }
+  return;
+  }
+#endif
   int cn = build_lines(s_col_lines, INFO_LINES_MAX, s_cfg_stack, STACK_SLOTS, tm_now, false);
   if (cn <= 0) return;
   int draw_top = ub_top + STACK_INFO_TOP_MARGIN;
@@ -1506,10 +1664,18 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     draw_colon_split(ctx, COLON_SLOT_X, top_cy, bot_cy, SHADOW_DX, SHADOW_DY, ub_top, ub_bot);
     graphics_context_set_fill_color(ctx, s_fg_colon);
     draw_colon_split(ctx, COLON_SLOT_X, top_cy, bot_cy, 0, 0, ub_top, ub_bot);
+#if defined(PBL_ROUND)
+    { int dv[4] = { h_tens, h_ones, m_tens, m_ones };
+      int cy_mid = ub_top + ub_h / 2;
+      (void)hr_cy; (void)mn_cy; (void)dh;
+      prv_round_split_draw(ctx, s_phase, step, s_split_target_layout, cy_mid, dv, SHADOW_DX, SHADOW_DY, s_shadow_col, s_shadow_col);
+      prv_round_split_draw(ctx, s_phase, step, s_split_target_layout, cy_mid, dv, 0, 0, s_fg_hr, s_fg_mn); }
+#else
     draw_pair(ctx, h_tens, h_ones, SLOT_H_TENS, SLOT_H_ONES, hr_cy, dh, SHADOW_DX, SHADOW_DY, s_shadow_col);
     draw_pair(ctx, m_tens, m_ones, SLOT_M_TENS, SLOT_M_ONES, mn_cy, dh, SHADOW_DX, SHADOW_DY, s_shadow_col);
     draw_pair(ctx, h_tens, h_ones, SLOT_H_TENS, SLOT_H_ONES, hr_cy, dh, 0, 0, s_fg_hr);
     draw_pair(ctx, m_tens, m_ones, SLOT_M_TENS, SLOT_M_ONES, mn_cy, dh, 0, 0, s_fg_mn);
+#endif
     return;
   }
 
@@ -1521,11 +1687,19 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int tl = s_split_target_layout;
     int dummy_tx, dummy_ox, col_x_final, col_w; GTextAlignment info_align;
     prv_stacked_geom(tl, &dummy_tx, &dummy_ox, &col_x_final, &col_w, &info_align);
-    prv_draw_stacked_info(ctx, tm_now, col_x, col_w, info_align, ub_top, ub_bot, ub_h);
+    prv_draw_stacked_info(ctx, tm_now, col_x, col_w, info_align, col_x_final, ub_top, ub_bot, ub_h);
+#if defined(PBL_ROUND)
+    { int dv[4] = { h_tens, h_ones, m_tens, m_ones };
+      int cy_mid = ub_top + ub_h / 2;
+      (void)hr_tens_x; (void)mn_tens_x;
+      prv_round_split_draw(ctx, s_phase, step, tl, cy_mid, dv, SHADOW_DX, SHADOW_DY, s_shadow_col, s_shadow_col);
+      prv_round_split_draw(ctx, s_phase, step, tl, cy_mid, dv, 0, 0, s_fg_hr, s_fg_mn); }
+#else
     draw_pair(ctx, h_tens, h_ones, hr_tens_x, hr_tens_x+SLOT_W, s_sh_hr_cy, s_sh_h, SHADOW_DX, SHADOW_DY, s_shadow_col);
     draw_pair(ctx, m_tens, m_ones, mn_tens_x, mn_tens_x+SLOT_W, s_sh_mn_cy, s_sh_h, SHADOW_DX, SHADOW_DY, s_shadow_col);
     draw_pair(ctx, h_tens, h_ones, hr_tens_x, hr_tens_x+SLOT_W, s_sh_hr_cy, s_sh_h, 0, 0, s_fg_hr);
     draw_pair(ctx, m_tens, m_ones, mn_tens_x, mn_tens_x+SLOT_W, s_sh_mn_cy, s_sh_h, 0, 0, s_fg_mn);
+#endif
     return;
   }
 
@@ -1547,6 +1721,37 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int above_s[3], below_s[3];
     for (int i = 0; i < 3; i++) above_s[i] = s_cfg_wide[i];
     for (int i = 0; i < 3; i++) below_s[i] = s_cfg_wide[3+i];
+#if defined(PBL_ROUND)
+    // Round: short-format lines only (wide=false), capped at ROUND_WIDE_LINES per side, inset so each
+    // line fits the bezel chord. Digits fill the zone between the blocks (columns cap themselves).
+    int an = build_lines(s_above_lines, ROUND_WIDE_LINES, above_s, 3, tm_now, false);
+    int bn = build_lines(s_below_lines, ROUND_WIDE_LINES, below_s, 3, tm_now, false);
+    int above_start = ub_top + ROUND_INFO_INSET;
+    int above_end   = above_start + prv_info_block_h(an, INFO_LINE_STEP_WIDE);
+    int below_end   = ub_bot - ROUND_INFO_INSET;
+    int below_top   = below_end - prv_info_block_h(bn, INFO_LINE_STEP_WIDE);
+    int zone_top    = (an > 0) ? above_end + HALF_UNIT : ub_top;
+    int zone_bot    = (bn > 0) ? below_top - HALF_UNIT - WIDE_BELOW_EXTRA : ub_bot;
+    int actual_h    = prv_round_wide_h(ub_h, an, bn);
+    int time_cy     = (zone_top + zone_bot) / 2;
+    if (s_phase == PHASE_DONE && actual_h != s_target_h) {
+      s_target_h = actual_h; s_h = actual_h;
+    }
+    int draw_h = (s_phase == PHASE_BLINK) ? s_h : actual_h;
+    int slide = s_info_slide;
+    for (int i = 0; i < an; i++) {
+      int y = above_start + i*INFO_LINE_STEP_WIDE;
+      int half = prv_round_chord_half(y, y + INFO_GLYPH_H) - UNIT;
+      if (half > 10) draw_info_line(ctx, &s_above_lines[i], y - slide, SCREEN_W/2 - half, half*2, GTextAlignmentCenter);
+    }
+    for (int i = 0; i < bn; i++) {
+      int y = below_top + i*INFO_LINE_STEP_WIDE;
+      int half = prv_round_chord_half(y, y + INFO_GLYPH_H) - UNIT;
+      if (half > 10) draw_info_line(ctx, &s_below_lines[i], y + slide, SCREEN_W/2 - half, half*2, GTextAlignmentCenter);
+    }
+    draw_digits_full_round(ctx, h_tens, h_ones, m_tens, m_ones, draw_h, time_cy, SHADOW_DX, SHADOW_DY, ub_top, ub_bot, s_shadow_col, s_shadow_col, s_shadow_col);
+    draw_digits_full_round(ctx, h_tens, h_ones, m_tens, m_ones, draw_h, time_cy, 0, 0, ub_top, ub_bot, s_fg_hr, s_fg_mn, s_fg_colon);
+#else
     int an = build_lines(s_above_lines, 3, above_s, 3, tm_now, true);
     int bn = build_lines(s_below_lines, 3, below_s, 3, tm_now, true);
 
@@ -1580,6 +1785,8 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     draw_digits_full(ctx, h_tens, h_ones, m_tens, m_ones, draw_h, time_cy, SHADOW_DX, SHADOW_DY, ub_top, ub_bot, s_shadow_col, s_shadow_col, s_shadow_col);
     draw_digits_full(ctx, h_tens, h_ones, m_tens, m_ones, draw_h, time_cy, 0, 0, ub_top, ub_bot, s_fg_hr, s_fg_mn, s_fg_colon);
 
+#endif
+
   } else {
     // Stacked layouts: digits on one side, info column on the other.
     //
@@ -1598,7 +1805,7 @@ static void draw_layer(Layer *layer, GContext *ctx) {
     int m_cy = ub_bot - bot_margin - dh / 2;
     int tens_x, ones_x, col_x, col_w; GTextAlignment info_align;
     prv_stacked_geom(s_layout, &tens_x, &ones_x, &col_x, &col_w, &info_align);
-    prv_draw_stacked_info(ctx, tm_now, col_x, col_w, info_align, ub_top, ub_bot, ub_h);
+    prv_draw_stacked_info(ctx, tm_now, col_x, col_w, info_align, col_x, ub_top, ub_bot, ub_h);
 
     bool stk_animating = (s_phase == PHASE_BLINK);
     int draw_h   = stk_animating ? s_h : dh;
@@ -1609,8 +1816,17 @@ static void draw_layer(Layer *layer, GContext *ctx) {
       draw_h_cy = h_cy + drift;   // hours: top folds inward, center drifts down
       draw_m_cy = m_cy - drift;   // minutes: bottom folds inward, center drifts up
     }
+#if defined(PBL_ROUND)
+    { int dv[4] = { h_tens, h_ones, m_tens, m_ones };
+      int cy_mid = ub_top + ub_h / 2;
+      int anim_h = stk_animating ? s_h : -1;
+      (void)draw_h; (void)draw_h_cy; (void)draw_m_cy; (void)tens_x; (void)ones_x; (void)h_cy; (void)m_cy;
+      prv_round_stacked_draw(ctx, s_layout, cy_mid, anim_h, dv, SHADOW_DX, SHADOW_DY, s_shadow_col, s_shadow_col);
+      prv_round_stacked_draw(ctx, s_layout, cy_mid, anim_h, dv, 0, 0, s_fg_hr, s_fg_mn); }
+#else
     draw_stacked_pass(ctx, h_tens, h_ones, m_tens, m_ones, draw_h, tens_x, ones_x, draw_h_cy, draw_m_cy, SHADOW_DX, SHADOW_DY, s_shadow_col, s_shadow_col);
     draw_stacked_pass(ctx, h_tens, h_ones, m_tens, m_ones, draw_h, tens_x, ones_x, draw_h_cy, draw_m_cy, 0, 0, s_fg_hr, s_fg_mn);
+#endif
   }
 }
 
@@ -1679,7 +1895,11 @@ static void prv_start_split_v(int target_layout) {
   GRect ub = layer_get_unobstructed_bounds(root);
   int ub_top = ub.origin.y, ub_h = ub.size.h, ub_bot = ub_top + ub_h;
   int bot_margin = BOTTOM_MARGIN(ub_h);
+#if defined(PBL_ROUND)
+  s_sv_cy = ub_top + ub_h / 2;
+#else
   s_sv_cy = ub_top + MARGIN_OUTER + s_target_h / 2;
+#endif
   int dh_final   = prv_compute_stacked_h(ub_h);
   int h_cy_final = ub_top + MARGIN_OUTER + dh_final / 2;
   int m_cy_final = ub_bot - bot_margin - dh_final / 2;
@@ -1735,7 +1955,11 @@ static void prv_start_merge_v(void) {
   GRect ub = layer_get_unobstructed_bounds(root);
   int ub_h = ub.size.h, ub_top = ub.origin.y, ub_bot = ub_top + ub_h;
   int bot_margin = BOTTOM_MARGIN(ub_h);
+#if defined(PBL_ROUND)
+  s_sv_cy = ub_top + ub_h / 2;
+#else
   s_sv_cy = ub_top + MARGIN_OUTER + s_target_h / 2;
+#endif
   int dh_final   = prv_compute_stacked_h(ub_h);
   int h_cy_final = ub_top + MARGIN_OUTER + dh_final / 2;
   int m_cy_final = ub_bot - bot_margin - dh_final / 2;
@@ -1871,9 +2095,6 @@ static void unobstructed_change(AnimationProgress progress, void *ctx) {
 static void accel_tap_handler(AccelAxisType axis, int32_t direction) {
   if (s_phase != PHASE_DONE) return;
   if (s_cfg_info_mode == INFO_MODE_OFF || s_cfg_info_mode == INFO_MODE_ALWAYS) return;
-#if defined(PBL_ROUND)
-  return;  // info layouts not supported on round
-#endif
   if (s_layout == LAYOUT_FULL) {
     int target = prv_info_layout_for_shake();
     if (target == LAYOUT_STACK_L || target == LAYOUT_STACK_R) {
@@ -2018,7 +2239,6 @@ static void init(void) {
   s_fg = GColorWhite; s_fg_hr = GColorWhite; s_fg_mn = GColorWhite; s_fg_colon = GColorWhite;
   s_bg = GColorBlack; s_shadow_col = GColorBlack;
   prv_load_config();
-#if !defined(PBL_ROUND)
   if (s_cfg_info_mode == INFO_MODE_ALWAYS) {
     switch (s_cfg_info_layout) {
       case INFO_LAYOUT_WIDE:    s_layout = LAYOUT_INFO; break;
@@ -2026,7 +2246,6 @@ static void init(void) {
       case INFO_LAYOUT_STACK_R: s_layout = LAYOUT_STACK_R; break;
     }
   }
-#endif
   s_window = window_create();
   window_set_background_color(s_window, GColorBlack);
   window_set_click_config_provider(s_window, prv_click_config_provider);
