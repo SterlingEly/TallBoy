@@ -18,10 +18,10 @@ The watchface supports all seven Pebble hardware platforms, three display layout
 
 ## Current Status
 
-**Internal version: v3.64** — active development, not yet formally released. (Internal numbers are development checkpoints, not public releases.)
+**Internal version: v3.65** — active development, not yet formally released. (Internal numbers are development checkpoints, not public releases.)
 
 ### What is working
-- Builds clean on all 7 target platforms as of v3.63; v3.64 (below) has not yet been compiled or device-tested
+- Builds clean on all 7 target platforms as of v3.63; v3.64 ran on a real gabbro (Sterling, 2026-10-14: "looks pretty good" apart from the colon spacing fixed in v3.65); v3.65 is not yet compiled or device-tested
 - Full-mode animated digits: anticipate → squish → expand on every minute tick
 - Wide info mode: up to 3 info slots above + 3 below; digits fill remaining space; empty slots collapse instantly
 - Stacked info mode (STACK_L / STACK_R): stacked hour/minute digits on one side, up to 8 info lines in a column on the other; minute-change fast-blink animation
@@ -34,17 +34,23 @@ The watchface supports all seven Pebble hardware platforms, three display layout
 - Round platform support: per-column digit heights follow circular bezel geometry; center point aligned at unobstructed midpoint. **chalk (180×180) and gabbro (260×260) now have separate geometry blocks (v3.64).**
 - Background: black base → colored rounded-rect (radius UNIT×2 = 16px on emery); plain fill on round (OS clips to circle automatically)
 
-### v3.64 changes (2026-10-13) — NOT YET COMPILED OR DEVICE-TESTED
-1. **Gabbro split from chalk.** Gabbro (Pebble Round 2) is a 260×260 round screen; it had been sharing chalk's 180×180 geometry block (and was mislabeled "Pebble 2 HR"). It now has its own block: `UNIT=8` (same glyph scale as emery), `SLOT_W=40`, slots centered on x=130 (`H_TENS 30 | H_ONES 70 | colon 110 | M_TENS 150 | M_ONES 190`), `ROUND_OUTER_H = UNIT*20 = 160`, `ROUND_INNER_H = UNIT*26 = 208`. **The two round heights are scaled from chalk's proportions (outer ≈ 0.6, inner ≈ 0.8 of screen height), not measured** — tune on the real device.
+### v3.65 changes (2026-10-14) — NOT YET COMPILED OR DEVICE-TESTED
+**Gabbro colon spacing.** Sterling saw v3.64 on a gabbro and reported the digit-to-colon space looked about twice the usual design. Cause: v3.64 laid gabbro's five slots out at a uniform `SLOT_W` (40px) pitch, so the colon slot was a full slot wide on each side. Emery's design uses a 28px (3.5 UNIT) pitch from the inner digit slot to the colon slot, which puts the dot 8px (1 UNIT) from each neighboring glyph. v3.64 put it 20px away (2.5 UNIT), and the glyph-to-glyph gap across the colon was 6 UNIT instead of 3.
+Fix: gabbro slots moved to `H_TENS 42 | H_ONES 82 | colon 110 | M_TENS 138 | M_ONES 178`, `SIDE_MARGIN 42`. Colon center is still x=130. Column heights unchanged (outer 160, inner 208); the outer columns now sit at dx=68 instead of 80, so there is geometric headroom to raise `ROUND_OUTER_H` if it looks short.
+Note chalk's block still uses a uniform 30px pitch (UNIT 6) — Sterling has not reported its spacing, so it was left alone.
+
+### v3.64 changes (2026-10-13)
+1. **Gabbro split from chalk.** Gabbro (Pebble Round 2) is a 260×260 round screen; it had been sharing chalk's 180×180 geometry block (and was mislabeled "Pebble 2 HR"). It now has its own block: `UNIT=8` (same glyph scale as emery), `SLOT_W=40`, slots centered on x=130 (positions superseded by v3.65 — see Architecture), `ROUND_OUTER_H = UNIT*20 = 160`, `ROUND_INNER_H = UNIT*26 = 208`. **The two round heights are scaled from chalk's proportions (outer ≈ 0.6, inner ≈ 0.8 of screen height), not measured** — tune on the real device.
 2. **Heart rate fixed.** `prv_update_health()` used `health_service_metric_accessible()` for `HealthMetricHeartRateBPM`, which always reports HR unavailable. It now uses `health_service_metric_aggregate_averaged_accessible(metric, now, now, HealthAggregationAvg, HealthServiceTimeScopeOnce)` — the same fix that made HR work in Radium 2.
 
 ### Known active bugs
-None logged. (v3.64 changes above are unverified.)
+None logged. (v3.65 change above is unverified.)
 
 ### Unresolved questions
 - STACK_L animation (symmetric squish) vs STACK_R animation (fold toward center) — preference pending device comparison
 - Whether to add info line support to round platforms in a future version
 - Gabbro digit heights (see v3.64 note) — scaled, not measured
+- Whether chalk's uniform-pitch spacing has the same too-wide colon gap (awaiting a look on a Time Round)
 - Whether the HR slot should hide (rather than show "--") on platforms with no HR sensor (basalt, chalk, gabbro, flint, aplite) — currently shows "--"
 
 ---
@@ -67,7 +73,7 @@ None logged. (v3.64 changes above are unverified.)
 ```
 SterlingEly/TallBoy  (branch: main)
 ├── src/
-│   ├── main.c              ← entire watchface (~97KB); single-file architecture
+│   ├── main.c              ← entire watchface (~98KB); single-file architecture
 │   └── pkjs/
 │       └── index.js        ← PebbleKit JS: weather/UV/solar/AQI fetch + config page
 ├── appinfo.json            ← app metadata, message keys, target platforms
@@ -103,7 +109,8 @@ The repo contains only the files above (plus `resources/`). The old dead/scratch
 - **ALWAYS use `create_or_update_file` with the current file SHA** — NEVER use `push_files` (confirmed bug: sends empty content, silently zeroing the file)
 - Always commit **full file content** — never partial diffs or patches
 - **Always fetch the current SHA** immediately before any update — SHAs from prior sessions are stale after any intervening commit
-- `get_file_contents` on `main.c` (~97KB) has timed out in some sessions and worked in others — retry before assuming it is unavailable
+- `get_file_contents` on `main.c` (~98KB) has timed out in some sessions and worked in others — retry before assuming it is unavailable
+- After pushing a large file, verify it: compute the git blob hash locally (`printf 'blob %s\0' <bytes> | cat - file | sha1sum`) and compare with the SHA the API returns — they match only if the upload is byte-identical
 - File "deletion" via MCP produces a stub file, not a true delete — actual deletion requires the GitHub web UI trash icon
 
 ---
@@ -153,7 +160,11 @@ Digits 1, 2, and 7 use `gpath_create` for diagonal strokes — these allocate/fr
 
 ```
 SLOT_H_TENS=12, SLOT_H_ONES=52, COLON_SLOT_X=80, SLOT_M_TENS=108, SLOT_M_ONES=148
+Digit slot → colon slot pitch = 28px (3.5 UNIT)  — the reference spacing
+Glyphs: H_ONES 56..88, colon dot centered at x=100 (r=4), M_TENS 112..144  → dot is 8px from each glyph
 ```
+
+Slot geometry rule: a glyph is drawn at `slot_x + HALF_SLOT_PAD` and is `GLYPH_W` wide; the colon dot is centered at `COLON_SLOT_X + SLOT_W/2`. When defining a new platform, set the digit-to-colon pitch to 3.5 UNIT (not a full `SLOT_W`) to match the emery design.
 
 ### Slot positions — chalk (UNIT=6, SLOT_W=30, centered on 180px)
 
@@ -163,16 +174,20 @@ Colon center = x=90 = exact screen center ✓
 ROUND_OUTER_H = UNIT*18 = 108px  — H_TENS and M_ONES columns (dx=60 from center)
 ROUND_INNER_H = UNIT*24 = 144px  — H_ONES and M_TENS columns (dx=30 from center)
 cy on round   = ub_top + ub_h/2  — NOT MARGIN_OUTER + s_target_h/2 (6px off-center)
+Uniform 30px pitch (10 units... i.e. 5 UNIT) around the colon, wider than emery's 3.5 UNIT — not yet reviewed on device
 ```
 
-### Slot positions — gabbro (UNIT=8, SLOT_W=40, centered on 260px) — v3.64, unverified on device
+### Slot positions — gabbro (UNIT=8, SLOT_W=40, centered on 260px) — v3.65, unverified on device
 
 ```
-SLOT_H_TENS=30, SLOT_H_ONES=70, COLON_SLOT_X=110, SLOT_M_TENS=150, SLOT_M_ONES=190
-Colon center = 110 + 20 = 130 = exact screen center ✓  (30px margin each side)
-ROUND_OUTER_H = UNIT*20 = 160px  — H_TENS and M_ONES columns (dx=80 from center)
-ROUND_INNER_H = UNIT*26 = 208px  — H_ONES and M_TENS columns (dx=40 from center)
+SLOT_H_TENS=42, SLOT_H_ONES=82, COLON_SLOT_X=110, SLOT_M_TENS=138, SLOT_M_ONES=178
+SIDE_MARGIN=42 (unused in round full mode)
+Colon center = 110 + 20 = 130 = exact screen center ✓  (42px margin each side)
+Digit slot → colon slot pitch = 28px (3.5 UNIT), same as emery. Glyphs: H_ONES 86..118, dot at 126..134, M_TENS 142..174
+ROUND_OUTER_H = UNIT*20 = 160px  — H_TENS and M_ONES columns (dx=68 from center)
+ROUND_INNER_H = UNIT*26 = 208px  — H_ONES and M_TENS columns (dx=28 from center)
 Heights are scaled from chalk's proportions (outer ~0.6, inner ~0.8 of screen), NOT measured.
+Superseded v3.64 slots (too airy): 30 / 70 / colon 110 / 150 / 190, SIDE_MARGIN 30
 ```
 
 ### Slot positions — other rect (basalt/diorite/flint/aplite, UNIT=6, SLOT_W=30)
@@ -311,6 +326,7 @@ None logged.
 | `health_service_metric_accessible` for heart rate | Always reports HR unavailable. Use `aggregate_averaged_accessible` with a point-in-time range (see Architecture → Heart rate) |
 | Degree symbol (0xB0) breaks weather text | Use plain ASCII — `"72 F"` not `"72°F"` — degree symbol silently prevents rendering |
 | **Gabbro is 260×260, not 180×180** | gabbro = Pebble Round 2 (large round, no HR). It was once wrongly grouped with chalk (180×180) and labeled "Pebble 2 HR". Never share chalk's geometry block with gabbro; never group gabbro with rect platforms |
+| **Uniform slot pitch makes the colon gap too wide** | Spacing slots at a full `SLOT_W` on both sides of the colon doubles the digit-to-colon gap versus emery (gabbro v3.64). Use 3.5 UNIT between the inner digit slots and the colon slot. Positions must be checked on device, not just derived from "centered and evenly spaced" |
 | Round `cy` must be `ub_top + ub_h/2` | `MARGIN_OUTER + s_target_h/2` is off-center on round screens |
 | Wide mode draw height | Use `actual_h` (live-computed from rendered slot count), not `s_target_h` |
 | Stacked blink floor | Uses `H_ABSOLUTE_MIN`, not `H_MIN` |
@@ -324,10 +340,12 @@ None logged.
 ## Current TODO
 
 ### Immediate
-- **Compile and device-test v3.64**: gabbro geometry on the Round 2 (digit heights, margins, nothing clipping at the bezel), and heart rate showing a real BPM on emery
+- **Compile and device-test v3.65** on gabbro: colon spacing now matches emery; check whether the outer digit columns (160px) look short now that they sit closer in (dx=68) — `ROUND_OUTER_H` can likely go up (a circle-inscribed estimate allows about 190px), and check nothing clips at the bezel
+- Confirm heart rate shows a real BPM on emery (v3.64 fix)
 - Device-test the v3.62 changes still unconfirmed: pace palettes, colon color, sun icon, Temp+UV+AQI combo (AQI itself is confirmed working)
 - Decide the default pace palette (code default: medium)
 - Decide STACK_L vs STACK_R animation preference after device comparison
+- Look at chalk (Time Round) colon spacing — it still uses a uniform 30px pitch
 
 ### Near-term
 - Lower-resolution platform tuning (basalt/aplite/diorite/flint) — layout math scales with UNIT; needs device testing
@@ -351,7 +369,8 @@ Before committing any version:
 4. Stacked mode minute-change blink animation fires correctly
 5. For round: outer digits (H_TENS, M_ONES) are visibly shorter than inner (H_ONES, M_TENS); no bezel clipping — check on **both** chalk and gabbro, they have separate geometry
 6. Heart rate shows a live BPM (not `--`) on emery
-7. SHA fetched fresh immediately before `create_or_update_file`
+7. Digit-to-colon gap on any new or changed platform matches emery's (dot 1 UNIT from each glyph)
+8. SHA fetched fresh immediately before `create_or_update_file`; large pushes verified by blob hash
 
 ---
 
@@ -386,8 +405,8 @@ TallBoy shares platform constants, build rules, and CloudPebble conventions with
 
 ## Last Updated
 
-v3.64 — 2026-10-13
+v3.65 — 2026-10-14
 Updated by: AI collaborator (Claude, Anthropic) with direction from Sterling Ely
-Changes in this pass: gabbro corrected to 260×260 / no HR and given its own geometry block; heart-rate availability check fixed; AQI recorded as device-confirmed; platform table naming aligned (diorite = Pebble 2, flint = Pebble 2 Duo).
+Changes in this pass: gabbro colon spacing corrected to emery's 3.5 UNIT pitch (slots 42/82/110/138/178); new trap and verification item; chalk spacing flagged for review.
 
-Previous: v3.63 doc sync 2026-09-28; v3.61 — July 2026: added Related Projects section, reorganized Build Rules, updated status.
+Previous: v3.64 2026-10-13 (gabbro split from chalk, HR fix, AQI device-confirmed, platform table naming); v3.63 doc sync 2026-09-28; v3.61 — July 2026: added Related Projects section, reorganized Build Rules, updated status.
