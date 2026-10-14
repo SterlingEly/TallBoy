@@ -1,5 +1,5 @@
 // ============================================================
-// TallBoy — main.c  v3.67
+// TallBoy — main.c  v3.68
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
 // v3.59j: data caching philosophy — hide > mislead; UV sentinel -1; 3h weather timeout
@@ -37,6 +37,11 @@
 //        work on round. Wide: short-format lines only, 2 above + 2 below (chalk 1 + 1), inset
 //        to fit the chord. Stacked: top row tops / bottom row bottoms stretch to each column's
 //        full-view bound, the other ends meet at the middle gap; info column clamped to the chord.
+// v3.68: gabbro digit spacing 1U -> 2U (digit-to-digit and digit-to-colon-dot gaps are both 16px; glyph
+//        span 30..230). Wider spacing pushes the outer glyphs toward the bezel, so the full-view round
+//        heights drop to keep >=1U corner clearance (gabbro 176/224 -> 136/216). Stacked layouts keep
+//        their own 1U pitch (STACK_SLOT_W = 5 UNIT) and their own bounds (ROUND_STACK_*_H), so the info
+//        column keeps its width. Chalk unchanged (see PROJECT_CONTEXT for the 1.5U / 2U trade-off).
 // ============================================================
 
 #include <pebble.h>
@@ -155,33 +160,32 @@ typedef enum {
   // v3.67: inner 144 -> 150. Outer stays 108 (114 would leave only 0.83 UNIT at the glyph corners).
   #define ROUND_OUTER_H       (UNIT * 18)   // 108px
   #define ROUND_INNER_H       (UNIT * 25)   // 150px
+  #define ROUND_STACK_OUTER_H ROUND_OUTER_H // chalk: stacked columns sit on the full-view slots
+  #define ROUND_STACK_INNER_H ROUND_INNER_H
   // Round wide mode: info lines are inset so each fits the bezel chord; short-format text only.
   #define ROUND_INFO_INSET    11            // px from the top/bottom of the unobstructed area
   #define ROUND_WIDE_LINES    1             // lines above and below the digits
   #define ROUND_STACK_LINES   5             // max lines in the stacked info column
 #elif defined(PBL_PLATFORM_GABBRO)
   // gabbro (Pebble Round 2, Core Devices 2026): 260x260 round color. NO heart-rate sensor.
-  // Same glyph scale as emery (UNIT=8, SLOT_W=40) so digits keep their weight on the bigger screen.
-  // Slots are spaced SLOT_W apart and centered on x=130:
-  //   H_TENS 42 | H_ONES 82 | colon 110 | M_TENS 138 | M_ONES 178  (42px margin each side)
-  //   Colon center = 110 + 20 = 130 = exact screen center.
-  //   Digit-to-colon pitch is 28px (3.5 UNIT), identical to emery (52/80/108), so the glyph gap
-  //   across the colon is 3 UNIT. v3.64 used a full 40px pitch there (6 UNIT) -- too airy.
-  // Per-column heights keep chalk's proportions (outer ~0.6, inner ~0.8 of screen height):
-  //   Outer cols (H_TENS, M_ONES) dx=68 from center -> ROUND_OUTER_H = UNIT*20 = 160px
-  //   Inner cols (H_ONES, M_TENS) dx=28 from center -> ROUND_INNER_H = UNIT*26 = 208px
-  //   (heights kept from v3.64; columns moved inward so there is headroom to raise them)
-  // These two heights are scaled from chalk, not measured -- tune on device if anything clips
-  // or looks undersized. Info layouts supported on round since v3.67.
+  // Same glyph scale as emery (UNIT=8) so digits keep their weight on the bigger screen.
+  // v3.68: every gap in the time row is 2 UNIT (16px): glyph | 16 | glyph | 16 | dot (8) | 16 | glyph | 16 | glyph.
+  //   Digit-to-digit pitch SLOT_W = 6 UNIT = 48 (4 UNIT glyph + 2 UNIT gap); glyph span 30..230.
+  //   Glyph left = slot + HALF_SLOT_PAD (4):
+  //   H_TENS 26 | H_ONES 74 | colon 106 | M_TENS 146 | M_ONES 194
+  //   Colon dot centre = 106 + SLOT_W/2 = 130 = exact screen center (dot 126..134).
+  //   Before v3.68 the gaps were 1 UNIT (SLOT_W 40, slots 42/82/110/138/178).
+  // Per-column heights are measured against the bezel (see ROUND_*_H below), not scaled from chalk.
+  // Outer glyph edge is dx=100 from centre (inner: dx=52). Info layouts supported on round since v3.67.
   #define SCREEN_W           260
   #define SCREEN_H           260
-  #define SLOT_W              40
-  #define COLON_SLOT_X       110
-  #define SLOT_H_TENS         42
-  #define SLOT_H_ONES         82
-  #define SLOT_M_TENS        138
-  #define SLOT_M_ONES        178
-  #define SIDE_MARGIN         42
+  #define SLOT_W              48
+  #define COLON_SLOT_X       106
+  #define SLOT_H_TENS         26
+  #define SLOT_H_ONES         74
+  #define SLOT_M_TENS        146
+  #define SLOT_M_ONES        194
+  #define SIDE_MARGIN         42   // stacked layouts only (STACK_SLOT_W pitch)
   #define HALF_UNIT            4
   #define INFO_LINE_H         28
   #define INFO_GLYPH_H        18
@@ -192,9 +196,14 @@ typedef enum {
   #define UNIT                 8
   #define ICON_W              16
   #define ICON_V_ADJUST       -3
-  // v3.67: 160/208 -> 176/224 (corner clearance 1.05 / 1.23 UNIT, centre clearance 2.35 / 1.82 UNIT).
-  #define ROUND_OUTER_H       (UNIT * 22)   // 176px
-  #define ROUND_INNER_H       (UNIT * 28)   // 224px
+  // Full-view / wide heights, measured against the bezel with the real glyph shapes (tb/gapscan.py,
+  // worst digit 0-9, >=1 UNIT clearance): max 138 outer / 220 inner at 2U spacing.
+  // v3.68: 176/224 -> 136/216 (17 / 27 UNIT) because the outer glyph edge moved from dx=84 to dx=100.
+  #define ROUND_OUTER_H       (UNIT * 17)   // 136px
+  #define ROUND_INNER_H       (UNIT * 27)   // 216px
+  // Stacked layouts keep the v3.67 geometry (columns at SIDE_MARGIN, 1U pitch), so they keep the v3.67 bounds.
+  #define ROUND_STACK_OUTER_H (UNIT * 22)   // 176px
+  #define ROUND_STACK_INNER_H (UNIT * 28)   // 224px
   #define ROUND_INFO_INSET    13
   #define ROUND_WIDE_LINES    2
   #define ROUND_STACK_LINES   6
@@ -227,6 +236,7 @@ typedef enum {
 #define MARGIN_OUTER    (MARGIN_CANVAS + MARGIN_DIGIT)
 #define HALF_SLOT_PAD   (UNIT / 2)
 #define GLYPH_W         (UNIT * 4)
+#define STACK_SLOT_W    (UNIT * 5)   // digit pitch inside the stacked pair (4 UNIT glyph + 1 UNIT gap)
 #define H_MIN           (UNIT * 11)
 #define H_ABSOLUTE_MIN  (UNIT * 5)
 #define INFO_LINE_BUF   48
@@ -1411,8 +1421,15 @@ static int prv_round_chord_half(int y0, int y1) {
   int d = (d0 > d1) ? d0 : d1;
   return prv_isqrt(R * R - d * d);
 }
+// Full-view column bound (x is one of the four time-row slots).
 static int prv_round_bound(int slot_x) {
   return (slot_x == SLOT_H_TENS || slot_x == SLOT_M_ONES) ? ROUND_OUTER_H : ROUND_INNER_H;
+}
+// Stacked column bound (x is the stacked tens or ones column). The outer column is the one nearest
+// the bezel: SIDE_MARGIN for STACK_L, SCREEN_W - SIDE_MARGIN - STACK_SLOT_W for STACK_R.
+static int prv_round_stack_bound(int slot_x) {
+  return (slot_x == SIDE_MARGIN || slot_x == SCREEN_W - SIDE_MARGIN - STACK_SLOT_W)
+         ? ROUND_STACK_OUTER_H : ROUND_STACK_INNER_H;
 }
 static int prv_round_row_h(int bound) { return (bound / 2 - HALF_UNIT) & ~1; }
 static int prv_round_row_cy(int bound, bool top_row, int cy_mid) {
@@ -1461,7 +1478,7 @@ static int prv_compute_target_h(int ub_h, int layout) {
 static int prv_compute_stacked_h(int ub_h) {
 #if defined(PBL_ROUND)
   (void)ub_h;
-  return prv_round_row_h(ROUND_INNER_H);   // tallest stacked row; outer-column rows are shorter
+  return prv_round_row_h(ROUND_STACK_INNER_H);   // tallest stacked row; outer-column rows are shorter
 #endif
   int h = (ub_h - MARGIN_OUTER - BOTTOM_MARGIN(ub_h) - UNIT) / 2;
   return h < H_ABSOLUTE_MIN ? H_ABSOLUTE_MIN : h;
@@ -1476,15 +1493,15 @@ static void prv_update_targets(void) {
 static void prv_stacked_geom(int layout, int *tens_x, int *ones_x,
                                int *col_x, int *col_w, GTextAlignment *align) {
   if (layout == LAYOUT_STACK_R) {
-    *ones_x = SCREEN_W - SIDE_MARGIN - SLOT_W;
-    *tens_x = *ones_x - SLOT_W;
+    *ones_x = SCREEN_W - SIDE_MARGIN - STACK_SLOT_W;
+    *tens_x = *ones_x - STACK_SLOT_W;
     *col_x  = 1;
     *col_w  = *tens_x - UNIT - 1;
     *align  = GTextAlignmentRight;
   } else {
     *tens_x = SIDE_MARGIN;
-    *ones_x = SIDE_MARGIN + SLOT_W;
-    *col_x  = *ones_x + SLOT_W + UNIT;
+    *ones_x = SIDE_MARGIN + STACK_SLOT_W;
+    *col_x  = *ones_x + STACK_SLOT_W + UNIT;
     *col_w  = SCREEN_W - *col_x - 1;
     *align  = GTextAlignmentLeft;
   }
@@ -1509,7 +1526,7 @@ static void prv_round_stacked_draw(GContext *ctx, int layout, int cy_mid, int an
   for (int d = 0; d < 4; d++) {
     bool top = (d < 2);
     x[d] = (d & 1) ? ones_x : tens_x;
-    int b  = prv_round_bound(x[d]);
+    int b  = prv_round_stack_bound(x[d]);
     int hr = prv_round_row_h(b);
     h[d]  = (anim_h > 0 && anim_h < hr) ? anim_h : hr;
     cy[d] = prv_round_row_cy(b, top, cy_mid);
@@ -1534,7 +1551,7 @@ static void prv_round_split_draw(GContext *ctx, Phase ph, int step, int tl, int 
   for (int d = 0; d < 4; d++) {
     bool top = (d < 2);
     int sx = (d & 1) ? ones_x : tens_x;
-    int fb = prv_round_bound(FX[d]), sb = prv_round_bound(sx);
+    int fb = prv_round_bound(FX[d]), sb = prv_round_stack_bound(sx);
     int v_h = prv_round_row_h(fb),  v_cy = prv_round_row_cy(fb, top, cy_mid);
     int s_h = prv_round_row_h(sb),  s_cy = prv_round_row_cy(sb, top, cy_mid);
     switch (ph) {
@@ -1564,8 +1581,8 @@ static void prv_draw_stacked_info(GContext *ctx, struct tm *tm_now,
   int cn = build_lines(s_col_lines, ROUND_STACK_LINES, s_cfg_stack, STACK_SLOTS, tm_now, false);
   if (cn <= 0) return;
   // Lines span the outer columns' full-view extent; each is clamped to the bezel chord (1 UNIT margin).
-  int top = SCREEN_H / 2 - ROUND_OUTER_H / 2;
-  int avail_h = ROUND_OUTER_H - INFO_GLYPH_H;
+  int top = SCREEN_H / 2 - ROUND_STACK_OUTER_H / 2;
+  int avail_h = ROUND_STACK_OUTER_H - INFO_GLYPH_H;
   for (int i = 0; i < cn; i++) {
     int y = top + (cn > 1 ? (i * avail_h) / (cn - 1) : avail_h / 2);
     int half = prv_round_chord_half(y, y + INFO_GLYPH_H) - UNIT;
@@ -1695,10 +1712,10 @@ static void draw_layer(Layer *layer, GContext *ctx) {
       prv_round_split_draw(ctx, s_phase, step, tl, cy_mid, dv, SHADOW_DX, SHADOW_DY, s_shadow_col, s_shadow_col);
       prv_round_split_draw(ctx, s_phase, step, tl, cy_mid, dv, 0, 0, s_fg_hr, s_fg_mn); }
 #else
-    draw_pair(ctx, h_tens, h_ones, hr_tens_x, hr_tens_x+SLOT_W, s_sh_hr_cy, s_sh_h, SHADOW_DX, SHADOW_DY, s_shadow_col);
-    draw_pair(ctx, m_tens, m_ones, mn_tens_x, mn_tens_x+SLOT_W, s_sh_mn_cy, s_sh_h, SHADOW_DX, SHADOW_DY, s_shadow_col);
-    draw_pair(ctx, h_tens, h_ones, hr_tens_x, hr_tens_x+SLOT_W, s_sh_hr_cy, s_sh_h, 0, 0, s_fg_hr);
-    draw_pair(ctx, m_tens, m_ones, mn_tens_x, mn_tens_x+SLOT_W, s_sh_mn_cy, s_sh_h, 0, 0, s_fg_mn);
+    draw_pair(ctx, h_tens, h_ones, hr_tens_x, hr_tens_x+STACK_SLOT_W, s_sh_hr_cy, s_sh_h, SHADOW_DX, SHADOW_DY, s_shadow_col);
+    draw_pair(ctx, m_tens, m_ones, mn_tens_x, mn_tens_x+STACK_SLOT_W, s_sh_mn_cy, s_sh_h, SHADOW_DX, SHADOW_DY, s_shadow_col);
+    draw_pair(ctx, h_tens, h_ones, hr_tens_x, hr_tens_x+STACK_SLOT_W, s_sh_hr_cy, s_sh_h, 0, 0, s_fg_hr);
+    draw_pair(ctx, m_tens, m_ones, mn_tens_x, mn_tens_x+STACK_SLOT_W, s_sh_mn_cy, s_sh_h, 0, 0, s_fg_mn);
 #endif
     return;
   }
