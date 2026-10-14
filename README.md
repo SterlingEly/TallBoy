@@ -5,7 +5,7 @@ A Pebble watchface built around oversized vector-drawn digits that dynamically s
 **Design:** Sterling Ely  
 **Implementation:** Sterling Ely + Claude  
 **Primary device:** Pebble Time 2 (emery, 200×228, color)  
-**Status:** Active development — internal v3.64, not yet formally released
+**Status:** Active development — internal v3.66, not yet formally released
 
 ---
 
@@ -15,7 +15,7 @@ A Pebble watchface built around oversized vector-drawn digits that dynamically s
 
 ## Current status
 
-Internal version **v3.64** targets all 7 Pebble platforms. Animated digits, three display layouts, health and weather data, and pace-based background color are all working. Round platform support was added in v3.60–v3.61 with per-column digit heights that follow the circular bezel; in v3.64 the Pebble Round 2 (gabbro, 260×260) got its own geometry instead of sharing the original Time Round's (chalk, 180×180) — that change still needs device verification. A config page (PebbleKit JS) covers layouts, units, info slots and colors; v3.62 added three pace palettes (dark / medium / light) and a colon color, and v3.63 added air quality (AQI) from Open-Meteo, now confirmed working on device.
+Internal version **v3.66** targets all 7 Pebble platforms. Animated digits, three display layouts, health and weather data, and pace-based background color are all working. Round platform support was added in v3.60–v3.61 with per-column digit heights that follow the circular bezel; in v3.64 the Pebble Round 2 (gabbro, 260×260) got its own geometry instead of sharing the original Time Round's (chalk, 180×180), and v3.65 / v3.66 tightened the digit-to-colon spacing on gabbro and chalk to match the Time 2 design — those changes still need device verification. A config page (PebbleKit JS) covers layouts, units, info slots and colors; v3.62 added three pace palettes (dark / medium / light) and a colon color, and v3.63 added air quality (AQI) from Open-Meteo, now confirmed working on device.
 
 See [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md) for the full status, known bugs, and next work.
 
