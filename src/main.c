@@ -1,5 +1,5 @@
 // ============================================================
-// TallBoy — main.c  v3.64
+// TallBoy — main.c  v3.65
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
 // v3.59j: data caching philosophy — hide > mislead; UV sentinel -1; 3h weather timeout
@@ -28,6 +28,8 @@
 //        round column heights), it was wrongly sharing chalk's 180x180 block;
 //        heart-rate availability check fixed (health_service_metric_accessible always reports
 //        HR unavailable -- use aggregate_averaged_accessible with a point-in-time range)
+// v3.65: gabbro colon spacing -- slots now use emery's pitch (digit slot to colon slot = 28px =
+//        3.5 UNIT, not a full SLOT_W of 40) so the gap across the colon is 3 UNIT, not 6.
 // ============================================================
 
 #include <pebble.h>
@@ -144,22 +146,25 @@ typedef enum {
   // gabbro (Pebble Round 2, Core Devices 2026): 260x260 round color. NO heart-rate sensor.
   // Same glyph scale as emery (UNIT=8, SLOT_W=40) so digits keep their weight on the bigger screen.
   // Slots are spaced SLOT_W apart and centered on x=130:
-  //   H_TENS 30 | H_ONES 70 | colon 110 | M_TENS 150 | M_ONES 190  (30px margin each side)
+  //   H_TENS 42 | H_ONES 82 | colon 110 | M_TENS 138 | M_ONES 178  (42px margin each side)
   //   Colon center = 110 + 20 = 130 = exact screen center.
+  //   Digit-to-colon pitch is 28px (3.5 UNIT), identical to emery (52/80/108), so the glyph gap
+  //   across the colon is 3 UNIT. v3.64 used a full 40px pitch there (6 UNIT) -- too airy.
   // Per-column heights keep chalk's proportions (outer ~0.6, inner ~0.8 of screen height):
-  //   Outer cols (H_TENS, M_ONES) dx=80 from center -> ROUND_OUTER_H = UNIT*20 = 160px
-  //   Inner cols (H_ONES, M_TENS) dx=40 from center -> ROUND_INNER_H = UNIT*26 = 208px
+  //   Outer cols (H_TENS, M_ONES) dx=68 from center -> ROUND_OUTER_H = UNIT*20 = 160px
+  //   Inner cols (H_ONES, M_TENS) dx=28 from center -> ROUND_INNER_H = UNIT*26 = 208px
+  //   (heights kept from v3.64; columns moved inward so there is headroom to raise them)
   // These two heights are scaled from chalk, not measured -- tune on device if anything clips
   // or looks undersized. Info layouts not supported on round.
   #define SCREEN_W           260
   #define SCREEN_H           260
   #define SLOT_W              40
   #define COLON_SLOT_X       110
-  #define SLOT_H_TENS         30
-  #define SLOT_H_ONES         70
-  #define SLOT_M_TENS        150
-  #define SLOT_M_ONES        190
-  #define SIDE_MARGIN         30
+  #define SLOT_H_TENS         42
+  #define SLOT_H_ONES         82
+  #define SLOT_M_TENS        138
+  #define SLOT_M_ONES        178
+  #define SIDE_MARGIN         42
   #define HALF_UNIT            4
   #define INFO_LINE_H         28
   #define INFO_GLYPH_H        18
