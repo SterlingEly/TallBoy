@@ -5,7 +5,7 @@ A Pebble watchface built around oversized vector-drawn digits that dynamically s
 **Design:** Sterling Ely  
 **Implementation:** Sterling Ely + Claude  
 **Primary device:** Pebble Time 2 (emery, 200×228, color)  
-**Status:** Active development — v3.63, not yet formally released
+**Status:** Active development — internal v3.64, not yet formally released
 
 ---
 
@@ -15,7 +15,7 @@ A Pebble watchface built around oversized vector-drawn digits that dynamically s
 
 ## Current status
 
-Version **v3.63** is functional on all 7 Pebble platforms. Animated digits, three display layouts, health and weather data, and pace-based background color are all working. Round platform support (chalk and gabbro) was added in v3.60–v3.61 with per-column digit heights that follow the circular bezel. A config page (PebbleKit JS) covers layouts, units, info slots and colors; v3.62 added three pace palettes (dark / medium / light) and a colon color, and v3.63 added air quality (AQI) from Open-Meteo.
+Internal version **v3.64** targets all 7 Pebble platforms. Animated digits, three display layouts, health and weather data, and pace-based background color are all working. Round platform support was added in v3.60–v3.61 with per-column digit heights that follow the circular bezel; in v3.64 the Pebble Round 2 (gabbro, 260×260) got its own geometry instead of sharing the original Time Round's (chalk, 180×180) — that change still needs device verification. A config page (PebbleKit JS) covers layouts, units, info slots and colors; v3.62 added three pace palettes (dark / medium / light) and a colon color, and v3.63 added air quality (AQI) from Open-Meteo, now confirmed working on device.
 
 See [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md) for the full status, known bugs, and next work.
 
@@ -41,7 +41,7 @@ Three display modes, accessible by shake or configured as always-on:
 | Wide | Up to 3 info slots above + 3 below time; digits fill remaining space; empty slots collapse |
 | Stacked L / R | Stacked hour/minute digits on one side, up to 8 info slots in a column on the other |
 
-Round platforms (chalk, gabbro) support Full mode only. Per-column digit heights follow the circular bezel — outer columns shorter, inner columns taller, no clipping.
+Round platforms (chalk, gabbro) support Full mode only. Per-column digit heights follow the circular bezel — outer columns shorter, inner columns taller, no clipping. Chalk and gabbro have separate geometry because their screens differ (180×180 vs 260×260).
 
 ---
 
@@ -49,7 +49,9 @@ Round platforms (chalk, gabbro) support Full mode only. Per-column digit heights
 
 Info lines display health, weather, solar, and device status data. **Data caching philosophy: hide > mislead** — if data is unavailable or stale, the slot disappears entirely rather than showing zeros or stale values.
 
-Slot type IDs 0–30 are available, including air quality (AQI) as of v3.63. See [`PROJECT_CONTEXT.md`](PROJECT_CONTEXT.md) for the complete slot reference.
+Slot type IDs 0–30 are available, including air quality (AQI). See [`PROJECT_CONTEXT.md`](PROJECT_CONTEXT.md) for the complete slot reference.
+
+Heart rate is available on supported models only (Pebble Time 2 and the Pebble 2 HR).
 
 ---
 
@@ -68,13 +70,15 @@ On color platforms with health data, the background color reflects today's step 
 | ≤ 700% | Indigo |
 | ≤ 1000% | Vivid Violet |
 
+(The table shows the medium palette; dark and light palettes use the same thresholds.)
+
 ---
 
-## Weather and solar data
+## Weather, solar and air-quality data
 
-Fetched by PebbleKit JS (`src/pkjs/index.js`) on watch connect and every 30 minutes, using the [Open-Meteo API](https://open-meteo.com/) (no API key required).
+Fetched by PebbleKit JS (`src/pkjs/index.js`) on watch connect and every 30 minutes, using the [Open-Meteo API](https://open-meteo.com/) (no API key required). Air-quality data is CAMS ENSEMBLE data via Open-Meteo.
 
-Weather and UV data ages out after 3 hours without a phone update. Sunrise and sunset times never age out.
+Weather, UV and AQI data ages out after 3 hours without a phone update. Sunrise and sunset times never age out.
 
 ---
 
