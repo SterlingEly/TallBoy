@@ -18,10 +18,10 @@ The watchface supports all seven Pebble hardware platforms, three display layout
 
 ## Current Status
 
-**Internal version: v3.65** — active development, not yet formally released. (Internal numbers are development checkpoints, not public releases.)
+**Internal version: v3.66** — active development, not yet formally released. (Internal numbers are development checkpoints, not public releases.)
 
 ### What is working
-- Builds clean on all 7 target platforms as of v3.63; v3.64 ran on a real gabbro (Sterling, 2026-10-14: "looks pretty good" apart from the colon spacing fixed in v3.65); v3.65 is not yet compiled or device-tested
+- Builds clean on all 7 target platforms as of v3.63; v3.64 ran on a real gabbro (Sterling, 2026-10-14: "looks pretty good" apart from the colon spacing fixed in v3.65); v3.65 and v3.66 are not yet compiled or device-tested
 - Full-mode animated digits: anticipate → squish → expand on every minute tick
 - Wide info mode: up to 3 info slots above + 3 below; digits fill remaining space; empty slots collapse instantly
 - Stacked info mode (STACK_L / STACK_R): stacked hour/minute digits on one side, up to 8 info lines in a column on the other; minute-change fast-blink animation
@@ -34,23 +34,26 @@ The watchface supports all seven Pebble hardware platforms, three display layout
 - Round platform support: per-column digit heights follow circular bezel geometry; center point aligned at unobstructed midpoint. **chalk (180×180) and gabbro (260×260) now have separate geometry blocks (v3.64).**
 - Background: black base → colored rounded-rect (radius UNIT×2 = 16px on emery); plain fill on round (OS clips to circle automatically)
 
+### v3.66 changes (2026-10-14) — NOT YET COMPILED OR DEVICE-TESTED
+**Chalk colon spacing**, the same fix as gabbro's v3.65. Sterling asked for chalk to follow the same rule after the gabbro fix. Chalk's slots were a uniform 30px pitch (5 UNIT at UNIT 6), which put the colon dot 15px (2.5 UNIT) from each neighboring glyph instead of 6px (1 UNIT).
+Fix: chalk slots moved to `H_TENS 24 | H_ONES 54 | colon 75 | M_TENS 96 | M_ONES 126`, `SIDE_MARGIN 24`. Digit-slot → colon-slot pitch is 21px (3.5 UNIT). Glyphs: H_TENS 27..51, H_ONES 57..81, dot 87..93, M_TENS 99..123, M_ONES 129..153. Colon center is still x=90, and the glyph span 27..153 is centered too.
+Column heights unchanged (outer 108, inner 144). The outer columns now sit at dx=51 from center (glyph far edge 63, was 72), so there is headroom to raise `ROUND_OUTER_H`/`ROUND_INNER_H` — not measured, tune on a Time Round.
+
 ### v3.65 changes (2026-10-14) — NOT YET COMPILED OR DEVICE-TESTED
 **Gabbro colon spacing.** Sterling saw v3.64 on a gabbro and reported the digit-to-colon space looked about twice the usual design. Cause: v3.64 laid gabbro's five slots out at a uniform `SLOT_W` (40px) pitch, so the colon slot was a full slot wide on each side. Emery's design uses a 28px (3.5 UNIT) pitch from the inner digit slot to the colon slot, which puts the dot 8px (1 UNIT) from each neighboring glyph. v3.64 put it 20px away (2.5 UNIT), and the glyph-to-glyph gap across the colon was 6 UNIT instead of 3.
 Fix: gabbro slots moved to `H_TENS 42 | H_ONES 82 | colon 110 | M_TENS 138 | M_ONES 178`, `SIDE_MARGIN 42`. Colon center is still x=130. Column heights unchanged (outer 160, inner 208); the outer columns now sit at dx=68 instead of 80, so there is geometric headroom to raise `ROUND_OUTER_H` if it looks short.
-Note chalk's block still uses a uniform 30px pitch (UNIT 6) — Sterling has not reported its spacing, so it was left alone.
 
 ### v3.64 changes (2026-10-13)
 1. **Gabbro split from chalk.** Gabbro (Pebble Round 2) is a 260×260 round screen; it had been sharing chalk's 180×180 geometry block (and was mislabeled "Pebble 2 HR"). It now has its own block: `UNIT=8` (same glyph scale as emery), `SLOT_W=40`, slots centered on x=130 (positions superseded by v3.65 — see Architecture), `ROUND_OUTER_H = UNIT*20 = 160`, `ROUND_INNER_H = UNIT*26 = 208`. **The two round heights are scaled from chalk's proportions (outer ≈ 0.6, inner ≈ 0.8 of screen height), not measured** — tune on the real device.
 2. **Heart rate fixed.** `prv_update_health()` used `health_service_metric_accessible()` for `HealthMetricHeartRateBPM`, which always reports HR unavailable. It now uses `health_service_metric_aggregate_averaged_accessible(metric, now, now, HealthAggregationAvg, HealthServiceTimeScopeOnce)` — the same fix that made HR work in Radium 2.
 
 ### Known active bugs
-None logged. (v3.65 change above is unverified.)
+None logged. (v3.65 and v3.66 changes above are unverified.)
 
 ### Unresolved questions
 - STACK_L animation (symmetric squish) vs STACK_R animation (fold toward center) — preference pending device comparison
 - Whether to add info line support to round platforms in a future version
-- Gabbro digit heights (see v3.64 note) — scaled, not measured
-- Whether chalk's uniform-pitch spacing has the same too-wide colon gap (awaiting a look on a Time Round)
+- Gabbro and chalk digit heights (see v3.64 / v3.66 notes) — scaled, not measured
 - Whether the HR slot should hide (rather than show "--") on platforms with no HR sensor (basalt, chalk, gabbro, flint, aplite) — currently shows "--"
 
 ---
@@ -154,27 +157,34 @@ Derived from h:
   tail = (h > H_MIN) ? (h - H_MIN) / 4 : 0        — tail stub length (some digits)
 ```
 
+A glyph is **4 UNIT wide**: a "0" is a 1-UNIT wall, a 2-UNIT opening, and a 1-UNIT wall (stroke `sw` = 1 UNIT, inner arc radius `ri` = 1 UNIT, outer `ro` = 2 UNIT). Neighboring glyphs are 1 UNIT apart (slot pitch 5 UNIT = 4 glyph + 1 gap). Sterling described digits as "3 units wide" on 2026-10-14 (wall, space, wall); that does not match the code, and nothing was changed for it — if he wants 3-UNIT digits it is a redesign of the arc caps, not a spacing tweak.
+
 Digits 1, 2, and 7 use `gpath_create` for diagonal strokes — these allocate/free on every draw call. Null checks are in place; not a memory leak.
 
-### Slot positions — emery (UNIT=8, SLOT_W=40)
+### Slot geometry rule (all platforms)
+
+A glyph is drawn at `slot_x + HALF_SLOT_PAD` and is `GLYPH_W` wide; the colon dot (radius `UNIT/2`, 1 UNIT wide) is centered at `COLON_SLOT_X + SLOT_W/2`. Digit-to-digit pitch is `SLOT_W` (5 UNIT). **The pitch from the inner digit slot to the colon slot is 3.5 UNIT** (not a full `SLOT_W`), which puts the dot 1 UNIT from each neighboring glyph and the glyph-to-glyph gap across the colon at 3 UNIT. Apply this to any new platform.
+
+### Slot positions — emery (UNIT=8, SLOT_W=40) — the reference
 
 ```
 SLOT_H_TENS=12, SLOT_H_ONES=52, COLON_SLOT_X=80, SLOT_M_TENS=108, SLOT_M_ONES=148
-Digit slot → colon slot pitch = 28px (3.5 UNIT)  — the reference spacing
+Digit slot → colon slot pitch = 28px (3.5 UNIT)
 Glyphs: H_ONES 56..88, colon dot centered at x=100 (r=4), M_TENS 112..144  → dot is 8px from each glyph
 ```
 
-Slot geometry rule: a glyph is drawn at `slot_x + HALF_SLOT_PAD` and is `GLYPH_W` wide; the colon dot is centered at `COLON_SLOT_X + SLOT_W/2`. When defining a new platform, set the digit-to-colon pitch to 3.5 UNIT (not a full `SLOT_W`) to match the emery design.
-
-### Slot positions — chalk (UNIT=6, SLOT_W=30, centered on 180px)
+### Slot positions — chalk (UNIT=6, SLOT_W=30, centered on 180px) — v3.66, unverified on device
 
 ```
-SLOT_H_TENS=15, SLOT_H_ONES=45, COLON_SLOT_X=75, SLOT_M_TENS=105, SLOT_M_ONES=135
-Colon center = x=90 = exact screen center ✓
-ROUND_OUTER_H = UNIT*18 = 108px  — H_TENS and M_ONES columns (dx=60 from center)
-ROUND_INNER_H = UNIT*24 = 144px  — H_ONES and M_TENS columns (dx=30 from center)
+SLOT_H_TENS=24, SLOT_H_ONES=54, COLON_SLOT_X=75, SLOT_M_TENS=96, SLOT_M_ONES=126
+SIDE_MARGIN=24 (unused in round full mode)
+Digit slot → colon slot pitch = 21px (3.5 UNIT). Glyphs: H_TENS 27..51, H_ONES 57..81, dot 87..93, M_TENS 99..123, M_ONES 129..153
+Colon center = 75 + 15 = 90 = exact screen center ✓; glyph span 27..153 is centered ✓
+ROUND_OUTER_H = UNIT*18 = 108px  — H_TENS and M_ONES columns (glyph far edge dx=63 from center)
+ROUND_INNER_H = UNIT*24 = 144px  — H_ONES and M_TENS columns
 cy on round   = ub_top + ub_h/2  — NOT MARGIN_OUTER + s_target_h/2 (6px off-center)
-Uniform 30px pitch (10 units... i.e. 5 UNIT) around the colon, wider than emery's 3.5 UNIT — not yet reviewed on device
+Heights were sized for the old wider columns (outer glyph edge dx=72), so there is headroom to raise them — not measured.
+Superseded (pre-v3.66, uniform 30px pitch, dot 2.5 UNIT from glyphs): 15 / 45 / colon 75 / 105 / 135, SIDE_MARGIN 15
 ```
 
 ### Slot positions — gabbro (UNIT=8, SLOT_W=40, centered on 260px) — v3.65, unverified on device
@@ -194,6 +204,7 @@ Superseded v3.64 slots (too airy): 30 / 70 / colon 110 / 150 / 190, SIDE_MARGIN 
 
 ```
 SLOT_H_TENS=6, SLOT_H_ONES=36, COLON_SLOT_X=57, SLOT_M_TENS=78, SLOT_M_ONES=108
+Digit slot → colon slot pitch = 21px (3.5 UNIT) — already follows the rule
 ```
 
 ### Margin model
@@ -326,7 +337,7 @@ None logged.
 | `health_service_metric_accessible` for heart rate | Always reports HR unavailable. Use `aggregate_averaged_accessible` with a point-in-time range (see Architecture → Heart rate) |
 | Degree symbol (0xB0) breaks weather text | Use plain ASCII — `"72 F"` not `"72°F"` — degree symbol silently prevents rendering |
 | **Gabbro is 260×260, not 180×180** | gabbro = Pebble Round 2 (large round, no HR). It was once wrongly grouped with chalk (180×180) and labeled "Pebble 2 HR". Never share chalk's geometry block with gabbro; never group gabbro with rect platforms |
-| **Uniform slot pitch makes the colon gap too wide** | Spacing slots at a full `SLOT_W` on both sides of the colon doubles the digit-to-colon gap versus emery (gabbro v3.64). Use 3.5 UNIT between the inner digit slots and the colon slot. Positions must be checked on device, not just derived from "centered and evenly spaced" |
+| **Uniform slot pitch makes the colon gap too wide** | Spacing slots at a full `SLOT_W` on both sides of the colon puts the dot 2.5 UNIT from each glyph instead of 1 (gabbro v3.64, chalk until v3.66). Use 3.5 UNIT between the inner digit slots and the colon slot. Positions must be checked on device, not just derived from "centered and evenly spaced" |
 | Round `cy` must be `ub_top + ub_h/2` | `MARGIN_OUTER + s_target_h/2` is off-center on round screens |
 | Wide mode draw height | Use `actual_h` (live-computed from rendered slot count), not `s_target_h` |
 | Stacked blink floor | Uses `H_ABSOLUTE_MIN`, not `H_MIN` |
@@ -340,12 +351,11 @@ None logged.
 ## Current TODO
 
 ### Immediate
-- **Compile and device-test v3.65** on gabbro: colon spacing now matches emery; check whether the outer digit columns (160px) look short now that they sit closer in (dx=68) — `ROUND_OUTER_H` can likely go up (a circle-inscribed estimate allows about 190px), and check nothing clips at the bezel
+- **Compile and device-test v3.65 (gabbro) and v3.66 (chalk)**: colon spacing now matches emery on both. On each, check whether the outer digit columns look short now that they sit closer in — gabbro `ROUND_OUTER_H` (160px) can likely go up (a circle-inscribed estimate allows about 190px); chalk's 108px/144px have similar headroom — and check nothing clips at the bezel
 - Confirm heart rate shows a real BPM on emery (v3.64 fix)
 - Device-test the v3.62 changes still unconfirmed: pace palettes, colon color, sun icon, Temp+UV+AQI combo (AQI itself is confirmed working)
 - Decide the default pace palette (code default: medium)
 - Decide STACK_L vs STACK_R animation preference after device comparison
-- Look at chalk (Time Round) colon spacing — it still uses a uniform 30px pitch
 
 ### Near-term
 - Lower-resolution platform tuning (basalt/aplite/diorite/flint) — layout math scales with UNIT; needs device testing
@@ -405,8 +415,8 @@ TallBoy shares platform constants, build rules, and CloudPebble conventions with
 
 ## Last Updated
 
-v3.65 — 2026-10-14
+v3.66 — 2026-10-14
 Updated by: AI collaborator (Claude, Anthropic) with direction from Sterling Ely
-Changes in this pass: gabbro colon spacing corrected to emery's 3.5 UNIT pitch (slots 42/82/110/138/178); new trap and verification item; chalk spacing flagged for review.
+Changes in this pass: chalk colon spacing corrected to the 3.5 UNIT rule (slots 24/54/75/96/126); slot geometry rule consolidated into one section; glyph-width note (4 UNIT, not 3) added; chalk wording slip fixed.
 
-Previous: v3.64 2026-10-13 (gabbro split from chalk, HR fix, AQI device-confirmed, platform table naming); v3.63 doc sync 2026-09-28; v3.61 — July 2026: added Related Projects section, reorganized Build Rules, updated status.
+Previous: v3.65 2026-10-14 (gabbro colon spacing); v3.64 2026-10-13 (gabbro split from chalk, HR fix, AQI device-confirmed, platform table naming); v3.63 doc sync 2026-09-28; v3.61 — July 2026: added Related Projects section, reorganized Build Rules, updated status.
