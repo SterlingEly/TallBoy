@@ -187,7 +187,7 @@ The repo contains only the files above (plus `resources/`). The old dead/scratch
 
 - HR sensors: **emery and diorite (HR model) only** — use "on supported models" in store copy, never list platforms
 - Round platforms (chalk, gabbro): share the `PBL_ROUND` code paths but have **separate geometry blocks** (chalk 180×180 UNIT 6; gabbro 260×260 UNIT 8); all three layouts (full, wide, stacked L/R) are supported on round since v3.67; gabbro full-view uses 2 UNIT digit spacing since v3.68
-- Touch input: emery only — non-functional at firmware level on shipping hardware; all `PBL_TOUCH` code removed
+- Touch input: **gabbro has a touchscreen (Sterling, 2026-10-14: "def has touch")**, as does emery. TallBoy does not use it: an earlier finding that touch was non-functional at firmware level on shipping hardware led to all `PBL_TOUCH` code being removed. That finding predates the confirmation for gabbro, so re-check it before assuming touch is unusable on either watch
 
 ### Digit geometry (stable)
 
@@ -487,7 +487,7 @@ TallBoy shares platform constants, build rules, and CloudPebble conventions with
 
 v3.68 — 2026-10-15
 Updated by: AI collaborator (Claude, Anthropic) with direction from Sterling Ely
-Changes in this pass: v3.68 documented (gabbro 2U spacing, re-measured full-view heights 136/216, separate stacked constants, chalk 1.5U/2U trade-off table, font reference facts); gabbro slot section rewritten; trap, TODO, unresolved questions and verification plan refreshed.
+Changes in this pass: v3.68 documented (gabbro 2U spacing, re-measured full-view heights 136/216, separate stacked constants, chalk 1.5U/2U trade-off table, font reference facts); gabbro slot section rewritten; trap, TODO, unresolved questions and verification plan refreshed. Follow-up: touch note corrected (gabbro has a touchscreen).
 
 Previous pass (v3.67, 2026-10-14): v3.67 documented (measured round heights, wide and stacked L/R on round, per-digit split/merge, new helpers); round slot/height sections rewritten; traps added (scaled round heights, odd digit heights, no sqrt); build-rule notes added (large-file fetch, hash-verify, stub syntax check); TODO and unresolved questions refreshed.
 
