@@ -1,5 +1,5 @@
 // ============================================================
-// TallBoy — main.c  v3.68
+// TallBoy — main.c  v3.69
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
 // v3.59j: data caching philosophy — hide > mislead; UV sentinel -1; 3h weather timeout
@@ -41,7 +41,11 @@
 //        span 30..230). Wider spacing pushes the outer glyphs toward the bezel, so the full-view round
 //        heights drop to keep >=1U corner clearance (gabbro 176/224 -> 136/216). Stacked layouts keep
 //        their own 1U pitch (STACK_SLOT_W = 5 UNIT) and their own bounds (ROUND_STACK_*_H), so the info
-//        column keeps its width. Chalk unchanged (see PROJECT_CONTEXT for the 1.5U / 2U trade-off).
+//        column keeps its width (superseded in v3.69, below). Chalk unchanged (see PROJECT_CONTEXT for the 1.5U / 2U trade-off).
+// v3.69: gabbro stacked layouts follow the full-view spacing and placement: the stacked pair sits on the
+//        full-view hour (STACK_L) or minute (STACK_R) slots with the same 2U pitch, and uses the
+//        full-view bounds (136 / 216). The info column keeps its own height (ROUND_STACK_INFO_H) and
+//        its 1.5U gap to the digits, so it starts 8px further left than in v3.68.
 // ============================================================
 
 #include <pebble.h>
@@ -162,6 +166,7 @@ typedef enum {
   #define ROUND_INNER_H       (UNIT * 25)   // 150px
   #define ROUND_STACK_OUTER_H ROUND_OUTER_H // chalk: stacked columns sit on the full-view slots
   #define ROUND_STACK_INNER_H ROUND_INNER_H
+  #define ROUND_STACK_INFO_H  ROUND_OUTER_H // chalk: info column spans the outer columns' extent
   // Round wide mode: info lines are inset so each fits the bezel chord; short-format text only.
   #define ROUND_INFO_INSET    11            // px from the top/bottom of the unobstructed area
   #define ROUND_WIDE_LINES    1             // lines above and below the digits
@@ -185,7 +190,7 @@ typedef enum {
   #define SLOT_H_ONES         74
   #define SLOT_M_TENS        146
   #define SLOT_M_ONES        194
-  #define SIDE_MARGIN         42   // stacked layouts only (STACK_SLOT_W pitch)
+  #define SIDE_MARGIN         26   // unused on gabbro since v3.69 (stacked pair uses the SLOT_* x positions)
   #define HALF_UNIT            4
   #define INFO_LINE_H         28
   #define INFO_GLYPH_H        18
@@ -201,9 +206,11 @@ typedef enum {
   // v3.68: 176/224 -> 136/216 (17 / 27 UNIT) because the outer glyph edge moved from dx=84 to dx=100.
   #define ROUND_OUTER_H       (UNIT * 17)   // 136px
   #define ROUND_INNER_H       (UNIT * 27)   // 216px
-  // Stacked layouts keep the v3.67 geometry (columns at SIDE_MARGIN, 1U pitch), so they keep the v3.67 bounds.
-  #define ROUND_STACK_OUTER_H (UNIT * 22)   // 176px
-  #define ROUND_STACK_INNER_H (UNIT * 28)   // 224px
+  // v3.69: stacked layouts sit on the full-view slots (same 2U pitch), so they share the full-view bounds.
+  #define ROUND_STACK_OUTER_H ROUND_OUTER_H // 136px
+  #define ROUND_STACK_INNER_H ROUND_INNER_H // 216px
+  // The stacked info column is independent of the digit columns: it keeps the v3.67 vertical extent.
+  #define ROUND_STACK_INFO_H  (UNIT * 22)   // 176px
   #define ROUND_INFO_INSET    13
   #define ROUND_WIDE_LINES    2
   #define ROUND_STACK_LINES   6
@@ -236,7 +243,11 @@ typedef enum {
 #define MARGIN_OUTER    (MARGIN_CANVAS + MARGIN_DIGIT)
 #define HALF_SLOT_PAD   (UNIT / 2)
 #define GLYPH_W         (UNIT * 4)
+#if defined(PBL_PLATFORM_GABBRO)
+#define STACK_SLOT_W    SLOT_W       // digit pitch inside the stacked pair = full-view pitch (2U gaps, v3.69)
+#else
 #define STACK_SLOT_W    (UNIT * 5)   // digit pitch inside the stacked pair (4 UNIT glyph + 1 UNIT gap)
+#endif
 #define H_MIN           (UNIT * 11)
 #define H_ABSOLUTE_MIN  (UNIT * 5)
 #define INFO_LINE_BUF   48
@@ -1426,10 +1437,15 @@ static int prv_round_bound(int slot_x) {
   return (slot_x == SLOT_H_TENS || slot_x == SLOT_M_ONES) ? ROUND_OUTER_H : ROUND_INNER_H;
 }
 // Stacked column bound (x is the stacked tens or ones column). The outer column is the one nearest
-// the bezel: SIDE_MARGIN for STACK_L, SCREEN_W - SIDE_MARGIN - STACK_SLOT_W for STACK_R.
+// the bezel: the hour tens slot for STACK_L, the minute ones slot for STACK_R (gabbro, v3.69), else
+// SIDE_MARGIN / SCREEN_W - SIDE_MARGIN - STACK_SLOT_W (chalk, where these are the same slots).
 static int prv_round_stack_bound(int slot_x) {
+#if defined(PBL_PLATFORM_GABBRO)
+  return (slot_x == SLOT_H_TENS || slot_x == SLOT_M_ONES) ? ROUND_STACK_OUTER_H : ROUND_STACK_INNER_H;
+#else
   return (slot_x == SIDE_MARGIN || slot_x == SCREEN_W - SIDE_MARGIN - STACK_SLOT_W)
          ? ROUND_STACK_OUTER_H : ROUND_STACK_INNER_H;
+#endif
 }
 static int prv_round_row_h(int bound) { return (bound / 2 - HALF_UNIT) & ~1; }
 static int prv_round_row_cy(int bound, bool top_row, int cy_mid) {
@@ -1493,15 +1509,25 @@ static void prv_update_targets(void) {
 static void prv_stacked_geom(int layout, int *tens_x, int *ones_x,
                                int *col_x, int *col_w, GTextAlignment *align) {
   if (layout == LAYOUT_STACK_R) {
+#if defined(PBL_PLATFORM_GABBRO)
+    *tens_x = SLOT_M_TENS;
+    *ones_x = SLOT_M_ONES;
+#else
     *ones_x = SCREEN_W - SIDE_MARGIN - STACK_SLOT_W;
     *tens_x = *ones_x - STACK_SLOT_W;
+#endif
     *col_x  = 1;
     *col_w  = *tens_x - UNIT - 1;
     *align  = GTextAlignmentRight;
   } else {
+#if defined(PBL_PLATFORM_GABBRO)
+    *tens_x = SLOT_H_TENS;
+    *ones_x = SLOT_H_ONES;
+#else
     *tens_x = SIDE_MARGIN;
     *ones_x = SIDE_MARGIN + STACK_SLOT_W;
-    *col_x  = *ones_x + STACK_SLOT_W + UNIT;
+#endif
+    *col_x  = *ones_x + UNIT * 5 + UNIT;   // glyph right edge + 1.5U gap, whatever the pair pitch
     *col_w  = SCREEN_W - *col_x - 1;
     *align  = GTextAlignmentLeft;
   }
@@ -1581,8 +1607,8 @@ static void prv_draw_stacked_info(GContext *ctx, struct tm *tm_now,
   int cn = build_lines(s_col_lines, ROUND_STACK_LINES, s_cfg_stack, STACK_SLOTS, tm_now, false);
   if (cn <= 0) return;
   // Lines span the outer columns' full-view extent; each is clamped to the bezel chord (1 UNIT margin).
-  int top = SCREEN_H / 2 - ROUND_STACK_OUTER_H / 2;
-  int avail_h = ROUND_STACK_OUTER_H - INFO_GLYPH_H;
+  int top = SCREEN_H / 2 - ROUND_STACK_INFO_H / 2;
+  int avail_h = ROUND_STACK_INFO_H - INFO_GLYPH_H;
   for (int i = 0; i < cn; i++) {
     int y = top + (cn > 1 ? (i * avail_h) / (cn - 1) : avail_h / 2);
     int half = prv_round_chord_half(y, y + INFO_GLYPH_H) - UNIT;
