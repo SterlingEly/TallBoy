@@ -1,5 +1,5 @@
 // ============================================================
-// TallBoy — main.c  v3.69
+// TallBoy — main.c  v3.70
 // Design: Sterling Ely. Code: Sterling Ely + Claude. 2026.
 //
 // v3.59j: data caching philosophy — hide > mislead; UV sentinel -1; 3h weather timeout
@@ -46,6 +46,10 @@
 //        full-view hour (STACK_L) or minute (STACK_R) slots with the same 2U pitch, and uses the
 //        full-view bounds (136 / 216). The info column keeps its own height (ROUND_STACK_INFO_H) and
 //        its 1.5U gap to the digits, so it starts 8px further left than in v3.68.
+// v3.70: gabbro digit spacing 2U -> 1.5U (12px gaps; SLOT_W 44, glyph span 38..222; slots 34/78/108/142/186)
+//        because 2U crunched the stacked rows. Heights re-measured: 158 / 224 (full, wide, stacked bounds).
+//        Round quick look (Timeline peek): full mode pins the digit tops and lifts only the bottoms to
+//        clear the peek; wide and stacked info modes ignore it (laid out on the full screen, nothing moves).
 // ============================================================
 
 #include <pebble.h>
@@ -174,22 +178,22 @@ typedef enum {
 #elif defined(PBL_PLATFORM_GABBRO)
   // gabbro (Pebble Round 2, Core Devices 2026): 260x260 round color. NO heart-rate sensor.
   // Same glyph scale as emery (UNIT=8) so digits keep their weight on the bigger screen.
-  // v3.68: every gap in the time row is 2 UNIT (16px): glyph | 16 | glyph | 16 | dot (8) | 16 | glyph | 16 | glyph.
-  //   Digit-to-digit pitch SLOT_W = 6 UNIT = 48 (4 UNIT glyph + 2 UNIT gap); glyph span 30..230.
+  // v3.70: every gap in the time row is 1.5 UNIT (12px): glyph | 12 | glyph | 12 | dot (8) | 12 | glyph | 12 | glyph.
+  //   Digit-to-digit pitch SLOT_W = 5.5 UNIT = 44 (4 UNIT glyph + 1.5 UNIT gap); glyph span 38..222.
   //   Glyph left = slot + HALF_SLOT_PAD (4):
-  //   H_TENS 26 | H_ONES 74 | colon 106 | M_TENS 146 | M_ONES 194
-  //   Colon dot centre = 106 + SLOT_W/2 = 130 = exact screen center (dot 126..134).
-  //   Before v3.68 the gaps were 1 UNIT (SLOT_W 40, slots 42/82/110/138/178).
+  //   H_TENS 34 | H_ONES 78 | colon 108 | M_TENS 142 | M_ONES 186
+  //   Colon dot centre = 108 + SLOT_W/2 = 130 = exact screen center (dot 126..134).
+  //   History: 1U gaps until v3.67 (SLOT_W 40, slots 42/82/110/138/178), 2U in v3.68-v3.69 (SLOT_W 48).
   // Per-column heights are measured against the bezel (see ROUND_*_H below), not scaled from chalk.
-  // Outer glyph edge is dx=100 from centre (inner: dx=52). Info layouts supported on round since v3.67.
+  // Outer glyph edge is dx=92 from centre (inner: dx=48). Info layouts supported on round since v3.67.
   #define SCREEN_W           260
   #define SCREEN_H           260
-  #define SLOT_W              48
-  #define COLON_SLOT_X       106
-  #define SLOT_H_TENS         26
-  #define SLOT_H_ONES         74
-  #define SLOT_M_TENS        146
-  #define SLOT_M_ONES        194
+  #define SLOT_W              44
+  #define COLON_SLOT_X       108
+  #define SLOT_H_TENS         34
+  #define SLOT_H_ONES         78
+  #define SLOT_M_TENS        142
+  #define SLOT_M_ONES        186
   #define SIDE_MARGIN         26   // unused on gabbro since v3.69 (stacked pair uses the SLOT_* x positions)
   #define HALF_UNIT            4
   #define INFO_LINE_H         28
@@ -202,13 +206,14 @@ typedef enum {
   #define ICON_W              16
   #define ICON_V_ADJUST       -3
   // Full-view / wide heights, measured against the bezel with the real glyph shapes (tb/gapscan.py,
-  // worst digit 0-9, >=1 UNIT clearance): max 138 outer / 220 inner at 2U spacing.
-  // v3.68: 176/224 -> 136/216 (17 / 27 UNIT) because the outer glyph edge moved from dx=84 to dx=100.
-  #define ROUND_OUTER_H       (UNIT * 17)   // 136px
-  #define ROUND_INNER_H       (UNIT * 27)   // 216px
-  // v3.69: stacked layouts sit on the full-view slots (same 2U pitch), so they share the full-view bounds.
-  #define ROUND_STACK_OUTER_H ROUND_OUTER_H // 136px
-  #define ROUND_STACK_INNER_H ROUND_INNER_H // 216px
+  // worst digit 0-9, >=1 UNIT clearance): max 158 outer / 224 inner at 1.5U spacing
+  // (1U: 176/226, 2U: 138/220).
+  // v3.70: 136/216 -> 158/224 (outer glyph edge dx 100 -> 92).
+  #define ROUND_OUTER_H       158           // 19.75 UNIT
+  #define ROUND_INNER_H       (UNIT * 28)   // 224px
+  // v3.69: stacked layouts sit on the full-view slots (same pitch), so they share the full-view bounds.
+  #define ROUND_STACK_OUTER_H ROUND_OUTER_H // 158px
+  #define ROUND_STACK_INNER_H ROUND_INNER_H // 224px
   // The stacked info column is independent of the digit columns: it keeps the v3.67 vertical extent.
   #define ROUND_STACK_INFO_H  (UNIT * 22)   // 176px
   #define ROUND_INFO_INSET    13
@@ -244,7 +249,7 @@ typedef enum {
 #define HALF_SLOT_PAD   (UNIT / 2)
 #define GLYPH_W         (UNIT * 4)
 #if defined(PBL_PLATFORM_GABBRO)
-#define STACK_SLOT_W    SLOT_W       // digit pitch inside the stacked pair = full-view pitch (2U gaps, v3.69)
+#define STACK_SLOT_W    SLOT_W       // digit pitch inside the stacked pair = full-view pitch (v3.69)
 #else
 #define STACK_SLOT_W    (UNIT * 5)   // digit pitch inside the stacked pair (4 UNIT glyph + 1 UNIT gap)
 #endif
@@ -946,23 +951,38 @@ static void draw_digits_full(GContext *ctx, int h_tens, int h_ones, int m_tens, 
   draw_digit_vec(ctx, m_ones, SLOT_M_ONES, cy, h, dx, dy);
 }
 #if defined(PBL_ROUND)
+// Round full-mode digits. obs_bot is the lowest y the digits may reach (the top of the Timeline peek, or
+// SCREEN_H when none). The centre stays at the full-screen midpoint so the tops stay pinned; a column
+// whose bottom would cross obs_bot is shortened from the bottom only (v3.70).
+static void prv_round_fit(int h_col, int cy, int obs_bot, int *h_out, int *cy_out) {
+  int top = cy - h_col / 2, bot = top + h_col;
+  if (bot > obs_bot) {
+    bot = obs_bot;
+    int nh = (bot - top) & ~1;
+    if (nh < H_MIN) nh = H_MIN;
+    *h_out = nh; *cy_out = top + nh / 2;
+  } else { *h_out = h_col; *cy_out = cy; }
+}
 // Round variant: outer digit columns are shorter to follow the circular bezel.
 // Each column's height is capped to its circle-inscribed maximum so digits never clip.
 // h is the animation height (s_h, driven by s_target_h = ROUND_INNER_H at rest).
 static void draw_digits_full_round(GContext *ctx, int h_tens, int h_ones, int m_tens, int m_ones,
                                     int h, int cy, int dx, int dy,
-                                    int ub_top, int ub_bot,
+                                    int ub_top, int ub_bot, int obs_bot,
                                     GColor col_h, GColor col_m, GColor col_colon) {
   int h_outer = (h < ROUND_OUTER_H) ? h : ROUND_OUTER_H;
   int h_inner = (h < ROUND_INNER_H) ? h : ROUND_INNER_H;
+  int ho, co, hi, ci;
+  prv_round_fit(h_outer, cy, obs_bot, &ho, &co);
+  prv_round_fit(h_inner, cy, obs_bot, &hi, &ci);
   graphics_context_set_fill_color(ctx, col_h);
-  draw_digit_vec(ctx, h_tens, SLOT_H_TENS, cy, h_outer, dx, dy);
-  draw_digit_vec(ctx, h_ones, SLOT_H_ONES, cy, h_inner, dx, dy);
+  draw_digit_vec(ctx, h_tens, SLOT_H_TENS, co, ho, dx, dy);
+  draw_digit_vec(ctx, h_ones, SLOT_H_ONES, ci, hi, dx, dy);
   graphics_context_set_fill_color(ctx, col_colon);
-  draw_colon_vec(ctx, COLON_SLOT_X, cy, h_inner, dx, dy, ub_top, ub_bot);
+  draw_colon_vec(ctx, COLON_SLOT_X, ci, hi, dx, dy, ub_top, ub_bot);
   graphics_context_set_fill_color(ctx, col_m);
-  draw_digit_vec(ctx, m_tens, SLOT_M_TENS, cy, h_inner, dx, dy);
-  draw_digit_vec(ctx, m_ones, SLOT_M_ONES, cy, h_outer, dx, dy);
+  draw_digit_vec(ctx, m_tens, SLOT_M_TENS, ci, hi, dx, dy);
+  draw_digit_vec(ctx, m_ones, SLOT_M_ONES, co, ho, dx, dy);
 }
 #endif
 static void draw_stacked_pass(GContext *ctx, int h_tens, int h_ones, int m_tens, int m_ones,
@@ -1465,6 +1485,16 @@ static int prv_round_wide_h(int ub_h, int an, int bn) {
 }
 #endif
 
+// Bounds used for layout. Round watches ignore the Timeline peek here (wide / stacked / transitions use the
+// full screen so nothing moves); only round full mode reacts to it, in draw_layer (v3.70).
+static GRect prv_view_bounds(Layer *root) {
+#if defined(PBL_ROUND)
+  return layer_get_bounds(root);
+#else
+  return layer_get_unobstructed_bounds(root);
+#endif
+}
+
 static int prv_compute_target_h(int ub_h, int layout) {
   // For wide layout, uses configured slot count as a conservative estimate.
   // draw_layer refines this live using actual rendered count (slots that hide due
@@ -1502,7 +1532,7 @@ static int prv_compute_stacked_h(int ub_h) {
 
 static void prv_update_targets(void) {
   Layer *root = window_get_root_layer(s_window);
-  GRect ub = layer_get_unobstructed_bounds(root);
+  GRect ub = prv_view_bounds(root);
   s_target_h = prv_compute_target_h(ub.size.h, s_layout);
 }
 
@@ -1644,7 +1674,10 @@ static void prv_draw_stacked_info(GContext *ctx, struct tm *tm_now,
 // ============================================================
 static void draw_layer(Layer *layer, GContext *ctx) {
   Layer *root  = window_get_root_layer(s_window);
-  GRect ub     = layer_get_unobstructed_bounds(root);
+  GRect ub     = prv_view_bounds(root);
+  GRect ubq    = layer_get_unobstructed_bounds(root);
+  int obs_bot  = ubq.origin.y + ubq.size.h;   // round full mode only: where the Timeline peek starts
+  (void)obs_bot;
   int ub_top   = ub.origin.y, ub_h = ub.size.h, ub_bot = ub_top + ub_h;
   GRect bounds = layer_get_bounds(layer);
 
@@ -1751,9 +1784,12 @@ static void draw_layer(Layer *layer, GContext *ctx) {
 #if defined(PBL_ROUND)
     // On round, center digits at the true midpoint of the unobstructed area.
     // The outer/inner heights differ per column, so MARGIN_OUTER + h/2 would be off-center.
+    // v3.70: tops stay pinned to the full-screen layout; a Timeline peek only lifts the digit bottoms
+    // (obs_bot minus HALF_UNIT). Wide / stacked ignore the peek (prv_view_bounds is the full screen).
     int cy = ub_top + ub_h / 2;
-    draw_digits_full_round(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy, SHADOW_DX, SHADOW_DY, ub_top, ub_bot, s_shadow_col, s_shadow_col, s_shadow_col);
-    draw_digits_full_round(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy, 0, 0, ub_top, ub_bot, s_fg_hr, s_fg_mn, s_fg_colon);
+    int lim = obs_bot - HALF_UNIT;
+    draw_digits_full_round(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy, SHADOW_DX, SHADOW_DY, ub_top, ub_bot, lim, s_shadow_col, s_shadow_col, s_shadow_col);
+    draw_digits_full_round(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy, 0, 0, ub_top, ub_bot, lim, s_fg_hr, s_fg_mn, s_fg_colon);
 #else
     int cy = ub_top + MARGIN_OUTER + s_target_h / 2;
     draw_digits_full(ctx, h_tens, h_ones, m_tens, m_ones, s_h, cy, SHADOW_DX, SHADOW_DY, ub_top, ub_bot, s_shadow_col, s_shadow_col, s_shadow_col);
@@ -1792,8 +1828,8 @@ static void draw_layer(Layer *layer, GContext *ctx) {
       int half = prv_round_chord_half(y, y + INFO_GLYPH_H) - UNIT;
       if (half > 10) draw_info_line(ctx, &s_below_lines[i], y + slide, SCREEN_W/2 - half, half*2, GTextAlignmentCenter);
     }
-    draw_digits_full_round(ctx, h_tens, h_ones, m_tens, m_ones, draw_h, time_cy, SHADOW_DX, SHADOW_DY, ub_top, ub_bot, s_shadow_col, s_shadow_col, s_shadow_col);
-    draw_digits_full_round(ctx, h_tens, h_ones, m_tens, m_ones, draw_h, time_cy, 0, 0, ub_top, ub_bot, s_fg_hr, s_fg_mn, s_fg_colon);
+    draw_digits_full_round(ctx, h_tens, h_ones, m_tens, m_ones, draw_h, time_cy, SHADOW_DX, SHADOW_DY, ub_top, ub_bot, ub_bot, s_shadow_col, s_shadow_col, s_shadow_col);
+    draw_digits_full_round(ctx, h_tens, h_ones, m_tens, m_ones, draw_h, time_cy, 0, 0, ub_top, ub_bot, ub_bot, s_fg_hr, s_fg_mn, s_fg_colon);
 #else
     int an = build_lines(s_above_lines, 3, above_s, 3, tm_now, true);
     int bn = build_lines(s_below_lines, 3, below_s, 3, tm_now, true);
@@ -1935,7 +1971,7 @@ static void prv_start_fast_blink(void) {
 static void prv_start_split_v(int target_layout) {
   if (s_h > s_target_h) s_h = s_target_h;
   Layer *root = window_get_root_layer(s_window);
-  GRect ub = layer_get_unobstructed_bounds(root);
+  GRect ub = prv_view_bounds(root);
   int ub_top = ub.origin.y, ub_h = ub.size.h, ub_bot = ub_top + ub_h;
   int bot_margin = BOTTOM_MARGIN(ub_h);
 #if defined(PBL_ROUND)
@@ -1958,7 +1994,7 @@ static void prv_start_split_v(int target_layout) {
 }
 static void prv_start_split_h(void) {
   Layer *root = window_get_root_layer(s_window);
-  GRect ub = layer_get_unobstructed_bounds(root);
+  GRect ub = prv_view_bounds(root);
   int ub_h = ub.size.h, ub_top = ub.origin.y, ub_bot = ub_top + ub_h;
   int bot_margin = BOTTOM_MARGIN(ub_h);
   int tl = s_split_target_layout;
@@ -1976,7 +2012,7 @@ static void prv_start_split_h(void) {
 }
 static void prv_start_merge_h(void) {
   Layer *root = window_get_root_layer(s_window);
-  GRect ub = layer_get_unobstructed_bounds(root);
+  GRect ub = prv_view_bounds(root);
   int ub_h = ub.size.h, ub_top = ub.origin.y, ub_bot = ub_top + ub_h;
   int bot_margin = BOTTOM_MARGIN(ub_h);
   int tl = s_layout;
@@ -1995,7 +2031,7 @@ static void prv_start_merge_h(void) {
 }
 static void prv_start_merge_v(void) {
   Layer *root = window_get_root_layer(s_window);
-  GRect ub = layer_get_unobstructed_bounds(root);
+  GRect ub = prv_view_bounds(root);
   int ub_h = ub.size.h, ub_top = ub.origin.y, ub_bot = ub_top + ub_h;
   int bot_margin = BOTTOM_MARGIN(ub_h);
 #if defined(PBL_ROUND)
@@ -2041,7 +2077,6 @@ static void prv_return_to_full(void) {
   }
   layer_mark_dirty(s_canvas_layer);
 }
-
 static void timer_cb(void *data) {
   s_timer = NULL;
   if (s_info_slide_dir != 0) { prv_info_slide_step_fn(); layer_mark_dirty(s_canvas_layer); }
@@ -2126,7 +2161,7 @@ static void unobstructed_change(AnimationProgress progress, void *ctx) {
   if (s_phase == PHASE_DONE) {
     if (s_layout == LAYOUT_STACK_L || s_layout == LAYOUT_STACK_R) {
       // For stacked, s_target_h is full-screen height; reset s_h to per-pair dh instead
-      GRect ub2 = layer_get_unobstructed_bounds(window_get_root_layer(s_window));
+      GRect ub2 = prv_view_bounds(window_get_root_layer(s_window));
       s_h = prv_compute_stacked_h(ub2.size.h);
       s_target_h = s_h;
     } else {
@@ -2175,7 +2210,7 @@ static void tick_handler(struct tm *t, TimeUnits units) {
       // animates dh -> H_ABSOLUTE_MIN -> dh (not full-screen height -> H_ABSOLUTE_MIN).
       // H_ABSOLUTE_MIN gives enough travel for a visible animation on small stacked digits.
       Layer *_root = window_get_root_layer(s_window);
-      GRect _ub = layer_get_unobstructed_bounds(_root);
+      GRect _ub = prv_view_bounds(_root);
       int _dh = prv_compute_stacked_h(_ub.size.h);
       s_stk_h_start = _dh;
       s_h = _dh;
@@ -2263,7 +2298,7 @@ static void window_load(Window *window) {
   s_canvas_layer = layer_create(layer_get_bounds(root));
   layer_set_update_proc(s_canvas_layer, draw_layer);
   layer_add_child(root, s_canvas_layer);
-  GRect ub = layer_get_unobstructed_bounds(root);
+  GRect ub = prv_view_bounds(root);
   s_target_h = prv_compute_target_h(ub.size.h, s_layout); s_h = s_target_h;
   { UnobstructedAreaHandlers ua = { .change = unobstructed_change };
     unobstructed_area_service_subscribe(ua, NULL); }
