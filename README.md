@@ -5,7 +5,7 @@ A Pebble watchface built around oversized vector-drawn digits that dynamically s
 **Design:** Sterling Ely  
 **Implementation:** Sterling Ely + Claude  
 **Primary device:** Pebble Time 2 (emery, 200×228, color)  
-**Status:** Active development — internal v3.69, not yet formally released
+**Status:** Active development — internal v3.70, not yet formally released
 
 ---
 
@@ -15,7 +15,7 @@ A Pebble watchface built around oversized vector-drawn digits that dynamically s
 
 ## Current status
 
-Internal version **v3.69** targets all 7 Pebble platforms. Animated digits, three display layouts, health and weather data, and pace-based background color are all working. Round platform support was added in v3.60–v3.61 with per-column digit heights that follow the circular bezel; in v3.64 the Pebble Round 2 (gabbro, 260×260) got its own geometry instead of sharing the original Time Round's (chalk, 180×180), and v3.65 / v3.66 tightened the digit-to-colon spacing on gabbro and chalk to match the Time 2 design. **v3.67 raised the round digit heights (measured against the bezel) and brought the wide and stacked left/right layouts to both round watches.** **v3.68 widened the gabbro digit and colon spacing to 2 units** (shorter digits as the trade-off; chalk is unchanged). **v3.69 makes the gabbro stacked layouts follow that same spacing and placement** (the stacked pair sits on the full-view hour or minute slots; stacked rows get shorter as the trade-off). The v3.65–v3.69 changes still need device verification. A config page (PebbleKit JS) covers layouts, units, info slots and colors; v3.62 added three pace palettes (dark / medium / light) and a colon color, and v3.63 added air quality (AQI) from Open-Meteo, now confirmed working on device.
+Internal version **v3.70** targets all 7 Pebble platforms. Animated digits, three display layouts, health and weather data, and pace-based background color are all working. Round platform support was added in v3.60–v3.61 with per-column digit heights that follow the circular bezel; in v3.64 the Pebble Round 2 (gabbro, 260×260) got its own geometry instead of sharing the original Time Round's (chalk, 180×180), and v3.65 / v3.66 tightened the digit-to-colon spacing on gabbro and chalk to match the Time 2 design. **v3.67 raised the round digit heights (measured against the bezel) and brought the wide and stacked left/right layouts to both round watches.** v3.68 widened the gabbro digit and colon spacing to 2 units and v3.69 made the gabbro stacked layouts follow it. **v3.70 relaxes the gabbro spacing from 2 units to 1.5 units** (the 2U spread looked good in full view but crunched the stacked digits; the digits get taller again, with outer columns 158 px and inner columns 224 px), **and changes how round watches handle Quick View: full-time mode pins the digit tops and shortens only the bottoms to fit above the panel, while wide and stacked info modes ignore Quick View entirely so nothing moves** (chalk uses the same code path; its spacing is unchanged). The v3.65–v3.70 changes still need device verification. A config page (PebbleKit JS) covers layouts, units, info slots and colors; v3.62 added three pace palettes (dark / medium / light) and a colon color, and v3.63 added air quality (AQI) from Open-Meteo, now confirmed working on device.
 
 See [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md) for the full status, known bugs, and next work.
 
@@ -45,6 +45,7 @@ All three layouts work on every platform. On the round watches (chalk, gabbro) t
 
 - **Wide:** short-format lines only, inset to fit the bezel (Pebble Round 2: 2 lines above and 2 below; Pebble Time Round: 1 and 1). Slots that only have a long form (for example the combined Temp + UV + AQI line) don't appear on round.
 - **Stacked:** the top digits' tops and the bottom digits' bottoms stretch to the same bounds as the full view, and the other ends meet at the middle; the info column is clamped to the bezel.
+- **Quick View (round):** in full-time mode the digit tops stay put and only the bottoms are shortened to clear the panel; in wide and stacked modes Quick View is ignored and the layout does not move. (Rect watches fit the whole face to the unobstructed area as before.)
 
 Chalk and gabbro have separate geometry because their screens differ (180×180 vs 260×260).
 
