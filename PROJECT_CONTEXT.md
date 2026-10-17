@@ -18,10 +18,10 @@ The watchface supports all seven Pebble hardware platforms, three display layout
 
 ## Current Status
 
-**Internal version: v3.69** — active development, not yet formally released. (Internal numbers are development checkpoints, not public releases.)
+**Internal version: v3.70** — active development, not yet formally released. (Internal numbers are development checkpoints, not public releases.)
 
 ### What is working
-- Builds clean on all 7 target platforms as of v3.63; v3.64 ran on a real gabbro (Sterling, 2026-10-14: "looks pretty good" apart from the colon spacing fixed in v3.65); v3.65 through v3.69 are not yet compiled against the real SDK or device-tested (v3.67 and v3.68 were syntax-checked against a stub header, and the v3.68 geometry was checked with the glyph simulator in `tb/`)
+- Builds clean on all 7 target platforms as of v3.63; v3.64 ran on a real gabbro (Sterling, 2026-10-14: "looks pretty good" apart from the colon spacing fixed in v3.65); v3.65 through v3.70 are not yet compiled against the real SDK or device-tested (v3.67 and v3.68 were syntax-checked against a stub header, and the v3.68 and v3.70 geometry was checked with the glyph simulator in `tb/`)
 - Full-mode animated digits: anticipate → squish → expand on every minute tick
 - Wide info mode: up to 3 info slots above + 3 below; digits fill remaining space; empty slots collapse instantly (round: short-format lines only, 2 per side on gabbro, 1 per side on chalk — see v3.67)
 - Stacked info mode (STACK_L / STACK_R): stacked hour/minute digits on one side, up to 8 info lines in a column on the other (round: up to 6 on gabbro, 5 on chalk); minute-change fast-blink animation
@@ -34,24 +34,43 @@ The watchface supports all seven Pebble hardware platforms, three display layout
 - Round platform support: per-column digit heights follow circular bezel geometry; center point aligned at unobstructed midpoint. **chalk (180×180) and gabbro (260×260) have separate geometry blocks (v3.64).** Wide and stacked L/R layouts work on round since v3.67.
 - Background: black base → colored rounded-rect (radius UNIT×2 = 16px on emery); plain fill on round (OS clips to circle automatically)
 
-### v3.69 changes (2026-10-16) — NOT YET COMPILED AGAINST THE REAL SDK OR DEVICE-TESTED
+### v3.70 changes (2026-10-16) — NOT YET COMPILED AGAINST THE REAL SDK OR DEVICE-TESTED
+
+Sterling (2026-10-16 21:23 ET): "reduce the gabbro digit spacing from 2 units to 1.5 units. the spread looked good, but it crunched the digits too much when stacked" and "pin the top and just shift up the bottoms of the digits when in full time mode, but just have nothing move for quick look in both wide and stacked info modes". Pushed as commit 1aeecd8, `main.c` blob 835a0f5ee53b50284b1f2ade0b6c50c01a0a6e48 (114,694 bytes, hash-verified).
+
+**1. Gabbro spacing 2U → 1.5U.** `SLOT_W` 44 (glyph 32 + 12 gap). Slots `H_TENS 34 | H_ONES 78 | colon 108 | M_TENS 142 | M_ONES 186`; glyph span 38..222; colon dot still centered at x=130. Every gap is 12px (1.5 UNIT): glyph | 12 | glyph | 12 | dot 126..134 | 12 | glyph | 12 | glyph. Outer glyph edge dx=92 from center, inner dx=48.
+
+**2. Heights recovered.** `ROUND_OUTER_H` 136 → **158**, `ROUND_INNER_H` 216 → **224** (`UNIT * 28`). Stacked bounds still equal the full-view ones; `ROUND_STACK_INFO_H` stays 176. Stacked rows (via `prv_round_row_h(bound) = (bound/2 - HALF_UNIT) & ~1`): outer **74**, inner **108** (were 64 / 104 at 2U).
+
+**3. Stacked info column.** Stacked layouts keep the v3.69 scheme: STACK_L on `SLOT_H_TENS` / `SLOT_H_ONES`, STACK_R on `SLOT_M_TENS` / `SLOT_M_ONES`; the info column's x is `ones_x + 48` (1.5U gap to the glyph edge).
+
+**4. Quick Look on round (new behavior).** `prv_view_bounds(root)` returns the full layer bounds on round (the unobstructed bounds on rect), so wide, stacked and the split/merge transitions ignore the peek and nothing moves. Full-time mode alone reads the real unobstructed bottom (`obs_bot`) and calls `prv_round_fit(h_col, cy, obs_bot, &h, &cy)`, which keeps each column's top where it was (centre stays at the full-screen midpoint) and only shortens the bottom when it would drop below `obs_bot - HALF_UNIT`; heights are forced even and floored at `H_MIN`. Rect behavior is unchanged (rect full mode already pinned the top). Chalk uses the same code path; its spacing is unchanged.
+
+**Known trade-offs / caveats (v3.70):**
+- Wide "1+1 lines" clearance on gabbro is 0.95U, slightly under the 1U rule of thumb.
+- Starting a split/merge while a peek is active in full mode causes a small jump in the bottoms (transitions use the full-screen layout).
+- Stacked rows are taller than at 2U but shorter than the v3.67 84-px outer rows.
+- Not verified: real SDK build, on-device rendering, quick-look behavior on hardware.
+
+**Verified (geometry only):** `tb/verify370.py` — corner clearance for digits 0–9 at gabbro heights 158 / 224 and the stacked rows; `tb/tbsim.py` for the quick-look fit.
+
+### v3.69 changes (2026-10-16) — superseded in part by v3.70 (spacing and heights); stacked scheme still in force
 
 Sterling (2026-10-16): "the spacing looks good: could we get the stacked modes to keep the same spacing and relative placement?" Gabbro only; chalk's stacked slots already coincide with its full-view slots, so chalk is unchanged.
 
-- **Stacked pair on the full-view slots.** `STACK_SLOT_W = SLOT_W` (48, 2U gaps) on gabbro. `prv_stacked_geom` puts STACK_L on `SLOT_H_TENS` / `SLOT_H_ONES` (26 / 74) and STACK_R on `SLOT_M_TENS` / `SLOT_M_ONES` (146 / 194), so each digit keeps its full-view x. `SIDE_MARGIN` is unused on gabbro.
-- **Full-view bounds.** `ROUND_STACK_OUTER_H` / `ROUND_STACK_INNER_H` = `ROUND_OUTER_H` / `ROUND_INNER_H` (136 / 216). `prv_round_stack_bound` treats `SLOT_H_TENS` and `SLOT_M_ONES` as the outer columns.
-- **Info column.** Keeps its own height, new `ROUND_STACK_INFO_H` (UNIT*22 = 176, the v3.67 extent; chalk: = `ROUND_OUTER_H`). `col_x = ones_x + UNIT*5 + UNIT` keeps the 1.5U gap to the glyphs, so for STACK_L it starts at 122 instead of 130 (8px further left, 8px narrower text budget).
-- **Trade-off.** Row heights on gabbro drop: outer column 84 → 64, inner 108 → 104. Rows follow `prv_round_row_h(bound)`. The digits keep their full-view x positions, so the horizontal split/merge phase only re-fits height.
-- **Not verified:** real SDK build, on-device rendering, the info-line chord clamps with the shifted column.
+- **Stacked pair on the full-view slots.** `STACK_SLOT_W = SLOT_W` on gabbro. `prv_stacked_geom` puts STACK_L on `SLOT_H_TENS` / `SLOT_H_ONES` and STACK_R on `SLOT_M_TENS` / `SLOT_M_ONES`, so each digit keeps its full-view x. `SIDE_MARGIN` is unused on gabbro.
+- **Full-view bounds.** `ROUND_STACK_OUTER_H` / `ROUND_STACK_INNER_H` = `ROUND_OUTER_H` / `ROUND_INNER_H`. `prv_round_stack_bound` treats `SLOT_H_TENS` and `SLOT_M_ONES` as the outer columns.
+- **Info column.** Keeps its own height, `ROUND_STACK_INFO_H` (UNIT*22 = 176, the v3.67 extent; chalk: = `ROUND_OUTER_H`). The column x keeps a 1.5U gap to the glyphs.
+- **Trade-off at the time (2U).** Row heights dropped to outer 64 / inner 104; v3.70's 1.5U spacing recovers them to 74 / 108.
 
-### v3.68 changes (2026-10-14) — NOT YET COMPILED AGAINST THE REAL SDK OR DEVICE-TESTED
+### v3.68 changes (2026-10-14) — superseded for gabbro by v3.70 (2U → 1.5U), kept for the measurements
 Requested by Sterling: widen the digit and colon spacing on gabbro to 2 UNIT to use the screen width better, and consider the same for chalk ("same units with a bit more spacing may be the better call" versus raising the unit px).
 
-**1. Gabbro spacing 1U → 2U.** Every gap in the time row is now 16px: glyph | 16 | glyph | 16 | dot (8) | 16 | glyph | 16 | glyph. `SLOT_W` 48 (6 UNIT = 4 UNIT glyph + 2 UNIT gap); slots `H_TENS 26 | H_ONES 74 | colon 106 | M_TENS 146 | M_ONES 194`; glyph span 30..230; colon dot still centered at x=130. Digit slot → colon slot pitch is 40px (5 UNIT), no longer the 3.5 UNIT emery rule — gabbro now deliberately deviates from emery's spacing. `SIDE_MARGIN` stays 42 (stacked layouts only).
+**1. Gabbro spacing 1U → 2U.** Every gap in the time row was 16px (`SLOT_W` 48; slots 26 / 74 / 106 / 146 / 194). **Relaxed to 1.5U in v3.70 after the stacked digits looked crunched.**
 
-**2. The cost: round height.** Wider spacing pushes the outer glyphs toward the bezel (far glyph edge from center: outer columns dx 84 → 100, inner columns dx 44 → 52), so the full-view and wide heights drop to keep ≥1U corner clearance, measured with `tb/gapscan.py` against the real glyph shapes: gabbro `ROUND_OUTER_H` 176 → **136** (17 UNIT) and `ROUND_INNER_H` 224 → **216** (27 UNIT). The scan's maximum was 138 / 220 at 2U spacing, so the chosen values sit at or just under the limit. Net effect on gabbro: wider, shorter digits in full and wide views.
+**2. The cost: round height.** Wider spacing pushes the outer glyphs toward the bezel, so the full-view and wide heights drop to keep ≥1U corner clearance, measured with `tb/gapscan.py` against the real glyph shapes: gabbro at 2U was `ROUND_OUTER_H` 136 / `ROUND_INNER_H` 216 (from 176 / 224 at 1U). At 1.5U they are 158 / 224.
 
-**3. Stacked L/R keeps its v3.67 geometry. (Superseded for gabbro by v3.69: stacked pair now on the full-view slots and bounds.)** Stacked columns sit at `SIDE_MARGIN` on a 1U pitch (`STACK_SLOT_W = UNIT*5`) so the info column keeps its width. They use their own bounds, `ROUND_STACK_OUTER_H` 176 / `ROUND_STACK_INNER_H` 224 (gabbro), chosen by `prv_round_stack_bound(slot_x)`; chalk sets these equal to its full-view values. `prv_stacked_geom`, `draw_pair` and the stacked info lines use the stack constants. Stacked row heights are unchanged (gabbro outer 84 / inner 108).
+**3. Stacked constants.** `ROUND_STACK_OUTER_H` / `ROUND_STACK_INNER_H` / `STACK_SLOT_W` introduced here (gabbro 176 / 224 on a 1U pitch at the time); `prv_round_stack_bound(slot_x)` chooses the bound. v3.69 pointed them at the full-view values.
 
 **4. Chalk unchanged — decision pending (Sterling).** Measured trade-off for widening chalk (UNIT 6, current gaps 1U):
 
@@ -65,8 +84,6 @@ Requested by Sterling: widen the digit and colon spacing on gabbro to 2 UNIT to 
 
 **5. Reference facts gathered during this pass** (apply to TallBoy's Gothic info lines): the next Gothic Bold above 24 is `GOTHIC_28_BOLD`, then 36 (it would need ≈20px icons); the system bold Lecos are 20, 26_AM_PM, 32, 36, 38 and 60_BOLD_NUMBERS_AM_PM. TallBoy's icon set and icon-to-text spacing are the reference that Radium v2.4 was aligned to on 2026-10-14.
 
-**Verified (geometry only):** `tb/verify368.py` — clearance ≥1U at glyph corners for all digits 0–9 at gabbro full-view heights 136 / 216, and for the stacked bounds 176 / 224 on the 1U pitch. **Not verified:** the real SDK build and any on-device rendering.
-
 ### v3.67 changes (2026-10-14) — NOT YET COMPILED AGAINST THE REAL SDK OR DEVICE-TESTED
 Requested by Sterling: "what I would like to see is the wide & left/right stacked views on round", plus taller round digits.
 
@@ -79,19 +96,19 @@ Requested by Sterling: "what I would like to see is the wide & left/right stacke
 | **chalk, new (108/150)** | 108 (114 would give a 0.83U corner, so outer stays) | **150: 1.37U / 2.0U** |
 | **gabbro, new (176/224)** | **176: 1.05U / 2.35U** | **224: 1.23U / 1.82U** |
 
-Chalk: `ROUND_OUTER_H 108`, `ROUND_INNER_H 150` (UNIT×25). Gabbro (v3.67 values; **full-view heights superseded by v3.68's 136 / 216**, and 176 / 224 now live on as `ROUND_STACK_*_H`): `ROUND_OUTER_H 176` (UNIT×22), `ROUND_INNER_H 224` (UNIT×28). Sterling chose the "slightly taller" gabbro option (inner 224, not 216). Rule of thumb used: ≥1U clearance at the glyph corners.
+Chalk: `ROUND_OUTER_H 108`, `ROUND_INNER_H 150` (UNIT×25). Gabbro (v3.67 values at 1U spacing; later superseded: v3.68 136 / 216 at 2U, v3.70 158 / 224 at 1.5U): `ROUND_OUTER_H 176` (UNIT×22), `ROUND_INNER_H 224` (UNIT×28). Sterling chose the "slightly taller" gabbro option (inner 224, not 216). Rule of thumb used: ≥1U clearance at the glyph corners.
 
 **2. Wide on round.** Short-format lines only (`build_lines(..., wide=false)`), like Radium. Capped at `ROUND_WIDE_LINES` per side (**gabbro 2, chalk 1** — Sterling: "def 2 lines max, maybe even 1 for chalk"). Lines are inset `ROUND_INFO_INSET` (chalk 11, gabbro 13) from the unobstructed top/bottom and each is centred and clamped to the bezel chord (`prv_round_chord_half(y, y+INFO_GLYPH_H) - UNIT`). Digit height comes from `prv_round_wide_h(ub_h, an, bn)` (capped at `ROUND_INNER_H`, floor `H_MIN`); columns still cap themselves (`draw_digits_full_round`). Slots that return false when `!wide` simply disappear on round (EXP_PACE, BAT_BT, UV_LIGHT, WEATHER_UV, TEMP_UV_AQI, STEPS_EXP).
 
-**3. Stacked L/R on round.** Per-column rows, drawn by `prv_round_stacked_draw`. Sterling's spec: "tops of top digits and bottoms of bottom digits stretch to unstacked bounds while the other ends meet in the middle as usual." So each column's top row top / bottom row bottom sits at that column's full-view bound; the inner ends sit `HALF_UNIT` either side of the vertical centre (UNIT gap). Row height = `(bound/2 - HALF_UNIT) & ~1` (forced even because `draw_digit_vec` uses `h/2` on both sides, so a column whose bound leaves an odd row height starts 1px inside its bound). Results: gabbro outer 84 / inner 108; chalk outer 50 / inner 72. The info column uses `ROUND_STACK_LINES` (chalk 5, gabbro 6) spread over the outer-column extent, each line clamped to the chord with a 1U margin; it draws at `lx + (col_x - col_x_final)` so it still slides in during the split. STACK_R blink keeps the fold (drift applied per row).
+**3. Stacked L/R on round.** Per-column rows, drawn by `prv_round_stacked_draw`. Sterling's spec: "tops of top digits and bottoms of bottom digits stretch to unstacked bounds while the other ends meet in the middle as usual." So each column's top row top / bottom row bottom sits at that column's full-view bound; the inner ends sit `HALF_UNIT` either side of the vertical centre (UNIT gap). Row height = `(bound/2 - HALF_UNIT) & ~1` (forced even because `draw_digit_vec` uses `h/2` on both sides, so a column whose bound leaves an odd row height starts 1px inside its bound). The info column uses `ROUND_STACK_LINES` (chalk 5, gabbro 6) spread over the outer-column extent, each line clamped to the chord with a 1U margin; it draws at `lx + (col_x - col_x_final)` so it still slides in during the split. STACK_R blink keeps the fold (drift applied per row). Chalk stacked rows: outer 50 / inner 72.
 
 **4. Transitions.** `prv_round_split_draw` lerps each digit individually (`prv_lerp_v` / `prv_lerp_h`). V phase: full-view x kept, height and centre move to the digit's own stacked row for its full-view column. H phase: x slides to the stacked column and height re-fits to that column. Merge reverses both. Continuous at the phase edges.
 
 **5. Gating removed.** The `PBL_ROUND` early return in `accel_tap_handler` and the `#if !defined(PBL_ROUND)` guard around the INFO_MODE_ALWAYS switch in `init` are gone.
 
-**6. New helpers** (inside `#if defined(PBL_ROUND)`): `prv_isqrt` (Newton; the Pebble SDK has no `sqrt`), `prv_round_chord_half`, `prv_round_bound`, `prv_round_row_h`, `prv_round_row_cy`, `prv_round_wide_h`, `prv_round_draw_digit4`, `prv_round_stacked_draw`, `prv_round_split_draw`. `prv_draw_stacked_info` gained a `col_x_final` parameter (non-round code path unchanged).
+**6. New helpers** (inside `#if defined(PBL_ROUND)`): `prv_isqrt` (Newton; the Pebble SDK has no `sqrt`), `prv_round_chord_half`, `prv_round_bound`, `prv_round_row_h`, `prv_round_row_cy`, `prv_round_wide_h`, `prv_round_draw_digit4`, `prv_round_stacked_draw`, `prv_round_split_draw`. v3.70 adds `prv_round_fit` and `prv_view_bounds`. `prv_draw_stacked_info` gained a `col_x_final` parameter (non-round code path unchanged).
 
-**Verified (geometry only, in a glyph-port simulation):** worst clearance over digits 0–9 incl. split/merge frames — chalk full 1.15U, wide 0.98U, stacked L 1.26U / R 1.31U; gabbro full 1.05U, wide 2.36U, stacked L 1.05U / R 1.07U. Chalk wide is 0.02U under the 1U rule of thumb. **Not verified:** the real SDK build, any on-device rendering, and how Gothic text sits against the chord clamps.
+**Verified (geometry only, in a glyph-port simulation):** worst clearance over digits 0–9 incl. split/merge frames — chalk full 1.15U, wide 0.98U, stacked L 1.26U / R 1.31U. Chalk wide is 0.02U under the 1U rule of thumb. **Not verified:** the real SDK build, any on-device rendering, and how Gothic text sits against the chord clamps.
 
 ### v3.66 changes (2026-10-14) — NOT YET COMPILED OR DEVICE-TESTED
 **Chalk colon spacing**, the same fix as gabbro's v3.65. Sterling asked for chalk to follow the same rule after the gabbro fix. Chalk's slots were a uniform 30px pitch (5 UNIT at UNIT 6), which put the colon dot 15px (2.5 UNIT) from each neighboring glyph instead of 6px (1 UNIT).
@@ -99,23 +116,23 @@ Fix: chalk slots moved to `H_TENS 24 | H_ONES 54 | colon 75 | M_TENS 96 | M_ONES
 
 ### v3.65 changes (2026-10-14) — NOT YET COMPILED OR DEVICE-TESTED
 **Gabbro colon spacing.** Sterling saw v3.64 on a gabbro and reported the digit-to-colon space looked about twice the usual design. Cause: v3.64 laid gabbro's five slots out at a uniform `SLOT_W` (40px) pitch, so the colon slot was a full slot wide on each side. Emery's design uses a 28px (3.5 UNIT) pitch from the inner digit slot to the colon slot, which puts the dot 8px (1 UNIT) from each neighboring glyph. v3.64 put it 20px away (2.5 UNIT), and the glyph-to-glyph gap across the colon was 6 UNIT instead of 3.
-Fix: gabbro slots moved to `H_TENS 42 | H_ONES 82 | colon 110 | M_TENS 138 | M_ONES 178`, `SIDE_MARGIN 42`. Colon center is still x=130. (Superseded by v3.68's 2U layout.)
+Fix: gabbro slots moved to `H_TENS 42 | H_ONES 82 | colon 110 | M_TENS 138 | M_ONES 178`, `SIDE_MARGIN 42`. Colon center is still x=130. (Superseded by v3.68's 2U layout, then v3.70's 1.5U layout.)
 
 ### v3.64 changes (2026-10-13)
-1. **Gabbro split from chalk.** Gabbro (Pebble Round 2) is a 260×260 round screen; it had been sharing chalk's 180×180 geometry block (and was mislabeled "Pebble 2 HR"). It now has its own block: `UNIT=8` (same glyph scale as emery), `SLOT_W=40`, slots centered on x=130 (positions superseded by v3.65, then v3.68 — see Architecture). Its round heights were scaled from chalk's proportions at the time; **v3.67 replaced them with measured values.**
+1. **Gabbro split from chalk.** Gabbro (Pebble Round 2) is a 260×260 round screen; it had been sharing chalk's 180×180 geometry block (and was mislabeled "Pebble 2 HR"). It now has its own block: `UNIT=8` (same glyph scale as emery), slots centered on x=130 (positions superseded by v3.65, v3.68, v3.70 — see Architecture). Its round heights were scaled from chalk's proportions at the time; **v3.67 replaced them with measured values.**
 2. **Heart rate fixed.** `prv_update_health()` used `health_service_metric_accessible()` for `HealthMetricHeartRateBPM`, which always reports HR unavailable. It now uses `health_service_metric_aggregate_averaged_accessible(metric, now, now, HealthAggregationAvg, HealthServiceTimeScopeOnce)` — the same fix that made HR work in Radium 2.
 
 ### Known active bugs
-None logged. (v3.65 through v3.69 changes above are unverified on device.)
+None logged. (v3.65 through v3.70 changes above are unverified on device.)
 
 ### Unresolved questions
 - STACK_L animation (symmetric squish) vs STACK_R animation (fold toward center) — preference pending device comparison
 - Round stacked: does the chord-clamped info column look right against the bezel on both round watches, and are 5 (chalk) / 6 (gabbro) lines the right cap?
 - Round wide: is 1 line per side enough on chalk, and does Gothic text sit well inside the chord clamps?
-- Chalk wide clearance is 0.98U (just under the 1U rule of thumb) — confirm on device
-- Chalk digit spacing: stay at 1U, or widen to 1.5U (outer digits ≈94px instead of 108)? 2U is not feasible (outer 72). Sterling to decide after seeing gabbro at 2U (earlier, 2026-10-14: "prolly best left alone for now"; he then asked for gabbro 2U and "chalk?")
-- Gabbro stacked (v3.69): are the shorter rows (outer 64 / inner 104) and the info column starting 8px further left acceptable, or should the stacked rows use taller bounds than full view?
-- Gabbro 2U: do the shorter full-view digits (136 / 216) look right, or would a larger UNIT or 1.5U spacing be a better trade?
+- Chalk wide clearance is 0.98U (just under the 1U rule of thumb); gabbro wide "1+1" is 0.95U at 1.5U spacing — confirm both on device
+- Chalk digit spacing: stay at 1U, or widen to 1.5U (outer digits ≈94px instead of 108) to match gabbro? 2U is not feasible (outer 72). Sterling to decide (earlier, 2026-10-14: "prolly best left alone for now")
+- Gabbro 1.5U (v3.70): do the 158 / 224 full-view digits and the 74 / 108 stacked rows look right on device?
+- Round Quick Look (v3.70): is "tops pinned, bottoms shortened" in full mode the right behavior on hardware, and is the small jump when a split/merge starts during a peek acceptable? Extend the same pinning to rect wide/stacked if wanted
 - Whether the HR slot should hide (rather than show "--") on platforms with no HR sensor (basalt, chalk, gabbro, flint, aplite) — currently shows "--"
 
 ---
@@ -138,7 +155,7 @@ None logged. (v3.65 through v3.69 changes above are unverified on device.)
 ```
 SterlingEly/TallBoy  (branch: main)
 ├── src/
-│   ├── main.c              ← entire watchface (~110KB); single-file architecture
+│   ├── main.c              ← entire watchface (~115KB); single-file architecture
 │   └── pkjs/
 │       └── index.js        ← PebbleKit JS: weather/UV/solar/AQI fetch + config page
 ├── appinfo.json            ← app metadata, message keys, target platforms
@@ -175,8 +192,8 @@ The repo contains only the files above (plus `resources/`). The old dead/scratch
 - **ALWAYS use `create_or_update_file` with the current file SHA** — NEVER use `push_files` (confirmed bug: sends empty content, silently zeroing the file)
 - Always commit **full file content** — never partial diffs or patches
 - **Always fetch the current SHA** immediately before any update — SHAs from prior sessions are stale after any intervening commit
-- `get_file_contents` on `main.c` (~110KB) overflows the tool-result size limit and is saved to a file instead; the SHA can be read from that file with grep
-- After pushing a large file, verify it: compute the git blob hash locally (`git hash-object file`, or `printf 'blob %s\0' <bytes> | cat - file | sha1sum`) and compare with the SHA the API returns — they match only if the upload is byte-identical (v3.67's 109,988-byte `main.c` matched exactly)
+- `get_file_contents` on `main.c` (~115KB) overflows the tool-result size limit and is saved to a file instead; the SHA can be read from that file with grep
+- After pushing a large file, verify it: compute the git blob hash locally (`git hash-object file`, or `printf 'blob %s\0' <bytes> | cat - file | sha1sum`) and compare with the SHA the API returns — they match only if the upload is byte-identical (v3.67's 109,988-byte and v3.70's 114,694-byte `main.c` matched exactly, though one dropped blank line has happened once; if hashes differ, fetch the remote and diff)
 - File "deletion" via MCP produces a stub file, not a true delete — actual deletion requires the GitHub web UI trash icon
 - Syntax-check without the SDK: compile with `gcc -fsyntax-only` against a stub `pebble.h` per platform define (gabbro, chalk, emery, basalt). Errors about `MESSAGE_KEY_*`, `UnobstructedAreaHandlers` and "invalid initializer" are artifacts of the stub, not real bugs
 
@@ -197,14 +214,14 @@ The repo contains only the files above (plus `resources/`). The old dead/scratch
 | gabbro | Pebble Round 2 (Core Devices, 2026) | **260×260 round** | **8** | 4 | Color, round, **no HR sensor** |
 
 - HR sensors: **emery and diorite (HR model) only** — use "on supported models" in store copy, never list platforms
-- Round platforms (chalk, gabbro): share the `PBL_ROUND` code paths but have **separate geometry blocks** (chalk 180×180 UNIT 6; gabbro 260×260 UNIT 8); all three layouts (full, wide, stacked L/R) are supported on round since v3.67; gabbro full-view uses 2 UNIT digit spacing since v3.68
+- Round platforms (chalk, gabbro): share the `PBL_ROUND` code paths but have **separate geometry blocks** (chalk 180×180 UNIT 6; gabbro 260×260 UNIT 8); all three layouts (full, wide, stacked L/R) are supported on round since v3.67; gabbro full-view uses 1.5 UNIT digit spacing since v3.70 (2 UNIT in v3.68–v3.69)
 - Touch input: **gabbro has a touchscreen (Sterling, 2026-10-14: "def has touch")**, as does emery. TallBoy does not use it: an earlier finding that touch was non-functional at firmware level on shipping hardware led to all `PBL_TOUCH` code being removed. That finding predates the confirmation for gabbro, so re-check it before assuming touch is unusable on either watch
 
 ### Digit geometry (stable)
 
 ```
 UNIT = 8 (emery, gabbro) / 6 (all others)
-SLOT_W       = UNIT * 5     — digit slot width (includes padding)
+SLOT_W       = UNIT * 5     — digit slot width (includes padding); gabbro: 44 since v3.70
 GLYPH_W      = UNIT * 4     — actual drawn glyph width
 HALF_SLOT_PAD = UNIT / 2    — padding each side of glyph
 
@@ -221,13 +238,13 @@ Derived from h:
   tail = (h > H_MIN) ? (h - H_MIN) / 4 : 0        — tail stub length (some digits)
 ```
 
-`draw_digit_vec` positions the top and bottom edges at `cy ∓ h/2`, so **heights should be even** (an odd height loses 1px of symmetry). A glyph is **4 UNIT wide**: a "0" is a 1-UNIT wall, a 2-UNIT opening, and a 1-UNIT wall (stroke `sw` = 1 UNIT, inner arc radius `ri` = 1 UNIT, outer `ro` = 2 UNIT). Neighboring glyphs are 1 UNIT apart (slot pitch 5 UNIT = 4 glyph + 1 gap) on every platform except gabbro full-view, which uses a 2 UNIT gap since v3.68. Sterling described digits as "3 units wide" on 2026-10-14 (wall, space, wall); that does not match the code, and nothing was changed for it — if he wants 3-UNIT digits it is a redesign of the arc caps, not a spacing tweak.
+`draw_digit_vec` positions the top and bottom edges at `cy ∓ h/2`, so **heights should be even** (an odd height loses 1px of symmetry). A glyph is **4 UNIT wide**: a "0" is a 1-UNIT wall, a 2-UNIT opening, and a 1-UNIT wall (stroke `sw` = 1 UNIT, inner arc radius `ri` = 1 UNIT, outer `ro` = 2 UNIT). Neighboring glyphs are 1 UNIT apart (slot pitch 5 UNIT = 4 glyph + 1 gap) on every platform except gabbro full-view, which uses a 1.5 UNIT gap (slot pitch 5.5 UNIT = 44px) since v3.70. Sterling described digits as "3 units wide" on 2026-10-14 (wall, space, wall); that does not match the code, and nothing was changed for it — if he wants 3-UNIT digits it is a redesign of the arc caps, not a spacing tweak.
 
 Digits 1, 2, and 7 use `gpath_create` for diagonal strokes — these allocate/free on every draw call. Null checks are in place; not a memory leak.
 
 ### Slot geometry rule (all platforms)
 
-A glyph is drawn at `slot_x + HALF_SLOT_PAD` and is `GLYPH_W` wide; the colon dot (radius `UNIT/2`, 1 UNIT wide) is centered at `COLON_SLOT_X + SLOT_W/2`. Digit-to-digit pitch is `SLOT_W` (5 UNIT). **The pitch from the inner digit slot to the colon slot is 3.5 UNIT** (not a full `SLOT_W`), which puts the dot 1 UNIT from each neighboring glyph and the glyph-to-glyph gap across the colon at 3 UNIT. Apply this to any new platform. **Exception: gabbro full-view since v3.68 uses 2 UNIT gaps everywhere** (slot pitch 6 UNIT, digit-to-colon pitch 5 UNIT — see below); chalk and emery still follow the 3.5 UNIT rule.
+A glyph is drawn at `slot_x + HALF_SLOT_PAD` (gabbro v3.70: `slot_x + 4`) and is `GLYPH_W` wide; the colon dot (radius `UNIT/2`, 1 UNIT wide) is centered at `COLON_SLOT_X + SLOT_W/2`. Digit-to-digit pitch is `SLOT_W` (5 UNIT). **The pitch from the inner digit slot to the colon slot is 3.5 UNIT** (not a full `SLOT_W`), which puts the dot 1 UNIT from each neighboring glyph and the glyph-to-glyph gap across the colon at 3 UNIT. Apply this to any new platform. **Exception: gabbro full-view uses 1.5 UNIT gaps everywhere since v3.70** (slot pitch 5.5 UNIT, digit-to-colon pitch 30px — see below); chalk and emery still follow the 3.5 UNIT rule.
 
 ### Slot positions — emery (UNIT=8, SLOT_W=40) — the reference
 
@@ -253,22 +270,23 @@ Superseded (pre-v3.66, uniform 30px pitch, dot 2.5 UNIT from glyphs): 15 / 45 / 
 Wider-spacing options (1.5U: outer ≈94 / inner 152; 2U: outer 72) are analysed in the v3.68 section; chalk stays at 1U pending Sterling's call
 ```
 
-### Slot positions — gabbro (UNIT=8, SLOT_W=48, centered on 260px) — v3.68, unverified on device
+### Slot positions — gabbro (UNIT=8, SLOT_W=44, centered on 260px) — v3.70, unverified on device
 
 ```
-SLOT_H_TENS=26, SLOT_H_ONES=74, COLON_SLOT_X=106, SLOT_M_TENS=146, SLOT_M_ONES=194
-SIDE_MARGIN=42 (no longer used on gabbro since v3.69; stacked layouts use the SLOT_* x positions and STACK_SLOT_W = SLOT_W)
-Colon center = 106 + 24 = 130 = exact screen center ✓; glyph span 30..230 is centered ✓
-Every gap is 2 UNIT (16px): glyph | 16 | glyph | 16 | dot 126..134 | 16 | glyph | 16 | glyph
-Glyphs: H_TENS 30..62, H_ONES 78..110, dot 126..134, M_TENS 150..182, M_ONES 198..230
-Outer glyph edge dx=100 from center; inner dx=52
-ROUND_OUTER_H = UNIT*17 = 136px  — H_TENS and M_ONES columns, full view and wide   (v3.68; was 176)
-ROUND_INNER_H = UNIT*27 = 216px  — H_ONES and M_TENS columns, full view and wide   (v3.68; was 224)
-ROUND_STACK_OUTER_H = ROUND_OUTER_H (136), ROUND_STACK_INNER_H = ROUND_INNER_H (216) since v3.69 (were 176 / 224); ROUND_STACK_INFO_H = UNIT*22 = 176 for the info column
+SLOT_H_TENS=34, SLOT_H_ONES=78, COLON_SLOT_X=108, SLOT_M_TENS=142, SLOT_M_ONES=186
+SIDE_MARGIN=42 (unused on gabbro since v3.69; stacked layouts use the SLOT_* x positions and STACK_SLOT_W = SLOT_W)
+Colon center = 108 + 22 = 130 = exact screen center ✓; glyph span 38..222 is centered ✓
+Every gap is 1.5 UNIT (12px): glyph | 12 | glyph | 12 | dot 126..134 | 12 | glyph | 12 | glyph
+Glyphs: H_TENS 38..70, H_ONES 82..114, dot 126..134, M_TENS 146..178, M_ONES 190..222
+Outer glyph edge dx=92 from center; inner dx=48
+ROUND_OUTER_H = 158px  — H_TENS and M_ONES columns, full view and wide   (v3.70; was 136 at 2U, 176 at 1U)
+ROUND_INNER_H = UNIT*28 = 224px  — H_ONES and M_TENS columns, full view and wide   (v3.70; was 216 at 2U)
+ROUND_STACK_OUTER_H = ROUND_OUTER_H (158), ROUND_STACK_INNER_H = ROUND_INNER_H (224); ROUND_STACK_INFO_H = UNIT*22 = 176 for the info column
 ROUND_INFO_INSET = 13, ROUND_WIDE_LINES = 2, ROUND_STACK_LINES = 6
-Stacked rows (v3.69, same bounds as full view): outer column 64px, inner column 104px (were 84 / 108)
+Stacked rows (same bounds as full view): outer column 74px, inner column 108px; info column x = ones_x + 48
 Heights are measured against the bezel (tb/gapscan.py, ≥1U corner clearance), not scaled.
-Superseded: v3.65–v3.67 slots 42 / 82 / colon 110 / 138 / 178 (1U gaps, SLOT_W 40, SIDE_MARGIN 42); v3.64 slots 30 / 70 / colon 110 / 150 / 190 (too airy)
+Quick Look (v3.70): full mode pins the tops and shortens the bottoms via prv_round_fit; wide, stacked and transitions use the full-screen bounds (prv_view_bounds)
+Superseded: v3.68–v3.69 slots 26 / 74 / colon 106 / 146 / 194 (2U gaps, SLOT_W 48, heights 136 / 216); v3.65–v3.67 slots 42 / 82 / colon 110 / 138 / 178 (1U gaps, SLOT_W 40, SIDE_MARGIN 42); v3.64 slots 30 / 70 / colon 110 / 150 / 190 (too airy)
 ```
 
 ### Slot positions — other rect (basalt/diorite/flint/aplite, UNIT=6, SLOT_W=30)
@@ -288,6 +306,8 @@ MARGIN_OUTER  = UNIT * 2    — convenience alias
 QUICK_LOOK_ACTIVE(ub_h) = (ub_h < SCREEN_H - UNIT)
 BOTTOM_MARGIN(ub_h)     = QUICK_LOOK_ACTIVE ? MARGIN_DIGIT : MARGIN_OUTER
 ```
+
+On round (v3.70) `prv_view_bounds` returns the full screen, so only full-time mode reacts to Quick Look, by shortening column bottoms (`prv_round_fit`). Rect still fits the whole face to the unobstructed area.
 
 ### Layout system
 
@@ -412,9 +432,10 @@ None logged.
 | `health_service_metric_accessible` for heart rate | Always reports HR unavailable. Use `aggregate_averaged_accessible` with a point-in-time range (see Architecture → Heart rate) |
 | Degree symbol (0xB0) breaks weather text | Use plain ASCII — `"72 F"` not `"72°F"` — degree symbol silently prevents rendering |
 | **Gabbro is 260×260, not 180×180** | gabbro = Pebble Round 2 (large round, no HR). It was once wrongly grouped with chalk (180×180) and labeled "Pebble 2 HR". Never share chalk's geometry block with gabbro; never group gabbro with rect platforms |
-| **Uniform slot pitch makes the colon gap too wide** | Spacing slots at a full `SLOT_W` on both sides of the colon puts the dot 2.5 UNIT from each glyph instead of 1 (gabbro v3.64, chalk until v3.66). Use 3.5 UNIT between the inner digit slots and the colon slot. Positions must be checked on device, not just derived from "centered and evenly spaced" |
+| **Uniform slot pitch makes the colon gap too wide** | Spacing slots at a full `SLOT_W` on both sides of the colon puts the dot 2.5 UNIT from each glyph instead of 1 (gabbro v3.64, chalk until v3.66). Use 3.5 UNIT between the inner digit slots and the colon slot (gabbro now deliberately uses 1.5U gaps). Positions must be checked on device, not just derived from "centered and evenly spaced" |
 | **Scaling round heights from another screen** | Chalk's proportions were scaled to gabbro in v3.64 and left it short. Round heights should be measured against the bezel with the real glyph geometry (worst lit pixel over digits 0–9), not eyeballed or scaled |
-| **Wider digit spacing costs round height** | On a round screen the outer columns move toward the bezel as spacing grows: gabbro 1U → 2U cut the full-view outer height 176 → 136; chalk 1.5U would cost ≈14px and 2U about 36px. Re-measure heights with `tb/gapscan.py` whenever slot positions change, and note the stacked layouts inherit the same bounds on gabbro since v3.69 (`ROUND_STACK_*_H` = full-view values), so one measurement covers both; `ROUND_STACK_INFO_H` stays separate |
+| **Wider digit spacing costs round height** | On a round screen the outer columns move toward the bezel as spacing grows: gabbro outer height 176 (1U) → 158 (1.5U) → 136 (2U); chalk 1.5U would cost ≈14px and 2U about 36px. Re-measure heights with `tb/gapscan.py` whenever slot positions change; the stacked layouts on gabbro inherit the same bounds (`ROUND_STACK_*_H` = full-view values), so one measurement covers both; `ROUND_STACK_INFO_H` stays separate |
+| **Round Quick Look must not move wide/stacked** | On round, `prv_view_bounds` deliberately returns the full screen; only full-time mode shortens column bottoms (`prv_round_fit`). Do not route wide, stacked or split/merge through the unobstructed bounds |
 | **Odd digit heights** | `draw_digit_vec` uses `h/2` on both sides; an odd `h` is 1px asymmetric. Stacked round row heights are forced even with `& ~1` |
 | **No `sqrt` in the Pebble SDK** | Use `prv_isqrt` (integer Newton) for chord math |
 | Round `cy` must be `ub_top + ub_h/2` | `MARGIN_OUTER + s_target_h/2` is off-center on round screens |
@@ -430,8 +451,9 @@ None logged.
 ## Current TODO
 
 ### Immediate
-- **Compile v3.69 (carries v3.65–v3.68) in CloudPebble and device-test it on chalk and gabbro**: full-view heights (chalk 108/150, gabbro 136/216 at 2U spacing; stacked rows on gabbro 64/104 since v3.69), wide (1 line per side on chalk, 2 on gabbro), stacked L and R, the minute blink in each layout, and the split/merge animations. Check for bezel clipping and for Gothic text against the chord clamps
-- The same build also carries v3.65 (gabbro) and v3.66 (chalk) colon spacing and v3.68's gabbro 2U spacing: check the gabbro gaps (16px each) and that the stacked layouts (v3.69) now match the full-view digit positions, with rows 64 / 104 px tall and the info column 8px further left
+- **Compile v3.70 (carries v3.65–v3.69) in CloudPebble and device-test it on chalk and gabbro**: full-view heights (chalk 108/150, gabbro 158/224 at 1.5U spacing; stacked rows on gabbro 74/108), wide (1 line per side on chalk, 2 on gabbro), stacked L and R, the minute blink in each layout, and the split/merge animations. Check for bezel clipping and for Gothic text against the chord clamps
+- Test Quick Look on round: full mode should keep the tops fixed and shorten only the bottoms; wide and stacked should not move at all
+- The same build also carries v3.65 (gabbro) and v3.66 (chalk) colon spacing: check the gabbro gaps (12px each) and that the stacked layouts sit on the full-view digit positions
 - Confirm heart rate shows a real BPM on emery (v3.64 fix)
 - Device-test the v3.62 changes still unconfirmed: pace palettes, colon color, sun icon, Temp+UV+AQI combo (AQI itself is confirmed working)
 - Decide the default pace palette (code default: medium)
@@ -444,7 +466,8 @@ None logged.
 - Attribution: CAMS/Open-Meteo acknowledgement in store/README copy before any public release
 
 ### Backlog
-- Wider digit spacing on chalk (1.5U) — see v3.68 trade-off table; gabbro done in v3.68
+- Wider digit spacing on chalk (1.5U) — see v3.68 trade-off table; gabbro is at 1.5U since v3.70
+- Possibly extend round-style Quick Look pinning to rect wide/stacked if wanted
 - Icon redesign pass — Sterling sketches at 4× in Photoshop; AI translates to C vector drawing calls
 - Step browser companion app — discussed, not started
 
@@ -458,9 +481,9 @@ Before committing any version:
 2. No geometry regressions — digit height, colon position, info line spacing
 3. Wide mode slot collapse works correctly when data is absent vs. present
 4. Stacked mode minute-change blink animation fires correctly
-5. For round: outer digits (H_TENS, M_ONES) are visibly shorter than inner (H_ONES, M_TENS); no bezel clipping — check on **both** chalk and gabbro, they have separate geometry; check full, wide and both stacked layouts plus the split/merge transitions
+5. For round: outer digits (H_TENS, M_ONES) are visibly shorter than inner (H_ONES, M_TENS); no bezel clipping — check on **both** chalk and gabbro, they have separate geometry; check full, wide and both stacked layouts plus the split/merge transitions; with Quick Look active, full mode shortens only the bottoms and wide/stacked stay put
 6. Heart rate shows a live BPM (not `--`) on emery
-7. Digit-to-colon gap on any new or changed platform matches emery's (dot 1 UNIT from each glyph) — except gabbro full-view, which is 2 UNIT (16px) on every gap since v3.68
+7. Digit-to-colon gap on any new or changed platform matches emery's (dot 1 UNIT from each glyph) — except gabbro full-view, which is 1.5 UNIT (12px) on every gap since v3.70
 8. SHA fetched fresh immediately before `create_or_update_file`; large pushes verified by blob hash
 
 ---
@@ -496,10 +519,8 @@ TallBoy shares platform constants, build rules, and CloudPebble conventions with
 
 ## Last Updated
 
-v3.69 — 2026-10-16
+v3.70 — 2026-10-16
 Updated by: AI collaborator (Claude, Anthropic) with direction from Sterling Ely
-Changes in this pass: v3.69 documented (gabbro stacked layouts follow the full-view spacing and slots; stacked rows 84/108 → 64/104; info column 8px further left). Earlier: v3.68 documented (gabbro 2U spacing, re-measured full-view heights 136/216, separate stacked constants, chalk 1.5U/2U trade-off table, font reference facts); gabbro slot section rewritten; trap, TODO, unresolved questions and verification plan refreshed. Follow-up: touch note corrected (gabbro has a touchscreen).
+Changes in this pass: v3.70 documented (gabbro spacing 2U → 1.5U with slots 34/78/108/142/186, heights 158/224, stacked rows 74/108; round Quick Look now pins the tops in full mode and ignores the peek in wide and stacked); gabbro slot section, traps, TODO, unresolved questions and verification plan refreshed; v3.68/v3.69 sections marked as superseded where they conflict.
 
-Previous pass (v3.67, 2026-10-14): v3.67 documented (measured round heights, wide and stacked L/R on round, per-digit split/merge, new helpers); round slot/height sections rewritten; traps added (scaled round heights, odd digit heights, no sqrt); build-rule notes added (large-file fetch, hash-verify, stub syntax check); TODO and unresolved questions refreshed.
-
-Previous: v3.66 2026-10-14 (chalk colon spacing); v3.65 2026-10-14 (gabbro colon spacing); v3.64 2026-10-13 (gabbro split from chalk, HR fix, AQI device-confirmed, platform table naming); v3.63 doc sync 2026-09-28; v3.61 — July 2026: added Related Projects section, reorganized Build Rules, updated status.
+Previous pass (v3.69, 2026-10-16): gabbro stacked layouts follow the full-view spacing and slots. Earlier: v3.68 (gabbro 2U spacing, re-measured heights, chalk 1.5U/2U trade-off table, font reference facts); v3.67 2026-10-14 (measured round heights, wide and stacked L/R on round, per-digit split/merge, new helpers); v3.66 2026-10-14 (chalk colon spacing); v3.65 2026-10-14 (gabbro colon spacing); v3.64 2026-10-13 (gabbro split from chalk, HR fix, AQI device-confirmed, platform table naming); v3.63 doc sync 2026-09-28; v3.61 — July 2026: added Related Projects section, reorganized Build Rules, updated status.
