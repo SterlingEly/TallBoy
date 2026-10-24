@@ -14,11 +14,13 @@ TallBoy is a Pebble watchface built around oversized vector-drawn digits that dy
 
 The watchface supports all seven Pebble hardware platforms, three display layouts (on every platform, round included since v3.67), health and weather data integration, and a pace-based background color system. It is under active development as of autumn 2026.
 
+**Provenance:** TallBoy is an original Sterling Ely design (unlike Radium 2 and Bar Graph 2, which are rebuilds of older faces). On round watches it delivers about 90% of what the shelved Monogram concept was meant to be, which is why Monogram was shelved on 2026-10-24 (see Related Projects).
+
 ---
 
 ## Current Status
 
-**Internal version: v3.70** — active development, not yet formally released. (Internal numbers are development checkpoints, not public releases.)
+**Internal version: v3.70** — active development, not yet formally released. (Internal numbers are development checkpoints, not public releases.) A DRAFT `STORE_LISTING.md` exists (added 2026-10-24); there is no store link.
 
 ### What is working
 - Builds clean on all 7 target platforms as of v3.63; v3.64 ran on a real gabbro (Sterling, 2026-10-14: "looks pretty good" apart from the colon spacing fixed in v3.65); v3.65 through v3.70 are not yet compiled against the real SDK or device-tested (v3.67 and v3.68 were syntax-checked against a stub header, and the v3.68 and v3.70 geometry was checked with the glyph simulator in `tb/`)
@@ -134,6 +136,7 @@ None logged. (v3.65 through v3.70 changes above are unverified on device.)
 - Gabbro 1.5U (v3.70): do the 158 / 224 full-view digits and the 74 / 108 stacked rows look right on device?
 - Round Quick Look (v3.70): is "tops pinned, bottoms shortened" in full mode the right behavior on hardware, and is the small jump when a split/merge starts during a peek acceptable? Extend the same pinning to rect wide/stacked if wanted
 - Whether the HR slot should hide (rather than show "--") on platforms with no HR sensor (basalt, chalk, gabbro, flint, aplite) — currently shows "--"
+- Pebble Plugins preview (announced 2026-10-23): will the existing Open-Meteo/location calls in `index.js` trigger the new per-face permission prompts, and does the built-in Weather plugin expose UV/AQI/sunrise? Not tested; see the Codex plugins note
 
 ---
 
@@ -161,6 +164,7 @@ SterlingEly/TallBoy  (branch: main)
 ├── appinfo.json            ← app metadata, message keys, target platforms
 ├── PROJECT_CONTEXT.md      ← this file
 ├── README.md               ← human-facing overview
+├── STORE_LISTING.md        ← DRAFT store listing (unreleased; added 2026-10-24)
 └── wscript                 ← Waf build script (do not edit)
 ```
 
@@ -190,6 +194,7 @@ The repo contains only the files above (plus `resources/`). The old dead/scratch
 
 ### AI collaborator rules (CRITICAL)
 - **ALWAYS use `create_or_update_file` with the current file SHA** — NEVER use `push_files` (confirmed bug: sends empty content, silently zeroing the file)
+- Always pass the **full 40-character SHA**; a shortened SHA is rejected with a "does not match" conflict
 - Always commit **full file content** — never partial diffs or patches
 - **Always fetch the current SHA** immediately before any update — SHAs from prior sessions are stale after any intervening commit
 - `get_file_contents` on `main.c` (~115KB) overflows the tool-result size limit and is saved to a file instead; the SHA can be read from that file with grep
@@ -463,13 +468,16 @@ None logged.
 - Lower-resolution platform tuning (basalt/aplite/diorite/flint) — layout math scales with UNIT; needs device testing
 - Config page — exists in `src/pkjs/index.js`; further polish as needed (consider noting that round wide shows short lines only)
 - Consider hiding the HR slot on platforms with no HR sensor instead of showing "--"
-- Attribution: CAMS/Open-Meteo acknowledgement in store/README copy before any public release
+- Attribution: CAMS/Open-Meteo acknowledgement in store/README copy before any public release (the draft `STORE_LISTING.md` already carries the line; keep it in sync)
+- Review and finish `STORE_LISTING.md` (draft added 2026-10-24: original-work framing; first-release note, screenshots and banner still to do)
+- Pebble Plugins preview (announced 2026-10-23): test on the beta app whether the existing location/Open-Meteo calls now trigger permission prompts; do not publish a plugin-using build while the API is in preview
 
 ### Backlog
 - Wider digit spacing on chalk (1.5U) — see v3.68 trade-off table; gabbro is at 1.5U since v3.70
 - Possibly extend round-style Quick Look pinning to rect wide/stacked if wanted
 - Icon redesign pass — Sterling sketches at 4× in Photoshop; AI translates to C vector drawing calls
 - Step browser companion app — discussed, not started
+- Revisit a Monogram-style fit-to-circle only if digit bounds can be pushed dynamically to fit the circle better; per the 2026-10-24 decision, branch Monogram off TallBoy rather than reworking TallBoy
 
 ---
 
@@ -493,6 +501,7 @@ Before committing any version:
 | Resource | URL |
 |---|---|
 | Pebble SDK docs (primary) | https://developer.repebble.com |
+| Pebble plugins guide (preview) | https://developer.repebble.com/guides/plugins/ |
 | TallBoy repo | https://github.com/SterlingEly/TallBoy |
 | Open-Meteo API | https://open-meteo.com/ |
 | Open-Meteo air-quality API (US AQI 0–500) | https://open-meteo.com/en/docs/air-quality-api |
@@ -510,7 +519,7 @@ Other Pebble watchface and tool repositories by Sterling Ely:
 |---|---|---|
 | Radium2 | https://github.com/SterlingEly/Radium2 | Sibling watchface; radial time display with weather, health, UV/AQI and pace features; the most mature released project in the portfolio. Radium 2's pace color and info-line set were ported from TallBoy; TallBoy's round wide mode (short lines only, few per side) follows Radium's approach |
 | BarGraph2 | https://github.com/SterlingEly/BarGraph2 | Sibling watchface; time as vertical bar graphs; rebuild of the original 2013 Pebble concept |
-| Monogram | https://github.com/SterlingEly/Monogram | Sibling watchface; custom monogram-style digit assets; early development, targets gabbro (Pebble Round 2) |
+| Monogram | https://github.com/SterlingEly/Monogram | **Shelved 2026-10-24.** Concept: custom monogram-style digits filling the circle. TallBoy on round delivers about 90% of it, so Monogram was shelved (repo kept). If a fit-to-circle technique is ever pursued, Monogram would be branched off TallBoy |
 | PixelSampler | https://github.com/SterlingEly/PixelSampler | Developer reference tool; samples fonts, colors, and hardware capabilities across Pebble platforms |
 
 TallBoy shares platform constants, build rules, and CloudPebble conventions with all of the above. Radium2 is the most complete reference for PebbleKit JS weather/solar fetch patterns and for the heart-rate API quirk.
@@ -519,8 +528,10 @@ TallBoy shares platform constants, build rules, and CloudPebble conventions with
 
 ## Last Updated
 
-v3.70 — 2026-10-16
+2026-10-24 — doc pass (no code change; `main.c` is still v3.70)
 Updated by: AI collaborator (Claude, Anthropic) with direction from Sterling Ely
-Changes in this pass: v3.70 documented (gabbro spacing 2U → 1.5U with slots 34/78/108/142/186, heights 158/224, stacked rows 74/108; round Quick Look now pins the tops in full mode and ignores the peek in wide and stacked); gabbro slot section, traps, TODO, unresolved questions and verification plan refreshed; v3.68/v3.69 sections marked as superseded where they conflict.
+Changes in this pass: Monogram recorded as shelved in favor of TallBoy (Purpose provenance note, Related Projects, backlog); DRAFT `STORE_LISTING.md` added and listed in the repo tree; plugins-preview note added to unresolved questions, near-term TODO and external links; AI rule added to pass the full 40-character SHA.
 
-Previous pass (v3.69, 2026-10-16): gabbro stacked layouts follow the full-view spacing and slots. Earlier: v3.68 (gabbro 2U spacing, re-measured heights, chalk 1.5U/2U trade-off table, font reference facts); v3.67 2026-10-14 (measured round heights, wide and stacked L/R on round, per-digit split/merge, new helpers); v3.66 2026-10-14 (chalk colon spacing); v3.65 2026-10-14 (gabbro colon spacing); v3.64 2026-10-13 (gabbro split from chalk, HR fix, AQI device-confirmed, platform table naming); v3.63 doc sync 2026-09-28; v3.61 — July 2026: added Related Projects section, reorganized Build Rules, updated status.
+Previous pass: v3.70 — 2026-10-16. v3.70 documented (gabbro spacing 2U → 1.5U with slots 34/78/108/142/186, heights 158/224, stacked rows 74/108; round Quick Look now pins the tops in full mode and ignores the peek in wide and stacked); gabbro slot section, traps, TODO, unresolved questions and verification plan refreshed; v3.68/v3.69 sections marked as superseded where they conflict.
+
+Earlier: v3.69 (2026-10-16) gabbro stacked layouts follow the full-view spacing and slots; v3.68 (gabbro 2U spacing, re-measured heights, chalk 1.5U/2U trade-off table, font reference facts); v3.67 2026-10-14 (measured round heights, wide and stacked L/R on round, per-digit split/merge, new helpers); v3.66 2026-10-14 (chalk colon spacing); v3.65 2026-10-14 (gabbro colon spacing); v3.64 2026-10-13 (gabbro split from chalk, HR fix, AQI device-confirmed, platform table naming); v3.63 doc sync 2026-09-28; v3.61 — July 2026: added Related Projects section, reorganized Build Rules, updated status.
