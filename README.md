@@ -17,6 +17,8 @@ A Pebble watchface built around oversized vector-drawn digits that dynamically s
 
 Internal version **v3.70** targets all 7 Pebble platforms. Animated digits, three display layouts, health and weather data, and pace-based background color are all working. Round platform support was added in v3.60–v3.61 with per-column digit heights that follow the circular bezel; in v3.64 the Pebble Round 2 (gabbro, 260×260) got its own geometry instead of sharing the original Time Round's (chalk, 180×180), and v3.65 / v3.66 tightened the digit-to-colon spacing on gabbro and chalk to match the Time 2 design. **v3.67 raised the round digit heights (measured against the bezel) and brought the wide and stacked left/right layouts to both round watches.** v3.68 widened the gabbro digit and colon spacing to 2 units and v3.69 made the gabbro stacked layouts follow it. **v3.70 relaxes the gabbro spacing from 2 units to 1.5 units** (the 2U spread looked good in full view but crunched the stacked digits; the digits get taller again, with outer columns 158 px and inner columns 224 px), **and changes how round watches handle Quick View: full-time mode pins the digit tops and shortens only the bottoms to fit above the panel, while wide and stacked info modes ignore Quick View entirely so nothing moves** (chalk uses the same code path; its spacing is unchanged). The v3.65–v3.70 changes still need device verification. A config page (PebbleKit JS) covers layouts, units, info slots and colors; v3.62 added three pace palettes (dark / medium / light) and a colon color, and v3.63 added air quality (AQI) from Open-Meteo, now confirmed working on device.
 
+TallBoy is not on any store yet. [`STORE_LISTING.md`](STORE_LISTING.md) holds its store listing (while unpublished the file is the listing; once published, edits become update drafts).
+
 See [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md) for the full status, known bugs, and next work.
 
 ---
@@ -106,5 +108,5 @@ Import `SterlingEly/TallBoy` (branch: `main`) into [CloudPebble](https://cloudpe
 |---|---|
 | [Radium2](https://github.com/SterlingEly/Radium2) | Radial time display watchface — the most mature released project in the portfolio |
 | [BarGraph2](https://github.com/SterlingEly/BarGraph2) | Time as vertical bar graphs — rebuild of the original 2013 concept |
-| [Monogram](https://github.com/SterlingEly/Monogram) | Custom monogram-style digit watchface — early development |
+| [Monogram](https://github.com/SterlingEly/Monogram) | Custom monogram-style digit watchface — **deferred** (2026-10-24); TallBoy on round covers about 90% of its intent, and any revival would branch off TallBoy |
 | [PixelSampler](https://github.com/SterlingEly/PixelSampler) | Developer reference tool for Pebble fonts, colors, and hardware |
