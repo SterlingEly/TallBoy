@@ -1,6 +1,6 @@
-# TallBoy — Store Listing (DRAFT, 2026-10-24)
+# TallBoy — Store Listing
 
-> **Status: unreleased draft.** Internal version v3.70. v3.65–v3.70 have not yet been compiled against the real SDK or tested on a device, and the app is not on any store. Feature claims below come from `README.md` and `PROJECT_CONTEXT.md`; re-check them against the build before submitting. Public version number, screenshots and banner are all still to do.
+> **Not yet published.** While TallBoy is unpublished, this file *is* the listing. Once it is published, edits to this file become update drafts for the next release. Open pre-release items are under "Notes" at the bottom.
 
 ## Name
 TallBoy
@@ -41,7 +41,7 @@ Pebble Classic/Steel · Pebble Time/Steel · Pebble Time Round · Pebble 2 · Pe
 Design: Sterling Ely
 2026: Implemented by Sterling Ely & Claude (Anthropic)
 
-Weather, UV and air quality data from Open-Meteo. Air quality data is CAMS ENSEMBLE (Copernicus Atmosphere Monitoring Service) via Open-Meteo. (Attribution required before release; see drafting notes.)
+Weather, UV and air quality data from Open-Meteo. Air quality data is CAMS ENSEMBLE (Copernicus Atmosphere Monitoring Service) via Open-Meteo.
 
 Feedback is appreciated: please hit me up at @sterlingely on Twitter/X with any bugs or feature requests!
 
@@ -54,14 +54,16 @@ Feedback is appreciated: please hit me up at @sterlingely on Twitter/X with any 
 
 ---
 
-## Drafting notes (not part of the listing — for Sterling/Claude)
+## Notes (not part of the listing — for Sterling/Claude)
 
+- **Template:** new listings and future update drafts start from the live Radium 2 listing on repebble (https://apps.repebble.com/radium-2_69a6531826cc4f0009c65926): tagline, description, features, platforms, credits, feedback line. It is the best listing so far, not a perfect one. The repo copy at `SterlingEly/Radium2` STORE_LISTING.md mirrors it.
+- **Status of this file:** unpublished, so no "DRAFT" label (Sterling, 2026-10-24). After publication this file holds update drafts only.
+- **Pre-release status:** internal version v3.70. v3.65–v3.70 have not been compiled against the real SDK or tested on a device; feature claims come from `README.md` and `PROJECT_CONTEXT.md`, so re-check them against the build before submitting. Public version number, screenshots and banner are still to do.
 - **Framing (decided 2026-10-24):** TallBoy is more original work than Radium 2 or Bar Graph 2. It is not a rebuild of an older face, so there is no "rebuilt from" timeline. Credits read: design by Sterling, implementation by Sterling & Claude.
-- **Monogram relationship:** Monogram is shelved because TallBoy on round covers about 90% of what Monogram was meant to be. The public listing need not mention Monogram.
+- **Monogram relationship:** Monogram is **deferred** (superseded by TallBoy on round, which covers about 90% of what Monogram was meant to be). Revival only if bounds can someday be pushed dynamically to fit the circle; then branch Monogram off TallBoy. The public listing need not mention Monogram.
 - **Version label:** `appinfo.json` has `versionLabel` 1.0; internal builds are v3.xx. Collapse the internal history into one first-release note.
 - **UUID:** `b5c2d3e4-f6a7-4890-bcde-f12345678901` in `appinfo.json`. Confirm it is a real, unique UUID before submitting.
 - **Hardware claims:** heart rate is only on emery and diorite (HR model); say "on supported models", never list platforms in store copy.
-- **Attribution TODO:** the CAMS/Open-Meteo acknowledgement must be in the shipped store copy and README (see PROJECT_CONTEXT, Source of Truth).
+- **Attribution:** the CAMS/Open-Meteo acknowledgement is already in the credits above; keep it in the shipped store copy and README (see PROJECT_CONTEXT, Source of Truth).
 - **Not yet verified on device:** v3.65–v3.70 (round spacing, stacked/wide on round, Quick Look). The "all three layouts on round" claim depends on that device test.
-- **Plugins (preview, announced 2026-10-23):** TallBoy and Radium 2 fetch weather in PebbleKit JS today. Do not move to plugins or publish a plugin-using build until the API stabilizes.
-- Modeled on the Radium 2 and Bar Graph 2 STORE_LISTING.md structure.
+- **Plugins (preview, announced 2026-10-23):** future-only. TallBoy fetches weather in PebbleKit JS today and keeps doing so; replicating existing capabilities in plugins is not useful because backward compatibility must be maintained. Consider plugins only for future faces or upgrades that truly gain new opportunities, and never publish a plugin-using build until the API stabilizes.
